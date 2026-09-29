@@ -77,8 +77,8 @@ python3 --version && node --version && opencode --version
 
 # 1. Клон проекта
 mkdir -p ~/projects && cd ~/projects
-git clone https://github.com/sums001/Deepseek-API.git
-cd Deepseek-API
+git clone https://github.com/Tsuev/opencode-deepseek.git
+cd opencode-deepseek
 
 # 2. Виртуальное окружение
 python3 -m venv venv
@@ -113,8 +113,8 @@ curl http://127.0.0.1:8000/v1/models
 python --version; node --version; opencode --version
 
 mkdir $HOME\projects; cd $HOME\projects
-git clone https://github.com/sums001/Deepseek-API.git
-cd Deepseek-API
+git clone https://github.com/Tsuev/opencode-deepseek.git
+cd opencode-deepseek
 
 python -m venv venv
 .\venv\Scripts\Activate.ps1
@@ -145,8 +145,8 @@ python app.py
 ### 1. Клон
 
 ```bash
-git clone https://github.com/sums001/Deepseek-API.git
-cd Deepseek-API
+git clone https://github.com/Tsuev/opencode-deepseek.git
+cd opencode-deepseek
 ```
 
 ### 2. Виртуальное окружение
