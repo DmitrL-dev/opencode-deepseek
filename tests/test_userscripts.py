@@ -8,20 +8,24 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from playwright.sync_api import sync_playwright
-from providers.browser_protocol import glm_answer
+from providers.browser_protocol import glm_answer, grok_answer
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
                "path":"/c/fixture", "lease":"fixture-lease", "submitted":False, "expires_in":180}
         if navigation:
             job["path"] = None
         body = ('data: ' + json.dumps({"type":"chat:completion","data":{"phase":"answer","content":"FIXTURE_OK","done":True}}) + '\n\n').encode()
+        if grok_editor:
+            job["provider"] = "grok"
+            completion_path = "/rest/app-chat/conversations/new"
+            body = json.dumps({"result":{"response":{"modelResponse":{"message":"FIXTURE_OK","partial":False}}}}).encode()
         results, upstream = [], []
         store = {}
         polls = 0
@@ -62,6 +66,9 @@ class UserscriptFixtureTests(unittest.TestCase):
                         if unrelated:
                             html = html.replace('/* unrelated-request */', "await fetch('/api/chats/new', {method:'POST', body:JSON.stringify({message:editor.value})});")
                         html = html.replace("/api/chat/completions", completion_path)
+                        if grok_editor:
+                            html = html.replace('<textarea id="chat-input"></textarea>', '<div id="chat-input" contenteditable="true" aria-label="Ask Grok anything"></div>')
+                            html = html.replace("editor.value", "editor.innerText")
                         if abandon_first:
                             html = html.replace('/* unrelated-request */', "if (!window.fixtureSent) {window.fixtureSent=1;editor.value='';return;}")
                         if request_object:
@@ -123,7 +130,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                 if observer:
                     context.add_init_script((ROOT/"browser/opencode-observer.user.js").read_text())
                 page = context.new_page()
-                page.goto("https://chat.z.ai/c/fixture")
+                page.goto("https://grok.com/c/fixture" if grok_editor else "https://chat.z.ai/c/fixture")
                 if draft:
                     page.locator("#chat-input").fill(draft)
                 controller = (ROOT/"browser/opencode-controller.user.js").read_text().replace("__BRIDGE_TOKEN__","x"*43,1)
@@ -131,7 +138,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                 page.wait_for_function("window.fixtureRoots.length > 0 && window.fixtureRoots[0].querySelector('button')")
                 page.evaluate("window.fixtureRoots[0].querySelector('button').click()")
                 # A binding resolves only once the complete result has arrived.
-                page.wait_for_function("document.querySelector('div').style.position === 'fixed'")
+                page.wait_for_function("window.fixtureRoots[0].host.style.position === 'fixed'")
                 if navigation:
                     page.wait_for_timeout(1700)
                     self.assertEqual(len(navigation_requests),1)
@@ -148,7 +155,8 @@ class UserscriptFixtureTests(unittest.TestCase):
                     page.wait_for_timeout(50)
                 self.assertEqual(len(results),1)
                 self.assertTrue(page.evaluate("window.fixtureEventTypes.every(value => value === 'string')"))
-                return results[0], upstream, page.locator("#chat-input").input_value(), prompt
+                value = page.locator("#chat-input").text_content() if grok_editor else page.locator("#chat-input").input_value()
+                return results[0], upstream, value, prompt
             finally:
                 for held_route in navigation_requests:
                     try:
@@ -218,3 +226,15 @@ class UserscriptFixtureTests(unittest.TestCase):
         self.assertEqual(result['id'],'fixture-job-2')
         self.assertEqual(len(requests),1)
         self.assertEqual(json.loads(requests[0])['message'],prompt + '\nSECOND_REQUEST')
+
+    def test_grok_contenteditable_uses_site_handler_and_observes_one_response(self):
+        result, requests, _, prompt = self.fixture(grok_editor=True)
+        self.assertEqual(len(requests),1)
+        self.assertEqual(json.loads(requests[0])["message"],prompt)
+        self.assertEqual(grok_answer(base64.b64decode(result["result"]["body"])),"FIXTURE_OK")
+
+    def test_grok_contenteditable_preserves_an_unsent_draft(self):
+        result, requests, value, _ = self.fixture(grok_editor=True, draft="owned draft")
+        self.assertEqual(requests,[])
+        self.assertEqual(value,"owned draft")
+        self.assertIn("error",result["result"])

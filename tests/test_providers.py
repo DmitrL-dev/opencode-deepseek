@@ -41,7 +41,7 @@ class ProviderTests(unittest.TestCase):
     def test_conversation_tokens_are_scoped_and_paths_cannot_escape(self):
         for provider, reference in (("gemini", UUID), ("grok", "/c/" + UUID),
                                     ("glm", "/c/" + UUID), ("mistral", "/chat/" + UUID),
-                                    ("kimi", "/chat/" + UUID)):
+                                    ("kimi", "/chat/" + UUID), ("mistral", "/work/" + UUID)):
             token = encode(provider, "default", reference)
             self.assertEqual(decode(token, provider), ("default", reference))
             for other in {"gemini", "grok", "glm", "mistral", "kimi"} - {provider}:

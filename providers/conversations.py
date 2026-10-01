@@ -9,7 +9,7 @@ PROVIDERS = frozenset(("gemini", "grok", "mistral", "kimi", "glm"))
 _MODEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
 _PATHS = {
     "grok": re.compile(r"/c/[a-zA-Z0-9_-]{1,128}\Z"),
-    "mistral": re.compile(r"/chat/[a-zA-Z0-9_-]{1,128}\Z"),
+    "mistral": re.compile(r"/(?:chat|work)/[a-zA-Z0-9_-]{1,128}\Z"),
     "kimi": re.compile(r"/chat/[a-zA-Z0-9_-]{1,128}\Z"),
     "glm": re.compile(r"/c/[a-zA-Z0-9_-]{1,128}\Z"),
 }

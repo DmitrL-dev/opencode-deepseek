@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.1.4
+// @version      0.1.5
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
 // @match        https://chat.mistral.ai/*
 // @match        https://www.kimi.com/*
+// @match        https://www.kimi.ai/*
 // @inject-into  page
 // @run-at       document-start
 // @weight       999
@@ -24,7 +25,7 @@
       || path === "/api/v2/chat/completions";
     if (location.hostname === "grok.com") return path === "/rest/app-chat/conversations/new"
       || /^\/rest\/app-chat\/conversations\/[\w-]+\/responses$/.test(path);
-    if (location.hostname === "www.kimi.com") return path === "/apiv2/kimi.gateway.chat.v1.ChatService/Chat";
+    if (["www.kimi.com", "www.kimi.ai"].includes(location.hostname)) return path === "/apiv2/kimi.gateway.chat.v1.ChatService/Chat";
     return location.hostname === "chat.mistral.ai";
   };
   let active = null;

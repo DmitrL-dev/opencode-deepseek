@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.4
+// @version      0.1.5
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
 // @match        https://chat.mistral.ai/*
 // @match        https://www.kimi.com/*
+// @match        https://www.kimi.ai/*
 // @inject-into  content
 // @run-at       document-end
 // @noframes
@@ -21,9 +22,10 @@
   const BASE = "http://127.0.0.1:8000";
   const sites = {
     "chat.z.ai": { provider: "glm", home: "/", input: "#chat-input", path: /^\/c\/[\w-]+$/ },
-    "grok.com": { provider: "grok", home: "/", input: "textarea", path: /^\/c\/[\w-]+$/ },
-    "chat.mistral.ai": { provider: "mistral", home: "/chat", input: ".ProseMirror[contenteditable=true]", path: /^\/chat\/[\w-]+$/ },
+    "grok.com": { provider: "grok", home: "/", input: 'textarea[aria-label="Ask Grok anything"], [contenteditable=true][aria-label="Ask Grok anything"]', path: /^\/c\/[\w-]+$/ },
+    "chat.mistral.ai": { provider: "mistral", home: "/work", input: ".ProseMirror[contenteditable=true]", path: /^\/(?:chat|work)\/[\w-]+$/ },
     "www.kimi.com": { provider: "kimi", home: "/", input: ".chat-input-editor[contenteditable=true]", path: /^\/chat\/[\w-]+$/ },
+    "www.kimi.ai": { provider: "kimi", home: "/", input: ".chat-input-editor[contenteditable=true]", path: /^\/chat\/[\w-]+$/ },
   };
   const site = sites[location.hostname];
   if (!site || window.top !== window) return;
