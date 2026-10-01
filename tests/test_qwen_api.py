@@ -15,10 +15,19 @@ from chat_protocol import Reply
 from server import api
 from server.config import QWEN_MODEL_MAP
 from server.schemas import ChatCompletionRequest, ChatMessage
-from tests.test_qwen import CHAT, MESSAGE
+from qwen.client import QwenClient
+from tests.test_qwen import CHAT, MESSAGE, answer, events, session
 from tests.test_tools import block
 
 CID = f"qwen:qwen3.8-max:{CHAT}:{MESSAGE}"
+
+
+def qwen_with_sse(lines):
+    def handler(request):
+        if request.url.path == "/api/v2/chats/new":
+            return httpx.Response(200, json={"success": True, "data": {"id": CHAT}})
+        return httpx.Response(200, text="\n".join(lines), headers={"content-type": "text/event-stream"})
+    return QwenClient(session(), transport=httpx.MockTransport(handler))
 
 
 class QwenApiTests(unittest.IsolatedAsyncioTestCase):
@@ -81,6 +90,54 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(qwen.call_count, 2)
         self.assertEqual(qwen.call_args.kwargs, {"rejected_client": old})
         ds.assert_not_called()
+
+    async def test_named_sse_auth_errors_refresh_in_both_response_modes(self):
+        payloads = [
+            {"error": {"code": "invalid_token", "message": "Access rejected"}},
+            {"error": {"code": 401, "message": "Access rejected"}},
+            {"error": {"code": "403", "message": "Access rejected"}},
+            {"code": "invalid_token", "message": "Access rejected"},
+            {"success": False, "data": {"code": 401, "message": "Access rejected"}},
+        ]
+        for payload in payloads:
+            for streamed in (False, True):
+                with self.subTest(payload=payload, stream=streamed):
+                    old = qwen_with_sse(["event: error", "data: " + json.dumps(payload), ""])
+                    new = qwen_with_sse(events(answer("refreshed", status="finished")))
+                    try:
+                        with patch.object(api, "get_qwen_client", side_effect=[old, new]) as qwen, patch.object(api, "get_client") as ds, contextlib.redirect_stdout(io.StringIO()):
+                            response = await self.http.post("/v1/chat/completions", json={**self.body, "stream": streamed})
+                        self.assertEqual(response.status_code, 200)
+                        if streamed:
+                            chunks = [json.loads(line[6:]) for line in response.text.splitlines()
+                                      if line.startswith("data: ") and line != "data: [DONE]"]
+                            self.assertFalse(any("error" in chunk for chunk in chunks), chunks)
+                            text = "".join(chunk["choices"][0]["delta"].get("content") or "" for chunk in chunks)
+                            self.assertEqual(chunks[-1]["conversation_id"], CID)
+                        else:
+                            body = response.json()
+                            self.assertNotIn("error", body)
+                            text = body["choices"][0]["message"]["content"]
+                            self.assertEqual(body["conversation_id"], CID)
+                        self.assertEqual(text, "refreshed")
+                        self.assertEqual(qwen.call_count, 2)
+                        self.assertEqual(qwen.call_args.kwargs, {"rejected_client": old})
+                        ds.assert_not_called()
+                    finally:
+                        old.close()
+                        new.close()
+
+    async def test_named_sse_non_auth_error_does_not_refresh(self):
+        payload = {"error": {"code": "quota_exceeded", "message": "Capacity exceeded"}}
+        old = qwen_with_sse(["event: error", "data: " + json.dumps(payload), ""])
+        try:
+            with patch.object(api, "get_qwen_client", return_value=old) as qwen:
+                response = await self.http.post("/v1/chat/completions", json=self.body)
+            self.assertEqual(response.status_code, 500)
+            self.assertIn("quota_exceeded", response.json()["error"]["message"])
+            self.assertEqual(qwen.call_count, 1)
+        finally:
+            old.close()
 
     async def test_waiting_qwen_request_does_not_block_deepseek(self):
         started, release = threading.Event(), threading.Event()

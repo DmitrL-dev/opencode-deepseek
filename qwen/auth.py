@@ -35,7 +35,7 @@ class Session(BrowserSession):
 
     @property
     def usable(self) -> bool:
-        return (isinstance(self.token, str) and bool(self.token)
+        return (isinstance(self.token, str) and bool(self.token.strip())
                 and isinstance(self.expires_at, (int, float)) and math.isfinite(self.expires_at)
                 and self.expires_at > time.time() + 60)
 
@@ -51,11 +51,11 @@ _READ_SESSION_JS = """() => {
     if (location.origin !== 'https://chat.qwen.ai') return null;
     try {
         const state = JSON.parse(localStorage.getItem('qwen_access_token_state') || 'null');
-        if (state && state.version === 1 && typeof state.token === 'string')
+        if (state && state.version === 1 && typeof state.token === 'string' && state.token.trim())
             return {token: state.token, expires_at: state.expiresAt / 1000};
         const token = localStorage.getItem('token');
         const expires = Number(localStorage.getItem('at_expire_time'));
-        return token && expires > 0 ? {token, expires_at: expires / 1000} : null;
+        return token && token.trim() && expires > 0 ? {token, expires_at: expires / 1000} : null;
     } catch (_) { return null; }
 }"""
 
@@ -66,7 +66,7 @@ def _capture(context, page) -> Optional[Session]:
         return None
     try:
         data = page.evaluate(_READ_SESSION_JS)
-        if not data or not isinstance(data.get("token"), str):
+        if not isinstance(data, dict) or not isinstance(data.get("token"), str) or not data["token"].strip():
             return None
         expires = data.get("expires_at")
         if not isinstance(expires, (int, float)) or not math.isfinite(expires) or expires <= time.time() + 60:
@@ -123,7 +123,7 @@ def login(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DEFAULT_
           channel: Optional[str] = "chrome") -> Session:
     with _PROFILE_LOCK:
         session = _capture_profile(profile_dir, False, channel, 1800)
-        if session is None:
+        if session is None or not session.usable:
             raise LoginRequired("Qwen Chat sign-in timed out without a valid session.")
         session.save(session_file)
         return session
@@ -143,7 +143,7 @@ def get_session(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DE
                 session = _capture_profile(profile_dir, True, browser_channel, 30)
             except (PlaywrightError, OSError, RuntimeError):
                 continue
-            if session:
+            if session and session.usable:
                 session.save(session_file)
                 return session
         if allow_interactive:

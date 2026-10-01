@@ -35,6 +35,7 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 import anyio
 import httpx
@@ -84,6 +85,13 @@ _qwen_client: QwenClient | None = None
 _qwen_client_lock = threading.Lock()
 
 _MISSING = object()
+_worker_cancellation = ContextVar("worker_cancellation", default=None)
+
+
+def _check_cancelled():
+    signal = _worker_cancellation.get()
+    if signal is not None and signal.is_set():
+        raise asyncio.CancelledError()
 
 # Substrings that mark an upstream rejection as an auth/session problem (worth a
 # session refresh + one retry). Deliberately broad: we only retry once, so a
@@ -199,10 +207,21 @@ def _request_queue(req):
 
 async def _run_worker(function, *args):
     """Cancellation waits for sync work rather than abandoning a live request."""
-    worker = asyncio.create_task(run_in_threadpool(function, *args))
+    signal = threading.Event()
+
+    def run():
+        token = _worker_cancellation.set(signal)
+        try:
+            _check_cancelled()
+            return function(*args)
+        finally:
+            _worker_cancellation.reset(token)
+
+    worker = asyncio.create_task(run_in_threadpool(run))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
+        signal.set()
         # Also shield against Starlette's AnyIO disconnect cancellation scope.
         with anyio.CancelScope(shield=True):
             while not worker.done():
@@ -230,14 +249,18 @@ async def _run_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_ty
 
 
 def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
+    _check_cancelled()
     client = _request_client(req)
     try:
+        _check_cancelled()
         return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
     except Exception as e:
+        _check_cancelled()
         if not _is_auth_error(e):
             raise
         print(f"[retry] {model_provider(req.model)} rejected the session ({type(e).__name__}); refreshing...", flush=True)
         client = _request_client(req, True, rejected_client=client)
+        _check_cancelled()
         return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
 
 
@@ -283,6 +306,7 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     reply = _chat_with_retry(prompt, req, model_type)
 
     for attempt in range(_MAX_CONTINUATIONS + 1):
+        _check_cancelled()
         if not looks_truncated(reply.text, names):
             try:
                 content, tool_calls = parse_tool_calls(reply.text, allowed_names=names)
@@ -375,12 +399,14 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
     for attempt in range(2):
         iterator = None
         try:
+            _check_cancelled()
             stream = _open_stream(client, prompt, req, model_type)
             iterator = iter(stream)
             first = next(iterator, _MISSING)
         except Exception as exc:
             if iterator is not None and hasattr(iterator, "close"):
                 iterator.close()
+            _check_cancelled()
             if attempt == 0 and _is_auth_error(exc):
                 try:
                     client = _request_client(req, True, rejected_client=client)
@@ -556,7 +582,7 @@ async def chat_completions(req: ChatCompletionRequest):
     # Plain chat: real incremental streaming, or a buffered retryable call.
     if req.stream:
         try:
-            client = await run_in_threadpool(_request_client, req)
+            client = await _run_queued(_request_client, req, gate=_request_queue(req))
         except LoginRequired as e:
             return _error(str(e), status=503, err_type="login_required")
         except Exception as e:

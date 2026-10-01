@@ -22,14 +22,24 @@ class QwenStreamError(RuntimeError):
     """A failed, unsupported or prematurely disconnected Qwen response."""
 
 
+def _upstream_error(detail):
+    if isinstance(detail, dict):
+        code = detail.get("code", "unknown_error")
+        message = detail.get("details") or detail.get("message") or "Request rejected"
+    else:
+        code, message = "unknown_error", str(detail) if detail else "Request rejected"
+    # The server recognises auth failures by their message, including web API
+    # errors delivered inside HTTP 200 SSE responses rather than HTTP 401/403.
+    kind = "authorization error" if code in (401, 403, "401", "403") else "error"
+    return QwenStreamError(f"Qwen {kind} ({code}): {message}")
+
+
 def _business(data):
     if not isinstance(data, dict) or data.get("success") is not True:
         detail = data.get("data", {}) if isinstance(data, dict) else {}
         if not isinstance(detail, dict):
             detail = {}
-        code = detail.get("code", "unknown_error")
-        message = detail.get("details") or detail.get("message") or "Request rejected"
-        raise QwenStreamError(f"Qwen error ({code}): {message}")
+        raise _upstream_error(detail)
     return data.get("data")
 
 
@@ -45,6 +55,30 @@ def _decode_cid(value: str):
     return parts[1], parts[2], parts[3]
 
 
+def _response_id(obj):
+    """Distinguish an absent ID from an explicitly malformed routing key."""
+    if "response_id" not in obj:
+        return None
+    value = obj["response_id"]
+    if not isinstance(value, str):
+        raise QwenStreamError("Invalid Qwen response_id")
+    try:
+        uuid.UUID(value)
+    except ValueError as exc:
+        raise QwenStreamError("Invalid Qwen response_id") from exc
+    return value
+
+
+def _validate_choices(choices):
+    if not isinstance(choices, list):
+        raise QwenStreamError("Invalid Qwen choices")
+    for choice in choices:
+        if not isinstance(choice, dict):
+            raise QwenStreamError("Invalid Qwen choice")
+        if not isinstance(choice.get("delta", {}), dict):
+            raise QwenStreamError("Invalid Qwen delta")
+
+
 def _parse_sse(lines, meta: dict) -> Iterator[str]:
     terminal = False
     primary_id = None
@@ -52,7 +86,15 @@ def _parse_sse(lines, meta: dict) -> Iterator[str]:
     known_ids, ignored_ids = set(), set()
     for event, payload in sse_events(lines):
         if event == "error":
-            raise QwenStreamError("Qwen emitted an error event")
+            try:
+                failure = json.loads(payload)
+            except json.JSONDecodeError as exc:
+                raise QwenStreamError("Qwen emitted an error event") from exc
+            if isinstance(failure, dict):
+                if failure.get("success") is False:
+                    _business(failure)
+                failure = failure.get("error", failure)
+            raise _upstream_error(failure)
         if payload == "[DONE]":
             terminal = True
             meta.setdefault("finish_reason", "stop")
@@ -68,27 +110,50 @@ def _parse_sse(lines, meta: dict) -> Iterator[str]:
         if obj.get("success") is False:
             _business(obj)
         if obj.get("error"):
-            detail = obj["error"]
-            message = detail.get("message", "Request failed") if isinstance(detail, dict) else str(detail)
-            raise QwenStreamError(f"Qwen stream error: {message}")
-        if "response.stopped" in obj:
-            raise QwenStreamError("Qwen response was stopped before completion")
+            raise _upstream_error(obj["error"])
+
+        # Validate the whole frame before changing ownership or discarding a
+        # secondary candidate. Malformed routing keys must not inherit an ID.
+        response_id = _response_id(obj)
         created = obj.get("response.created")
-        if isinstance(created, dict):
+        created_id = None
+        if "response.created" in obj:
+            if not isinstance(created, dict):
+                raise QwenStreamError("Invalid Qwen response.created event")
+            created_id = _response_id(created)
+            if created_id is None:
+                raise QwenStreamError("Qwen response.created has no response_id")
+            if response_id is not None and response_id != created_id:
+                raise QwenStreamError("Conflicting Qwen response_id values")
             if created.get("chat_id") not in (None, meta.get("chat_id")):
                 raise QwenStreamError("Qwen returned a different chat_id")
-            if isinstance(created.get("response_id"), str):
-                active_id = created["response_id"]
-                known_ids.add(active_id)
-                if created.get("response_index") not in (None, 0, "0"):
-                    ignored_ids.add(active_id)
-                elif primary_id is None:
-                    primary_id = active_id
-        response_id = obj.get("response_id")
-        if isinstance(response_id, str):
+        choices = obj.get("choices", [])
+        _validate_choices(choices)
+        if "response.stopped" in obj:
+            stopped = obj["response.stopped"]
+            if not isinstance(stopped, dict):
+                raise QwenStreamError("Invalid Qwen response.stopped event")
+            stopped_id = _response_id(stopped)
+            if stopped_id is not None and (
+                (response_id is not None and stopped_id != response_id)
+                or (created_id is not None and stopped_id != created_id)
+            ):
+                raise QwenStreamError("Conflicting Qwen response_id values")
+            stopped_id = stopped_id or response_id
+            if stopped_id in ignored_ids and stopped_id != primary_id:
+                continue
+            raise QwenStreamError("Qwen response was stopped before completion")
+        if created_id is not None:
+            active_id = created_id
+            known_ids.add(active_id)
+            if created.get("response_index") not in (None, 0, "0"):
+                ignored_ids.add(active_id)
+            elif primary_id is None:
+                primary_id = active_id
+        if response_id is not None:
             active_id = response_id
             known_ids.add(active_id)
-        elif obj.get("choices") and len(known_ids) > 1:
+        elif created_id is None and choices and len(known_ids) > 1:
             raise QwenStreamError("Ambiguous Qwen response without response_id")
         # The web service can stream parallel candidates, all with choice index 0.
         # Only candidate 0 contributes text, completion status and the resume id.
@@ -100,15 +165,10 @@ def _parse_sse(lines, meta: dict) -> Iterator[str]:
             continue
         if primary_id is not None:
             meta["message_id"] = primary_id
-        choices = obj.get("choices") or []
-        if not isinstance(choices, list):
-            raise QwenStreamError("Invalid Qwen choices")
         for choice in choices:
-            if not isinstance(choice, dict) or choice.get("index", 0) != 0:
+            if choice.get("index", 0) != 0:
                 continue
-            delta = choice.get("delta") or {}
-            if not isinstance(delta, dict):
-                raise QwenStreamError("Invalid Qwen delta")
+            delta = choice.get("delta", {})
             phase = delta.get("phase")
             if phase in (None, "answer", "final"):
                 content = delta.get("content")

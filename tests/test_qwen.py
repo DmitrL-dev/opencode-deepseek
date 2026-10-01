@@ -8,11 +8,12 @@ from unittest.mock import Mock, patch
 import httpx
 
 from deepseek.auth import Session as DeepSeekSession
-from qwen.auth import LoginRequired, Session, _capture, get_session
+from qwen.auth import LoginRequired, Session, _capture, get_session, login
 from qwen.client import QwenClient, QwenStreamError, _decode_cid, _parse_sse
 
 CHAT = "00000000-0000-4000-8000-000000000001"
 MESSAGE = "00000000-0000-4000-8000-000000000002"
+SECONDARY = "00000000-0000-4000-8000-000000000003"
 
 
 def session():
@@ -61,6 +62,42 @@ class QwenSessionTests(unittest.TestCase):
             page.evaluate.return_value = {"token": "fake", "expires_at": expires}
             self.assertIsNone(_capture(Mock(), page))
 
+    def test_capture_rejects_empty_and_blank_tokens_before_reading_cookies(self):
+        for token in ("", " \t\n", "\u2003"):
+            with self.subTest(token=repr(token)):
+                page, context = Mock(url="https://chat.qwen.ai/"), Mock()
+                page.evaluate.side_effect = [{"token": token, "expires_at": time.time() + 900}, "test-agent"]
+                context.cookies.return_value = []
+                self.assertIsNone(_capture(context, page))
+                context.cookies.assert_not_called()
+
+    def test_blank_cached_token_is_not_usable_and_requires_refresh(self):
+        cached, fresh = session(), session()
+        cached.token = " \t\n"
+        self.assertFalse(cached.usable)
+        with patch.object(Session, "load", return_value=cached), patch("qwen.auth._capture_profile", return_value=fresh) as capture, patch.object(Session, "save"):
+            self.assertIs(get_session(allow_interactive=False), fresh)
+        capture.assert_called_once()
+
+    def test_unusable_capture_is_not_saved_and_does_not_block_fallback(self):
+        for token in ("", " \t\n"):
+            with self.subTest(token=repr(token)):
+                invalid, fresh = session(), session()
+                invalid.token = token
+                with patch.object(Session, "load", return_value=None), patch("qwen.auth._capture_profile", side_effect=[invalid, fresh]) as capture, patch.object(Session, "save", autospec=True) as save:
+                    result = get_session(allow_interactive=False, channel="preferred", fallback_channel="fallback")
+                self.assertIs(result, fresh)
+                self.assertEqual([call.args[2] for call in capture.call_args_list], ["preferred", "fallback"])
+                save.assert_called_once_with(fresh, unittest.mock.ANY)
+
+    def test_login_refuses_an_unusable_capture(self):
+        invalid = session()
+        invalid.token = " \t"
+        with patch("qwen.auth._capture_profile", return_value=invalid), patch.object(Session, "save") as save:
+            with self.assertRaises(LoginRequired):
+                login()
+        save.assert_not_called()
+
     def test_session_storage_and_expiry(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "qwen" / "session.json"
@@ -90,6 +127,105 @@ class QwenSessionTests(unittest.TestCase):
 
 
 class QwenStreamTests(unittest.TestCase):
+    def test_explicit_response_ids_are_validated_before_routing_or_text(self):
+        created = {"response.created": {"response_id": MESSAGE, "response_index": "0"}}
+        unowned = {"choices": [{"delta": {"content": "unowned text"}}]}
+        for invalid in (None, False, 42, "", " ", "not-a-uuid", {}, []):
+            for location in ("created", "delta", "stopped"):
+                with self.subTest(response_id=invalid, location=location):
+                    if location == "created":
+                        frame = {"response.created": {"response_id": invalid, "response_index": "1"}}
+                    elif location == "stopped":
+                        frame = {"response.stopped": {"response_id": invalid}}
+                    else:
+                        frame = {"response_id": invalid, **unowned}
+                    iterator = _parse_sse(events(created, frame, unowned), {})
+                    with self.assertRaisesRegex(QwenStreamError, "response_id"):
+                        next(iterator)
+
+    def test_created_response_requires_an_unambiguous_id(self):
+        invalid_frames = [
+            {"response.created": {"response_index": "1"}},
+            {"response.created": None},
+            {"response.created": {"response_id": MESSAGE}, "response_id": SECONDARY},
+        ]
+        for frame in invalid_frames:
+            with self.subTest(frame=frame), self.assertRaises(QwenStreamError):
+                list(_parse_sse(events(frame, answer("must not escape")), {}))
+
+    def test_malformed_choices_and_deltas_never_become_a_successful_prefix(self):
+        invalid_choices = [None, False, 0, "", {}, [None], [42], [False], [[]],
+                           *[[{"delta": value}] for value in (None, False, 0, "", [])],
+                           [{"index": 1, "delta": []}]]
+        for choices in invalid_choices:
+            for response_id in (MESSAGE, SECONDARY):
+                with self.subTest(choices=choices, response_id=response_id):
+                    frames = events(
+                        {"response.created": {"response_id": MESSAGE, "response_index": "0"}},
+                        {"response.created": {"response_id": SECONDARY, "response_index": "1"}},
+                        answer("prefix"), {"response_id": response_id, "choices": choices},
+                    )
+                    with self.assertRaises(QwenStreamError):
+                        list(_parse_sse(frames, {}))
+
+    def test_missing_or_empty_delta_remains_valid_for_a_finish_frame(self):
+        for last in ({"finish_reason": "stop"}, {"delta": {}, "finish_reason": "stop"}):
+            with self.subTest(last=last):
+                meta = {}
+                frames = events(answer("complete"), {"response_id": MESSAGE, "choices": [last]})
+                self.assertEqual("".join(_parse_sse(frames, meta)), "complete")
+                self.assertEqual(meta, {"message_id": MESSAGE, "finish_reason": "stop"})
+
+    def test_secondary_stop_does_not_discard_or_finish_the_primary(self):
+        stops = [
+            {"response.stopped": {"response_id": SECONDARY}},
+            {"response.stopped": {}, "response_id": SECONDARY},
+            {"response.stopped": {"response_id": SECONDARY}, "response_id": SECONDARY},
+        ]
+        for stop in stops:
+            for before_finish in (False, True):
+                with self.subTest(stop=stop, before_finish=before_finish):
+                    frames = [
+                        {"response.created": {"response_id": MESSAGE, "response_index": "0"}},
+                        {"response.created": {"response_id": SECONDARY, "response_index": "1"}},
+                    ]
+                    completion = answer("complete primary", status="finished")
+                    frames.extend([stop, completion] if before_finish else [completion, stop])
+                    meta = {}
+                    self.assertEqual("".join(_parse_sse(events(*frames, done=False), meta)), "complete primary")
+                    self.assertEqual(meta, {"message_id": MESSAGE, "finish_reason": "stop"})
+        with self.assertRaises(QwenStreamError):
+            list(_parse_sse(events(
+                {"response.created": {"response_id": MESSAGE, "response_index": "0"}},
+                {"response.created": {"response_id": SECONDARY, "response_index": "1"}},
+                answer("partial"), stops[0], done=False), {}))
+
+    def test_primary_and_ambiguous_stops_remain_errors_after_primary_finishes(self):
+        unknown = "00000000-0000-4000-8000-000000000004"
+        stops = [
+            {"response.stopped": {"response_id": MESSAGE}},
+            {"response.stopped": {"response_id": unknown}},
+            {"response.stopped": {}},
+            {"response.stopped": None},
+            {"response.stopped": False},
+            {"response.stopped": {"response_id": SECONDARY}, "response_id": MESSAGE},
+            {"response.created": {"response_id": MESSAGE}, "response.stopped": {"response_id": SECONDARY}},
+        ]
+        for stop in stops:
+            with self.subTest(stop=stop), self.assertRaises(QwenStreamError):
+                list(_parse_sse(events(
+                    {"response.created": {"response_id": MESSAGE, "response_index": "0"}},
+                    {"response.created": {"response_id": SECONDARY, "response_index": "1"}},
+                    answer("complete primary", status="finished"), stop), {}))
+
+    def test_named_error_payload_is_preserved_and_never_treated_as_done(self):
+        payload = json.dumps({"error": {"code": "invalid_token", "message": "Access rejected"}})
+        with self.assertRaisesRegex(QwenStreamError, "invalid_token.*Access rejected"):
+            list(_parse_sse(["event: error", "data: " + payload, ""], {}))
+        for payload in ("", "[DONE]", "{broken", "{}"):
+            with self.subTest(payload=payload), self.assertRaises(QwenStreamError):
+                list(_parse_sse(["event: error", "data: " + payload, ""], {}))
+
     def test_only_answer_text_is_exposed(self):
         meta = {"chat_id": CHAT}
         stream = events(

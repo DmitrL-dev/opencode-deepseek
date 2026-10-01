@@ -9,12 +9,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 import httpx
+import anyio
 
 from deepseek.auth import LoginRequired
 from deepseek.client import Reply
 from server import api
 from server.schemas import ChatCompletionRequest, ChatMessage
-from tests.test_stream import mock_client, snapshot
+from tests.test_stream import event, mock_client, snapshot
 from tests.test_tools import block
 
 TOOLS = [{"type":"function","function":{"name":name,"parameters":{"type":"object","properties":{}}}}
@@ -86,6 +87,14 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                           {"tools":[TOOLS[0],TOOLS[0]]}]:
                 self.assertEqual((await self.post(**extra)).status_code,400)
             get_client.assert_not_called()
+
+    async def test_invalid_nested_messages_are_rejected_before_upstream(self):
+        with patch.object(api, "get_client") as factory:
+            for message in ({"role": "user", "content": [{"type": "text", "text": 42}]},
+                            {"role": "assistant", "tool_calls": [{"function": "bad-shape"}]}):
+                response = await self.client.post("/v1/chat/completions", json={"messages": [message]})
+                self.assertEqual(response.status_code, 422)
+            factory.assert_not_called()
 
     async def test_quoted_examples_stay_visible_and_have_no_actions(self):
         fake = Mock()
@@ -194,6 +203,20 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         finally:
             fake.close()
 
+    async def test_different_responses_cannot_be_spliced_into_a_tool_call(self):
+        prefix = '```tool_calls\n[{"name":"write","arguments":{"filePath":"offline.txt","content":"'
+        suffix = 'synthetic content"}}]\n```'
+        second = event({"v": {"response": {"message_id": 4, "fragments": [{"type": "RESPONSE", "content": "X" * len(prefix) + suffix}], "status": "FINISHED"}}})
+        fake = mock_client(snapshot(prefix) + second)
+        try:
+            with patch.object(api, "get_client", return_value=fake):
+                response = await self.post(tools=TOOLS)
+            self.assertEqual(response.status_code, 500)
+            self.assertNotIn("choices", response.json())
+            self.assertIn("message_id", response.json()["error"]["message"])
+        finally:
+            fake.close()
+
     async def test_length_finish_reason_survives_both_response_modes(self):
         fake = mock_client(snapshot("cut","INCOMPLETE"))
         try:
@@ -267,6 +290,75 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(results[0],asyncio.CancelledError)
         self.assertEqual(results[1].text,"answer")
         self.assertEqual(calls,["first","second"])
+
+    async def test_cancelled_tool_request_starts_no_continuation_or_auth_retry(self):
+        for auth_failure in (False, True):
+            with self.subTest(auth_failure=auth_failure):
+                entered, release = threading.Event(), threading.Event()
+                calls = []
+                def chat(prompt, *args):
+                    calls.append(prompt)
+                    if prompt == "first":
+                        entered.set()
+                        release.wait(timeout=2)
+                        if auth_failure:
+                            raise auth_error()
+                        return Reply('```tool_calls\n[{"name":"write","arguments":{', "fake:2", "length")
+                    return Reply("answer", "fake:4")
+                fake = Mock()
+                fake.chat.side_effect = chat
+                req = ChatCompletionRequest(messages=[ChatMessage(role="user", content="audit")], tools=TOOLS)
+                with patch.object(api, "get_client", return_value=fake) as factory:
+                    task = asyncio.create_task(api._run_tool_chat("first", req, "default"))
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                    task.cancel()
+                    await asyncio.sleep(.01)
+                    self.assertTrue(api._request_gate.locked())
+                    release.set()
+                    result = (await asyncio.gather(task, return_exceptions=True))[0]
+                    self.assertIsInstance(result, asyncio.CancelledError)
+                    self.assertEqual(calls, ["first"])
+                    self.assertEqual(factory.call_count, 1)
+                    reply = await api._run_chat_with_retry("second", req, "default")
+                    self.assertEqual(reply.text, "answer")
+                    self.assertEqual(calls, ["first", "second"])
+
+    async def test_stream_initialization_waiters_do_not_exhaust_the_worker_pool(self):
+        release = threading.Event()
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        original_limit = limiter.total_tokens
+        limiter.total_tokens = 2
+        class Client:
+            def stream(self, *args, **kwargs):
+                class Stream(TextStream):
+                    def __iter__(self):
+                        yield "first"
+                        yield "second"
+                return Stream()
+        fake = Client()
+        def refresh():
+            if not release.wait(timeout=2):
+                raise RuntimeError("fixture refresh timed out")
+            return fake
+        req = ChatCompletionRequest(messages=[ChatMessage(role="user", content="audit")], stream=True)
+        generator = api._plain_stream(fake, "audit", req, "default")
+        waiters = []
+        try:
+            await generator.__anext__()
+            self.assertIn("first", await generator.__anext__())
+            with patch.object(api, "get_client", side_effect=refresh):
+                waiters = [asyncio.create_task(api.chat_completions(req)) for _ in range(4)]
+                await asyncio.sleep(.03)
+                frame = await asyncio.wait_for(generator.__anext__(), .5)
+                self.assertIn("second", frame)
+                release.set()
+                await generator.aclose()
+                await asyncio.gather(*waiters)
+        finally:
+            release.set()
+            await generator.aclose()
+            await asyncio.gather(*waiters, return_exceptions=True)
+            limiter.total_tokens = original_limit
 
     async def test_cancelled_stream_waits_for_active_next_before_closing(self):
         entered, release = threading.Event(), threading.Event()
