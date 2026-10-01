@@ -15,13 +15,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
                "path":"/c/fixture", "lease":"fixture-lease"}
         body = ('data: ' + json.dumps({"type":"chat:completion","data":{"phase":"answer","content":"FIXTURE_OK","done":True}}) + '\n\n').encode()
         results, upstream = [], []
         store = {}
+        polls = 0
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             try:
@@ -57,8 +58,14 @@ class UserscriptFixtureTests(unittest.TestCase):
                 context.route("**/*", route)
 
                 def rpc(_, value):
+                    nonlocal polls
                     path = urlsplit(value["url"]).path
                     if path.startswith("/browser/jobs/"):
+                        polls += 1
+                        if idle_recovery and polls == 1:
+                            return {"status":503,"responseText":'{}'}
+                        if idle_recovery:
+                            return {"status":200,"responseText":'{"job":null}'}
                         payload = {"job":None if results else job}
                     elif path == "/browser/result":
                         results.append(json.loads(value["data"]))
@@ -73,14 +80,22 @@ class UserscriptFixtureTests(unittest.TestCase):
                 context.expose_binding("fixtureSet", lambda _, key, value:store.update({key:value}))
                 context.add_init_script('''
                     window.fixtureRoots = [];
+                    window.fixtureEventTypes = [];
+                    for (const channel of ['opencode-local-job-v1','opencode-local-ready-v1','opencode-local-response-v1']) {
+                      document.addEventListener(channel, event => window.fixtureEventTypes.push(typeof event.detail));
+                    }
                     const nativeShadow = HTMLElement.prototype.attachShadow;
                     HTMLElement.prototype.attachShadow = function(options) {
                       const root = nativeShadow.call(this, options);
                       window.fixtureRoots.push(root); return root;
                     };
-                    window.GM = {xmlHttpRequest:window.fixtureRpc,getValue:window.fixtureGet,setValue:window.fixtureSet};
+                    window.GM = {xmlHttpRequest:async value => {
+                      window.fixtureRpcCalls = (window.fixtureRpcCalls || 0) + 1;
+                      return window.fixtureRpc(value);
+                    },getValue:window.fixtureGet,setValue:window.fixtureSet};
                 ''')
-                context.add_init_script((ROOT/"browser/opencode-observer.user.js").read_text())
+                if observer:
+                    context.add_init_script((ROOT/"browser/opencode-observer.user.js").read_text())
                 page = context.new_page()
                 page.goto("https://chat.z.ai/c/fixture")
                 if draft:
@@ -91,10 +106,16 @@ class UserscriptFixtureTests(unittest.TestCase):
                 page.evaluate("window.fixtureRoots[0].querySelector('button').click()")
                 # A binding resolves only once the complete result has arrived.
                 page.wait_for_function("document.querySelector('div').style.position === 'fixed'")
+                if idle_recovery:
+                    page.wait_for_function("window.fixtureRpcCalls >= 2 && window.fixtureRoots[0].querySelector('button').textContent === 'OpenCode: подключено · отключить'")
+                    self.assertGreaterEqual(polls,2)
+                    self.assertEqual(results,[])
+                    return 'connected', upstream, page.locator("#chat-input").input_value(), prompt
                 deadline = __import__("time").monotonic() + 5
                 while not results and __import__("time").monotonic() < deadline:
                     page.wait_for_timeout(50)
                 self.assertEqual(len(results),1)
+                self.assertTrue(page.evaluate("window.fixtureEventTypes.every(value => value === 'string')"))
                 return results[0], upstream, page.locator("#chat-input").input_value(), prompt
             finally:
                 browser.close()
@@ -117,3 +138,13 @@ class UserscriptFixtureTests(unittest.TestCase):
         result, requests, _, _ = self.fixture(unrelated=True)
         self.assertEqual(len(requests),2)
         self.assertEqual(glm_answer(base64.b64decode(result["result"]["body"])),"FIXTURE_OK")
+
+    def test_idle_poll_restores_connected_status_after_temporary_local_failure(self):
+        status, requests, _, _ = self.fixture(idle_recovery=True)
+        self.assertEqual(status,'connected')
+        self.assertEqual(requests,[])
+
+    def test_missing_observer_fails_before_the_prompt_is_sent(self):
+        result, requests, _, _ = self.fixture(observer=False)
+        self.assertEqual(requests,[])
+        self.assertIn('error',result['result'])

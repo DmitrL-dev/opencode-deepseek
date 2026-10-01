@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.1.0
+// @version      0.1.1
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -28,9 +28,13 @@
   };
   let active = null;
   document.addEventListener("opencode-local-job-v1", event => {
-    const value = event.detail;
+    let value;
+    try { value = JSON.parse(event.detail); } catch (_) { return; }
     active = value && typeof value.nonce === "string" && typeof value.prompt === "string"
       ? { nonce: value.nonce, prompt: value.prompt } : null;
+    if (active) document.dispatchEvent(new CustomEvent("opencode-local-ready-v1", {
+      detail: JSON.stringify({ nonce: active.nonce }),
+    }));
   });
 
   async function observe(response, job) {
@@ -60,9 +64,9 @@
     for (let i = 0; i < bytes.length; i += 16384) {
       binary += String.fromCharCode(...bytes.subarray(i, i + 16384));
     }
-    document.dispatchEvent(new CustomEvent(CHANNEL, { detail: {
+    document.dispatchEvent(new CustomEvent(CHANNEL, { detail: JSON.stringify({
       nonce: job.nonce, status: response.status, body: btoa(binary),
-    } }));
+    }) }));
   }
 
   window.fetch = async function (input, init) {
@@ -89,7 +93,7 @@
       // body. Never await the clone's stream or block frontend rendering.
       void observe(response.clone(), job).catch(() => {
         document.dispatchEvent(new CustomEvent(CHANNEL, {
-          detail: { nonce: job.nonce, error: "Completion observation failed" },
+          detail: JSON.stringify({ nonce: job.nonce, error: "Completion observation failed" }),
         }));
       });
     }

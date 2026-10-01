@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.0
+// @version      0.1.1
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -59,7 +59,7 @@
   async function finish(result) {
     const job = pending;
     pending = null;
-    document.dispatchEvent(new CustomEvent("opencode-local-job-v1", { detail: null }));
+    document.dispatchEvent(new CustomEvent("opencode-local-job-v1", { detail: "null" }));
     if (!job) return;
     await rpc("/browser/result", "POST", {
       provider: site.provider, id: job.id, owner, lease: job.lease, result,
@@ -96,7 +96,8 @@
   }
 
   document.addEventListener("opencode-local-response-v1", async event => {
-    const value = event.detail;
+    let value;
+    try { value = JSON.parse(event.detail); } catch (_) { return; }
     if (!pending || value?.nonce !== pending.nonce) return;
     if (value.error) { await finish({ error: "Provider response could not be observed" }).catch(() => {}); return; }
     const job = pending;
@@ -133,8 +134,29 @@
     const submitted = await GM.getValue(activeKey + ":submitted", "");
     if (submitted === job.id) throw new Error("The tab was reloaded during a request");
     pending = { ...job, nonce: crypto.randomUUID(), previousAnswers: answers().length };
+    // Use strings across Safari's isolated/page worlds. Do not send upstream
+    // until the observer confirms that this exact job can be captured.
+    await new Promise((resolve, reject) => {
+      const nonce = pending.nonce;
+      const timeout = setTimeout(() => {
+        document.removeEventListener("opencode-local-ready-v1", ready);
+        reject(new Error("Reload the tab to load the response observer"));
+      }, 1500);
+      function ready(event) {
+        let value;
+        try { value = JSON.parse(event.detail); } catch (_) { return; }
+        if (value?.nonce !== nonce) return;
+        clearTimeout(timeout);
+        document.removeEventListener("opencode-local-ready-v1", ready);
+        resolve();
+      }
+      document.addEventListener("opencode-local-ready-v1", ready);
+      document.dispatchEvent(new CustomEvent("opencode-local-job-v1", {
+        detail: JSON.stringify({ nonce, prompt: job.prompt }),
+      }));
+    });
     await GM.setValue(activeKey + ":submitted", job.id);
-    document.dispatchEvent(new CustomEvent("opencode-local-job-v1", { detail: { nonce: pending.nonce, prompt: job.prompt } }));
+    if (!enabled || pending?.id !== job.id) throw new Error("The tab was disconnected before submission");
     input.focus();
     if (input.isContentEditable) {
       if (!document.execCommand("insertText", false, job.prompt)) throw new Error("Chat editor did not accept the prompt");
@@ -155,6 +177,7 @@
     busy = true;
     try {
       const { job } = await rpc("/browser/jobs/" + site.provider + "?owner=" + encodeURIComponent(owner));
+      if (!job) label();
       if (job) {
         try { await execute(job); }
         catch (_) {
