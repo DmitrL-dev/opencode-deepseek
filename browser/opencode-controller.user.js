@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.1
+// @version      0.1.2
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -126,6 +126,9 @@
     if (location.pathname !== target) {
       // Keep only a tab id and execution flag across navigation. No prompts,
       // response bodies or local pairing key are put in page storage.
+      // The old document remains alive until navigation commits. Stop polling
+      // now so it cannot repeatedly abort a slow navigation to the same route.
+      clearInterval(timer);
       location.assign(location.origin + target);
       return;
     }

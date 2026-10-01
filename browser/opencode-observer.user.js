@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.1.1
+// @version      0.1.2
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -20,7 +20,8 @@
   const LIMIT = 8 * 1024 * 1024;
   const nativeFetch = window.fetch.bind(window);
   const completionPath = path => {
-    if (location.hostname === "chat.z.ai") return path === "/api/chat/completions";
+    if (location.hostname === "chat.z.ai") return path === "/api/chat/completions"
+      || path === "/api/v2/chat/completions";
     if (location.hostname === "grok.com") return path === "/rest/app-chat/conversations/new"
       || /^\/rest\/app-chat\/conversations\/[\w-]+\/responses$/.test(path);
     if (location.hostname === "www.kimi.com") return path === "/apiv2/kimi.gateway.chat.v1.ChatService/Chat";
