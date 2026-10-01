@@ -21,7 +21,7 @@ content context and keeps its local pairing key out of page JavaScript.
    local pairing key. The generic files in `browser/` contain no key.
 2. Install Userscripts and add the two exported `.user.js` files to its scripts
    directory. Grant access only to `chat.z.ai`, `grok.com`, `chat.mistral.ai`, and
-   `www.kimi.com`; the bridge does not need access to Google sign-in pages.
+   `www.kimi.com` (or `www.kimi.ai` for the international site); the bridge does not need access to Google sign-in pages.
    After adding or replacing files, open the Userscripts toolbar popup and wait
    until both script names appear. The extension must rescan externally edited
    files before the next page load, as described in its linked README.

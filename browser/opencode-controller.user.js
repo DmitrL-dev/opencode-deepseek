@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.7
+// @version      0.1.8
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -186,36 +186,61 @@
     if (location.pathname !== target || editor() !== input || draft(input)?.trim()) {
       throw new BridgeFailure("The editor changed before submission");
     }
-    input.focus();
-    if (input.isContentEditable) {
-      if (!document.execCommand("insertText", false, job.prompt)) throw new BridgeFailure("Chat editor did not accept the prompt");
-    } else {
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-      if (!setter) throw new BridgeFailure("Unsupported chat input");
-      setter.call(input, job.prompt);
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    // Invoke the site's own send handler. The observer never constructs an
-    // upstream request or touches the user's account credentials.
-    if (site.provider !== "glm") {
-      // Allow the frontend to commit the insertion before its send handler.
-      // A synthetic Enter can otherwise run before React/Vue state updates.
-      const insertedDraft = draft(input);
-      await new Promise(resolve => setTimeout(resolve, 0));
-      if (!(await rpc("/browser/check", "POST", identity(job))).active
-          || !enabled || pending?.id !== job.id || location.pathname !== target || editor() !== input
-          || draft(input) !== insertedDraft) {
-        throw new BridgeFailure("The tab changed or the browser job was cancelled");
+    const originalDraft = draft(input);
+    let insertedDraft, dispatching = false;
+    try {
+      input.focus();
+      if (input.isContentEditable) {
+        if (!document.execCommand("insertText", false, job.prompt)) throw new BridgeFailure("Chat editor did not accept the prompt");
+      } else {
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+        if (!setter) throw new BridgeFailure("Unsupported chat input");
+        setter.call(input, job.prompt);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      insertedDraft = draft(input);
+      // Invoke the site's own send handler. The observer never constructs an
+      // upstream request or touches the user's account credentials.
+      if (site.provider !== "glm") {
+        // Allow the frontend to commit the insertion before its send handler.
+        await new Promise(resolve => setTimeout(resolve, 0));
+        if (!(await rpc("/browser/check", "POST", identity(job))).active) {
+          throw new BridgeFailure("The browser job was cancelled after insertion");
+        }
+        if (!enabled || pending?.id !== job.id) throw new BridgeFailure("The tab was disconnected after insertion");
+        if (location.pathname !== target) throw new BridgeFailure("The conversation changed after insertion");
+        if (editor() !== input) throw new BridgeFailure("The editor was replaced after insertion");
+        if (draft(input) !== insertedDraft) throw new BridgeFailure("The editor draft changed after insertion");
+      }
+      if (site.provider === "grok") {
+        const form = input.closest('form[data-composer=true]');
+        if (!form) throw new BridgeFailure("The chat submission form is unavailable");
+        dispatching = true;
+        form.requestSubmit();
+      } else {
+        dispatching = true;
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+      }
+      label("OpenCode: запрос выполняется · отключить");
+    } finally {
+      // Remove only our unchanged insertion when no send handler was invoked.
+      // Local cleanup must not depend on a cancelled lease accepting a result.
+      if (!dispatching && insertedDraft !== undefined && input.isConnected
+          && location.pathname === target && editor() === input && draft(input) === insertedDraft) {
+        input.focus();
+        if (input.isContentEditable) {
+          const range = document.createRange();
+          range.selectNodeContents(input);
+          const selection = window.getSelection();
+          selection.removeAllRanges();
+          selection.addRange(range);
+          document.execCommand(originalDraft ? "insertText" : "delete", false, originalDraft || null);
+        } else {
+          Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set.call(input, originalDraft);
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
       }
     }
-    if (site.provider === "grok") {
-      const form = input.closest('form[data-composer=true]');
-      if (!form) throw new BridgeFailure("The chat submission form is unavailable");
-      form.requestSubmit();
-    } else {
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    }
-    label("OpenCode: запрос выполняется · отключить");
   }
 
   async function poll() {
@@ -237,7 +262,7 @@
         catch (error) {
           const reason = error instanceof BridgeFailure ? error.message : "Tab unavailable, reloaded, or contains an unsent draft";
           pending = { ...job };
-          await finish({ error: reason });
+          await finish({ error: reason }).catch(() => {});
           enabled = false;
           await GM.setValue(activeKey, false);
           label("OpenCode: остановлено · подключить");

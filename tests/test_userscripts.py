@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
                "path":"/c/fixture", "lease":"fixture-lease", "submitted":False, "expires_in":180}
@@ -30,6 +30,7 @@ class UserscriptFixtureTests(unittest.TestCase):
         store = {}
         polls = 0
         abandoned = False
+        cancelled = False
         navigation_requests = []
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
@@ -84,7 +85,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                 context.route("**/*", route)
 
                 def rpc(_, value):
-                    nonlocal polls, abandoned
+                    nonlocal polls, abandoned, cancelled
                     path = urlsplit(value["url"]).path
                     if path.startswith("/browser/jobs/"):
                         polls += 1
@@ -92,10 +93,13 @@ class UserscriptFixtureTests(unittest.TestCase):
                             return {"status":503,"responseText":'{}'}
                         if idle_recovery:
                             return {"status":200,"responseText":'{"job":null}'}
-                        current = {**job, "id":"fixture-job-2", "prompt":prompt + '\nSECOND_REQUEST'} if abandoned else job
-                        payload = {"job":None if results else current}
+                        current = {**job, "id":"fixture-job-2", "prompt":prompt + '\nSECOND_REQUEST'} if abandoned or cancelled else job
+                        payload = {"job":None if len(results) >= (2 if recover_cancelled else 1) else current}
                     elif path == "/browser/check":
-                        if abandon_first and not abandoned:
+                        if recover_cancelled and not cancelled:
+                            cancelled = True
+                            payload = {"active":False}
+                        elif abandon_first and not abandoned:
                             abandoned = True
                             payload = {"active":False}
                         else:
@@ -104,6 +108,8 @@ class UserscriptFixtureTests(unittest.TestCase):
                         payload = {"ok":True}
                     elif path == "/browser/result":
                         results.append(json.loads(value["data"]))
+                        if recover_cancelled and len(results) == 1:
+                            return {"status":409,"responseText":'{}'}
                         payload = {"ok":True}
                     else:
                         raise AssertionError("Unexpected local request")
@@ -126,7 +132,13 @@ class UserscriptFixtureTests(unittest.TestCase):
                     };
                     window.GM = {xmlHttpRequest:async value => {
                       window.fixtureRpcCalls = (window.fixtureRpcCalls || 0) + 1;
-                      return window.fixtureRpc(value);
+                      const response = await window.fixtureRpc(value);
+                      if (window.fixtureUserEdit && value.url.endsWith('/browser/check') && response.responseText === '{"active": false}') {
+                        const editor = document.querySelector('#chat-input');
+                        editor.textContent = 'user edited owned fixture';
+                        editor.dispatchEvent(new Event('input', {bubbles:true}));
+                      }
+                      return response;
                     },getValue:window.fixtureGet,setValue:window.fixtureSet};
                 ''')
                 if observer:
@@ -135,6 +147,8 @@ class UserscriptFixtureTests(unittest.TestCase):
                 page.goto("https://grok.com/c/fixture" if grok_editor else "https://chat.z.ai/c/fixture")
                 if draft:
                     page.locator("#chat-input").fill(draft)
+                if user_edit_on_cancel:
+                    page.evaluate("window.fixtureUserEdit = true")
                 controller = (ROOT/"browser/opencode-controller.user.js").read_text().replace("__BRIDGE_TOKEN__","x"*43,1)
                 page.add_script_tag(content=controller)
                 page.wait_for_function("window.fixtureRoots.length > 0 && window.fixtureRoots[0].querySelector('button')")
@@ -156,9 +170,22 @@ class UserscriptFixtureTests(unittest.TestCase):
                 while not results and __import__("time").monotonic() < deadline:
                     page.wait_for_timeout(50)
                 self.assertEqual(len(results),1)
+                if recover_cancelled:
+                    page.wait_for_function("window.fixtureRoots[0].querySelector('button').textContent === 'OpenCode: остановлено · подключить'")
+                    value = page.locator('#chat-input').text_content()
+                    if user_edit_on_cancel:
+                        self.assertEqual(value,'user edited owned fixture')
+                        return results[0], upstream, value, prompt
+                    self.assertEqual(value,'')
+                    page.evaluate("window.fixtureRoots[0].querySelector('button').click()")
+                    page.wait_for_function("window.frontendReceivedResponse === true")
+                    deadline = __import__('time').monotonic() + 5
+                    while len(results) < 2 and __import__('time').monotonic() < deadline:
+                        page.wait_for_timeout(50)
+                    self.assertEqual(len(results),2)
                 self.assertTrue(page.evaluate("window.fixtureEventTypes.every(value => value === 'string')"))
                 value = page.locator("#chat-input").text_content() if grok_editor else page.locator("#chat-input").input_value()
-                return results[0], upstream, value, prompt
+                return results[-1], upstream, value, prompt
             finally:
                 for held_route in navigation_requests:
                     try:
@@ -242,6 +269,20 @@ class UserscriptFixtureTests(unittest.TestCase):
         self.assertIn("error",result["result"])
 
     def test_cancelled_grok_job_cannot_submit_its_form_after_insertion(self):
-        result, requests, _, _ = self.fixture(grok_editor=True, cancel_before_editor=True)
+        result, requests, value, _ = self.fixture(grok_editor=True, cancel_before_editor=True)
         self.assertEqual(requests,[])
+        self.assertEqual(value,'')
         self.assertIn("error",result["result"])
+
+    def test_cancelled_insertion_is_cleaned_despite_409_and_next_job_can_send(self):
+        result, requests, _, prompt = self.fixture(grok_editor=True, recover_cancelled=True)
+        self.assertEqual(result['id'],'fixture-job-2')
+        self.assertEqual(len(requests),1)
+        self.assertEqual(json.loads(requests[0])['message'],prompt + '\nSECOND_REQUEST')
+        self.assertEqual(grok_answer(base64.b64decode(result['result']['body'])),'FIXTURE_OK')
+
+    def test_cancelled_insertion_preserves_user_edit_despite_409(self):
+        result, requests, value, _ = self.fixture(grok_editor=True, recover_cancelled=True, user_edit_on_cancel=True)
+        self.assertEqual(requests,[])
+        self.assertEqual(value,'user edited owned fixture')
+        self.assertIn('error',result['result'])
