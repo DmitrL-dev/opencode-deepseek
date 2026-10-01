@@ -646,6 +646,16 @@ python -m deepseek.auth   # войдите заново
 pip install --upgrade wasmtime
 ```
 
+На macOS Python 3.9 из Xcode может завершаться с `EXC_GUARD` при загрузке
+WASM, без Python traceback. В таком случае создайте новое окружение на
+отдельно установленном Python 3.12 и переустановите зависимости. Сохранённый
+вход в `session/` можно использовать повторно. Проверьте загрузку модуля
+до запуска сервера:
+
+```bash
+python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
+```
+
 **Пустая headless-сессия (macOS, Chrome-профиль)**
 
 По умолчанию фолбэк на `chrome`. Оставьте `REFRESH_BROWSER_CHANNEL_FALLBACK=chrome`
@@ -704,6 +714,7 @@ PORT=8080 python app.py
 
 ```bash
 python -m unittest discover -s tests -t . -v
+python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
 bash -n ds bin/ds-chat
 node --check .opencode/plugin/deepseek-tool-discipline.js
 ```

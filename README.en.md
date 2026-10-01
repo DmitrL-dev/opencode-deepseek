@@ -596,6 +596,16 @@ modification.
 pip install --upgrade wasmtime
 ```
 
+On macOS, Xcode's Python 3.9 can terminate with `EXC_GUARD` while loading
+WASM, without a Python traceback. If this happens, create a new environment
+with a separately installed Python 3.12 and reinstall the dependencies. The
+saved login in `session/` can be reused. Check that the module loads before
+starting the server:
+
+```bash
+python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
+```
+
 **Empty headless session (macOS, Chrome profile)**
 
 The fallback to `chrome` is on by default. Keep
@@ -655,6 +665,7 @@ Checks without a DeepSeek account or browser:
 
 ```bash
 python -m unittest discover -s tests -t . -v
+python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
 bash -n ds bin/ds-chat
 node --check .opencode/plugin/deepseek-tool-discipline.js
 ```
