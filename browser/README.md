@@ -88,3 +88,11 @@ owned browser fixtures, install Playwright Chromium and use
 `RUN_BROWSER_FIXTURES=1 python -m unittest tests.test_userscripts -q`. Those
 fixtures intercept all requests; they do not authenticate or contact providers.
 Passing fixtures are not proof of a successful live Safari/provider integration.
+
+On 2026-10-02, a signed-in Safari account using GLM-5.3-Flash passed a controlled
+new completion, resumed SSE with the same conversation id, and an OpenCode
+`plan` request with a completed native `read` followed by the exact fixture
+contents. This used both 0.1.4 scripts and the matching server protocol. It
+qualifies that account/session and test, not all GLM models or arbitrary tasks.
+Grok, Mistral and Kimi still require live qualification; Kimi tool requests
+remain disabled until completed assistant-message text is bound to the response.
