@@ -14,7 +14,7 @@ class ChatMessage(BaseModel):
     # content is a plain string, or a list of parts (OpenAI vision-style). We only
     # read text parts; non-text parts are ignored.
     content: Union[str, List[dict], None] = None
-    # Tool-calling fields. DeepSeek's web protocol has no tool channel, so these
+    # Tool-calling fields. The web protocols have no OpenAI tool channel, so these
     # are accepted for OpenAI compatibility and emulated via prompt injection
     # (see server.openai_format).
     tool_calls: Optional[List[dict]] = None
@@ -32,12 +32,12 @@ class ChatCompletionRequest(BaseModel):
     # pass these via extra_body: `thinking` (DeepThink), `search` (web).
     thinking: bool = False
     search: bool = False
-    # Function/tool calling (OpenAI format). DeepSeek's web chat has no native
+    # Function/tool calling (OpenAI format). These web chats have no OpenAI
     # tool channel, so we emulate it by injecting the tool specs into the prompt
     # and parsing the model's reply for a tool-call block.
     tools: Optional[List[dict]] = None
     tool_choice: Optional[Union[str, dict]] = None
-    # Accepted for compatibility but not all are forwarded to DeepSeek.
+    # Accepted for compatibility but not all are forwarded to the provider.
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None

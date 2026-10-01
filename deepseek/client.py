@@ -24,10 +24,11 @@ from __future__ import annotations
 import json
 import re
 import threading
-from dataclasses import dataclass
 from typing import Iterator, Optional
 
 import httpx
+
+from chat_protocol import Reply, sse_events as _sse_events
 
 from .auth import Session, get_session
 from .pow import DeepSeekPow
@@ -58,18 +59,6 @@ def _decode_cid(conversation_id: Optional[str]) -> tuple[Optional[str], Optional
     session_id, _, msg = conversation_id.partition(_CID_SEP)
     parent = int(msg) if msg.isdigit() else None
     return (session_id or None), parent
-
-
-@dataclass
-class Reply:
-    """A completed chat reply plus the id to resume the conversation."""
-
-    text: str
-    conversation_id: str
-    finish_reason: str = "stop"
-
-    def __str__(self) -> str:  # so print(reply) shows the text
-        return self.text
 
 
 def _biz(data: dict) -> dict:
@@ -250,22 +239,6 @@ _CONTENT_PATH = re.compile(r"^response/fragments/(-?\d+)/content$")
 
 class DeepSeekStreamError(RuntimeError):
     """An upstream stream failed or ended without a terminal marker."""
-
-
-def _sse_events(lines):
-    event, data = "", []
-    for line in lines:
-        if not line:
-            if data or event:
-                yield event, "\n".join(data)
-            event, data = "", []
-        elif line.startswith("event:"):
-            event = line[6:].strip()
-        elif line.startswith("data:"):
-            value = line[5:]
-            data.append(value[1:] if value.startswith(" ") else value)
-    if data or event:
-        yield event, "\n".join(data)
 
 
 def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:

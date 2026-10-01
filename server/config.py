@@ -13,12 +13,12 @@ RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
 # interactive sign-in (the first request then blocks until you finish logging
 # in)? On by default for local single-user use. Set to "0"/"false" for headless
 # deployments, where it instead returns a 503 telling the caller to run
-# `python -m deepseek.auth`.
+# the provider's auth command (`python -m deepseek.auth` or `python -m qwen.auth`).
 SERVER_INTERACTIVE_LOGIN = os.getenv("SERVER_INTERACTIVE_LOGIN", "1").lower() not in (
     "0", "false", "no", "off",
 )
 
-# Background session refresher: periodically re-captures the token from the
+# DeepSeek background refresher: periodically re-captures the token from the
 # persistent browser profile so a request never hits an expired token. Runs in a
 # daemon thread and never opens a visible window (allow_interactive=False).
 SESSION_REFRESH_ENABLED = os.getenv("SESSION_REFRESH_ENABLED", "1").lower() not in (
@@ -49,6 +49,19 @@ MODEL_MAP = {
     "deepseek-expert": "expert",    # Expert  — the stronger, slower model
 }
 
+# Qwen Chat is opt-in and uses a separate account/profile from DeepSeek.
+QWEN_MODEL_MAP = {
+    "qwen3.8-omni-flash": "qwen3.8-omni-flash",
+    "qwen3.8-max": "qwen3.8-max",
+}
+QWEN_ENABLED = os.getenv("QWEN_ENABLED", "0").lower() not in ("", "0", "false", "no", "off")
+if QWEN_ENABLED:
+    MODEL_MAP.update(QWEN_MODEL_MAP)
+
+
+def model_provider(name: str) -> str:
+    return "qwen" if name in QWEN_MODEL_MAP else "deepseek"
+
 DEFAULT_MODEL = "deepseek-chat"
 
 
@@ -58,7 +71,7 @@ def is_known_model(name: str) -> bool:
 
 
 def resolve_model_type(name: str) -> str:
-    """Translate a public model id to DeepSeek's `model_type` wire value.
+    """Translate a public model id to the provider's wire model value.
 
     Caller must check `is_known_model` first; this raises KeyError otherwise.
     """

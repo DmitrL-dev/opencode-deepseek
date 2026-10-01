@@ -26,7 +26,7 @@ from dataclasses import dataclass, asdict
 from functools import wraps
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 from settings import ROOT
 
@@ -101,6 +101,7 @@ class LoginRequired(RuntimeError):
 class Session:
     """A captured signed-in DeepSeek session."""
 
+    COOKIE_DOMAINS: ClassVar[tuple[str, ...]] = ("deepseek.com", "chat.deepseek.com")
     token: str
     cookies: list[dict]
     user_agent: str
@@ -120,7 +121,7 @@ class Session:
                                 "Run python -m deepseek.auth to capture a new session.")
         jar = CookieJar()
         for cookie in self.cookies:
-            if not _deepseek_cookie(cookie):
+            if cookie.get("domain", "").lower().lstrip(".") not in self.COOKIE_DOMAINS:
                 continue
             domain = cookie["domain"]
             expires = cookie.get("expires", -1)

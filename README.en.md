@@ -6,6 +6,9 @@ A local **OpenAI-compatible bridge** to the free DeepSeek web chat
 (reading/editing files, bash, code search, etc.) — **with no API key and no
 payment**.
 
+The same bridge optionally supports **Qwen Chat**: `Qwen3.8-Omni-Flash`
+and `Qwen3.8-Max`. See [Qwen Chat](#qwen-chat) for setup.
+
 > **Original project:** <https://github.com/sums001/Deepseek-API>
 > This is an unofficial project, not affiliated with DeepSeek. You use your
 > regular DeepSeek account and are responsible for complying with its terms.
@@ -22,6 +25,7 @@ payment**.
 - [Where to send requests: URL and API key](#where-to-send-requests-url-and-api-key)
 - [opencode integration](#opencode-integration)
 - [Switching models, DeepThink and web search](#switching-models-deepthink-and-web-search)
+- [Qwen Chat](#qwen-chat)
 - [Environment variables](#environment-variables)
 - [Limitations and important caveats](#limitations-and-important-caveats)
 - [Maintenance and troubleshooting](#maintenance-and-troubleshooting)
@@ -517,10 +521,79 @@ resp = client.chat.completions.create(
 
 ---
 
+## Qwen Chat
+
+Qwen uses the same `/v1` endpoint through a separate `local-qwen` provider.
+It uses your [chat.qwen.ai](https://chat.qwen.ai/) account and its limits;
+this is neither the official Alibaba Cloud API nor Qwen Code authentication.
+The web service determines model access and quotas. Support is disabled by default.
+
+1. Run `python -m qwen.auth` in the active Python environment and sign in manually
+   in the opened window. If Google rejects the automated browser, use the email-code
+   sign-in option available for your account on the login page.
+2. Add `QWEN_ENABLED=1` to `.env` and restart the server.
+3. Add this provider inside your existing opencode `provider` object, restart
+   opencode, and select a model with `/models`.
+
+```json
+"local-qwen": {
+  "npm": "@ai-sdk/openai-compatible",
+  "name": "Qwen Chat (local bridge)",
+  "options": {
+    "baseURL": "http://127.0.0.1:8000/v1",
+    "apiKey": "unused"
+  },
+  "models": {
+    "qwen3.8-omni-flash": {
+      "name": "Qwen3.8 Omni Flash",
+      "tool_call": true,
+      "reasoning": false,
+      "limit": { "context": 64000, "output": 8192 }
+    },
+    "qwen3.8-max": {
+      "name": "Qwen3.8 Max",
+      "tool_call": true,
+      "reasoning": false,
+      "limit": { "context": 64000, "output": 8192 }
+    }
+  }
+}
+```
+
+These limits are a conservative client budget, not a web-chat quota guarantee.
+The `.opencode/plugin/deepseek-tool-discipline.js` plugin supports both providers;
+update any previously installed copy. Tool calls use the same strict `tool_calls`
+parser. Live replies, conversation continuation, headless session refresh and
+opencode `read` execution have been checked on both models.
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.8-omni-flash","messages":[{"role":"user","content":"Hello"}]}'
+
+opencode run --model local-qwen/qwen3.8-max "Explain this project"
+```
+
+Qwen uses separate private state: `session/qwen/session.json` and
+`session/qwen/profile/`. Before each request, the server checks token expiry
+and captures a fresh token from the saved profile headlessly when necessary.
+An authorization rejection triggers one refresh and retry. If the session cannot
+be recovered, `SERVER_INTERACTIVE_LOGIN=0` returns `503 login_required`:
+run `python -m qwen.auth` and restart the server. `SESSION_REFRESH_INTERVAL`
+controls only DeepSeek's background refresh.
+
+Flash and Max share one Qwen account queue, independent of DeepSeek's queue.
+Qwen's `conversation_id` includes the `qwen:` prefix and original model;
+cross-provider conversations are rejected before accessing account credentials.
+This integration supports text; images, audio and video are not uploaded despite
+the Omni model name. The unofficial web protocol may change.
+
+---
+
 ## Environment variables
 
 The repository's `.env` (a copy of `.env.example`) loads before settings are
-read by `app.py`, `uvicorn`, `chat.py`, or `deepseek.auth`. Existing environment
+read by `app.py`, `uvicorn`, `chat.py`, `deepseek.auth`, or `qwen.auth`. Existing environment
 variables take precedence.
 
 | Variable | Default | Purpose |
@@ -529,8 +602,10 @@ variables take precedence.
 | `PORT` | `8000` | Port |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Requests/min per client IP (`/healthz` not counted) |
 | `DEEPSEEK_PROFILE_DIR` | — | Reuse an existing Chrome profile with an active session |
+| `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
+| `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
 | `SERVER_INTERACTIVE_LOGIN` | `1` | Open a browser window when there is no session; `0` — return `503` (for headless) |
-| `SESSION_REFRESH_ENABLED` | `1` | Background session refresh |
+| `SESSION_REFRESH_ENABLED` | `1` | DeepSeek background session refresh |
 | `SESSION_REFRESH_INTERVAL` | `18000` (5 h) | Refresh interval, sec (less than `SESSION_MAX_AGE` = 6 h) |
 | `REFRESH_BROWSER_CHANNEL` | `chromium-headless-shell` | Playwright channel for headless refresh (less RAM) |
 | `REFRESH_BROWSER_CHANNEL_FALLBACK` | `chrome` | Fallback after a missing token or headless capture error; empty — disable |
@@ -548,7 +623,7 @@ HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 ## Limitations and important caveats
 
 - **Request serialization.** The server runs shared-account requests **one at
-  a time**, including streams, retries, and continuations (`server/api.py`).
+  a time per provider**, including streams, retries, and continuations (`server/api.py`).
   Waiting in the queue does not occupy worker threads. A direct `DeepSeekClient`
   also serializes generations within one instance. Run one server process:
   multiple workers or separate clients do not share a queue.
@@ -652,6 +727,8 @@ Restart opencode — the config is not reloaded on the fly.
 | `app.py` | Entry point — starts the server |
 | `settings.py` | Loads `.env` before settings are read |
 | `deepseek/` | Core: `DeepSeekClient`, login (`auth.py`), HTTP driver (`client.py`), PoW (`pow.py`) |
+| `qwen/` | Optional Qwen Chat: separate login, HTTP API v2 and SSE |
+| `chat_protocol.py` | Shared SSE event boundaries and completed chat reply |
 | `server/` | FastAPI OpenAI-compatible server (`api.py`, `config.py`, `openai_format.py` — tool-call parser, `ratelimit.py`, `schemas.py`) |
 | `.opencode/plugin/` | Tool-discipline plugin for opencode |
 | `examples/` | Runnable examples (direct Python and through the server) |
@@ -679,8 +756,8 @@ GitHub Actions runs these checks on Python 3.9 and 3.12.
 - Everything in `session/` (cookies + bearer token) stays **on your machine**
   and is excluded from git (`.gitignore`). Never commit `session/`.
 - On POSIX, session/chat state files are replaced atomically with `0600`
-  permissions; their directories and browser profile use `0700`. Only DeepSeek
-  cookies are captured, preserving domain, path, expiry, and HTTPS restrictions.
+  permissions; their directories and browser profile use `0700`. Each provider
+  captures only its own cookies, preserving domain, path, expiry, and HTTPS restrictions.
 - Legacy caches containing a cookie dictionary are recaptured from the browser
   profile. If that fails, run `python -m deepseek.auth` and restart the server.
 - Passwords/secrets are not stored in `.env` — login is done manually in the

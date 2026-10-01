@@ -1,4 +1,4 @@
-"""Entry point — run the OpenAI-compatible DeepSeek server.
+"""Entry point — run the OpenAI-compatible DeepSeek/Qwen server.
 
     python app.py            # serves on http://localhost:8000
 

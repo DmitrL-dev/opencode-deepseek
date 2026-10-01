@@ -1,5 +1,5 @@
 """
-OpenAI-compatible FastAPI server for DeepSeek.
+OpenAI-compatible FastAPI server for DeepSeek and optional Qwen Chat.
 
 Point any OpenAI client at http://localhost:8000/v1 :
 
@@ -19,10 +19,10 @@ Requests under /v1 are rate limited per client IP (default 30/min, set via
 RATE_LIMIT_PER_MINUTE); /healthz is exempt.
 
 Sessions expire. To survive that, this module:
-  * rebuilds the shared client once and retries the request if DeepSeek rejects
+  * rebuilds the provider's client once and retries if it rejects
     the token (auth error), and
-  * runs a background refresher that re-captures the token from the persistent
-    browser profile every SESSION_REFRESH_INTERVAL seconds.
+  * refreshes DeepSeek in the background every SESSION_REFRESH_INTERVAL seconds;
+    Qwen's short-lived token is checked and refreshed before each request.
 If a refresh can't recover the session, the endpoint returns a clear 503 instead
 of blocking on an interactive login window.
 """
@@ -43,7 +43,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from deepseek.auth import SESSION_MAX_AGE, LoginRequired, get_session
-from deepseek.client import DeepSeekClient, Reply
+from chat_protocol import Reply
+from deepseek.client import DeepSeekClient
+from qwen.auth import get_session as get_qwen_session
+from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 
 from .config import (
     MODEL_MAP,
@@ -55,6 +58,7 @@ from .config import (
     SESSION_REFRESH_INTERVAL,
     is_known_model,
     resolve_model_type,
+    model_provider,
 )
 from .openai_format import (
     completion_response,
@@ -75,10 +79,13 @@ _client: DeepSeekClient | None = None
 _client_lock = threading.Lock()
 _stop_refresh = threading.Event()
 _request_gate = asyncio.Lock()
+_qwen_request_gate = asyncio.Lock()
+_qwen_client: QwenClient | None = None
+_qwen_client_lock = threading.Lock()
 
 _MISSING = object()
 
-# Substrings that mark a DeepSeek rejection as an auth/session problem (worth a
+# Substrings that mark an upstream rejection as an auth/session problem (worth a
 # session refresh + one retry). Deliberately broad: we only retry once, so a
 # false positive costs a single extra attempt.
 _AUTH_HINTS = (
@@ -162,6 +169,34 @@ def reset_client() -> None:
         _client = None
 
 
+def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
+    """Refresh Qwen before expiry, or once after rejection, off the event loop.
+
+    Retain a replaced pool while any in-flight request still references it,
+    matching get_client()'s ownership rule.
+    """
+    global _qwen_client
+    with _qwen_client_lock:
+        if (_qwen_client is None or not _qwen_client.session.usable
+                or (force_refresh and (rejected_client is None or _qwen_client is rejected_client))):
+            session = get_qwen_session(force=force_refresh, allow_interactive=SERVER_INTERACTIVE_LOGIN,
+                                       channel=REFRESH_BROWSER_CHANNEL,
+                                       fallback_channel=REFRESH_BROWSER_CHANNEL_FALLBACK)
+            _qwen_client = QwenClient(session)
+        return _qwen_client
+
+
+def _request_client(req, force_refresh=False, rejected_client=None):
+    factory = get_qwen_client if model_provider(req.model) == "qwen" else get_client
+    if force_refresh:
+        return factory(True, rejected_client=rejected_client)
+    return factory()
+
+
+def _request_queue(req):
+    return _qwen_request_gate if model_provider(req.model) == "qwen" else _request_gate
+
+
 async def _run_worker(function, *args):
     """Cancellation waits for sync work rather than abandoning a live request."""
     worker = asyncio.create_task(run_in_threadpool(function, *args))
@@ -182,36 +217,37 @@ async def _run_worker(function, *args):
         raise
 
 
-async def _run_queued(function, *args):
+async def _run_queued(function, *args, gate=None):
     """Keep one account request, including retries/continuations, in the queue."""
-    async with _request_gate:
+    queue = gate if gate is not None else _request_gate
+    async with queue:
         return await _run_worker(function, *args)
 
 
 async def _run_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     """Run a queued completion with one retry after an auth rejection."""
-    return await _run_queued(_chat_with_retry, prompt, req, model_type)
+    return await _run_queued(_chat_with_retry, prompt, req, model_type, gate=_request_queue(req))
 
 
 def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
-    client = get_client()
+    client = _request_client(req)
     try:
         return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
     except Exception as e:
         if not _is_auth_error(e):
             raise
-        print(f"[retry] DeepSeek rejected the session ({e}); refreshing...", flush=True)
-        client = get_client(True, rejected_client=client)
+        print(f"[retry] {model_provider(req.model)} rejected the session ({type(e).__name__}); refreshing...", flush=True)
+        client = _request_client(req, True, rejected_client=client)
         return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
 
 
 # A truncated tool reply is continued this many times before giving up. Each
-# round-trip resumes the same DeepSeek thread and appends the next slice.
+# round-trip resumes the same provider conversation and appends the next slice.
 _MAX_CONTINUATIONS = int(os.getenv("TOOLCALL_MAX_CONTINUATIONS", "3"))
 if _MAX_CONTINUATIONS < 0:
     raise ValueError("TOOLCALL_MAX_CONTINUATIONS must be non-negative")
 
-# Sent to make DeepSeek finish an answer its output limit cut off.
+# Sent to make the model finish an answer its output limit cut off.
 _CONTINUE_PROMPT = (
     "Your previous message was cut off by the output limit before it finished. "
     "Continue EXACTLY from the character where it stopped. Output only the "
@@ -221,10 +257,10 @@ _CONTINUE_PROMPT = (
 
 
 def _continue_reply(prev: Reply, req: ChatCompletionRequest):
-    """Resume the same DeepSeek thread and return the next slice of the reply.
+    """Resume the same provider conversation and return the next slice.
 
     On resume the thread keeps its own model, so `model` is passed as None —
-    matching the resume rule in `deepseek.client.stream`."""
+    matching both clients' resume rules."""
     if not prev.conversation_id:
         raise ToolCallError("Cannot continue a tool reply without a conversation_id")
     continuation = req.model_copy(update={"conversation_id": prev.conversation_id})
@@ -232,15 +268,15 @@ def _continue_reply(prev: Reply, req: ChatCompletionRequest):
 
 
 async def _run_tool_chat(prompt: str, req: ChatCompletionRequest, model_type):
-    return await _run_queued(_tool_chat_with_retry, prompt, req, model_type)
+    return await _run_queued(_tool_chat_with_retry, prompt, req, model_type, gate=_request_queue(req))
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     """Full completion for a tool request, transparently continuing truncations.
 
-    DeepSeek's web output limit can cut a large `write`/`edit` tool call off
+    A web chat's output limit can cut a large `write`/`edit` tool call off
     mid-JSON. Rather than hand opencode a `finish_reason: "stop"` — which ends
-    the agent's turn mid-task — we detect the cut and ask DeepSeek to continue
+    the agent's turn mid-task — we detect the cut and ask the model to continue
     from where it stopped, concatenating slices until the call parses. Returns
     `(reply, content, tool_calls)`."""
     names = _tool_names(req.tools)
@@ -318,7 +354,7 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
             yield _sse_error(str(e), "invalid_tool_response")
             return
         except Exception as e:
-            yield _sse_error(f"DeepSeek request failed: {e}")
+            yield _sse_error(f"{model_provider(req.model)} request failed: {e}")
             return
 
         for frame in sse_frames(req.model, content, tool_calls, reply.conversation_id,
@@ -347,7 +383,7 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
                 iterator.close()
             if attempt == 0 and _is_auth_error(exc):
                 try:
-                    client = get_client(True, rejected_client=client)
+                    client = _request_client(req, True, rejected_client=client)
                 except LoginRequired as refresh_error:
                     yield _sse_error(str(refresh_error), "login_required")
                     return
@@ -356,7 +392,7 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
                     return
                 continue
             error_type = "login_required" if isinstance(exc, LoginRequired) else "server_error"
-            yield _sse_error(f"DeepSeek request failed: {exc}", error_type)
+            yield _sse_error(f"{model_provider(req.model)} request failed: {exc}", error_type)
             return
 
         def remaining():
@@ -368,7 +404,7 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             yield from stream_chunks(req.model, stream, iterator=remaining())
         except Exception as exc:
             # Once content has been emitted, retrying would duplicate it.
-            yield _sse_error(f"DeepSeek request failed: {exc}")
+            yield _sse_error(f"{model_provider(req.model)} request failed: {exc}")
         finally:
             if hasattr(iterator, "close"):
                 iterator.close()
@@ -378,7 +414,7 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
 async def _plain_stream(client, prompt, req, model_type):
     # Queue asynchronously so waiting requests cannot exhaust worker threads
     # needed to advance an already-open stream.
-    async with _request_gate:
+    async with _request_queue(req):
         generator = _stream_with_retry(client, prompt, req, model_type)
         try:
             while True:
@@ -412,8 +448,9 @@ def _refresh_loop(stop_event=None) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _request_gate, _stop_refresh
+    global _request_gate, _qwen_request_gate, _stop_refresh
     _request_gate = asyncio.Lock()
+    _qwen_request_gate = asyncio.Lock()
     _stop_refresh = threading.Event()
     stop_event = _stop_refresh
     thread = None
@@ -431,7 +468,7 @@ async def lifespan(app: FastAPI):
             thread.join(timeout=5)
 
 
-app = FastAPI(title="DeepSeek OpenAI-compatible API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="DeepSeek and Qwen OpenAI-compatible API", version="0.2.0", lifespan=lifespan)
 install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
 
 
@@ -453,7 +490,7 @@ def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": name, "object": "model", "created": created, "owned_by": "deepseek"}
+            {"id": name, "object": "model", "created": created, "owned_by": model_provider(name)}
             for name in MODEL_MAP
         ],
     }
@@ -470,6 +507,15 @@ async def chat_completions(req: ChatCompletionRequest):
             f"{', '.join(MODEL_MAP)}",
             status=404, err_type="model_not_found",
         )
+
+    if req.conversation_id:
+        try:
+            if model_provider(req.model) == "qwen":
+                decode_qwen_cid(req.conversation_id)
+            elif req.conversation_id.startswith("qwen:"):
+                raise ValueError("A Qwen conversation cannot be resumed through DeepSeek")
+        except ValueError as exc:
+            return _error(str(exc), status=400, err_type="invalid_request_error")
 
     try:
         names = _tool_names(req.tools)
@@ -500,7 +546,7 @@ async def chat_completions(req: ChatCompletionRequest):
         except ToolCallError as e:
             return _error(str(e), status=502, err_type="invalid_tool_response")
         except Exception as e:
-            return _error(f"DeepSeek request failed: {e}")
+            return _error(f"{model_provider(req.model)} request failed: {e}")
 
         return completion_response(
             req.model, content, prompt, reply.conversation_id, tool_calls,
@@ -510,11 +556,11 @@ async def chat_completions(req: ChatCompletionRequest):
     # Plain chat: real incremental streaming, or a buffered retryable call.
     if req.stream:
         try:
-            client = await run_in_threadpool(get_client)
+            client = await run_in_threadpool(_request_client, req)
         except LoginRequired as e:
             return _error(str(e), status=503, err_type="login_required")
         except Exception as e:
-            return _error(f"Failed to initialise DeepSeek session: {e}")
+            return _error(f"Failed to initialise {model_provider(req.model)} session: {e}")
 
         return StreamingResponse(_plain_stream(client, prompt, req, model_type),
                                  media_type="text/event-stream")
@@ -524,7 +570,7 @@ async def chat_completions(req: ChatCompletionRequest):
     except LoginRequired as e:
         return _error(str(e), status=503, err_type="login_required")
     except Exception as e:
-        return _error(f"DeepSeek request failed: {e}")
+        return _error(f"{model_provider(req.model)} request failed: {e}")
 
     return completion_response(req.model, reply.text, prompt, reply.conversation_id,
                                finish_reason=reply.finish_reason)
