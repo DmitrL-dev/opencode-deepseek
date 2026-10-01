@@ -79,6 +79,40 @@ class StreamProtocolTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(DeepSeekStreamError):
                 parse(payload)
 
+    def test_earlier_fragment_cannot_grow_after_later_text_was_emitted(self):
+        for first in ("Hello", ""):
+            initial = event({"v": {"response": {"message_id": 2, "fragments": [
+                {"type": "RESPONSE", "content": first},
+                {"type": "RESPONSE", "content": " world"}]}}})
+            snapshot_update = event({"v": {"response": {"message_id": 2, "fragments": [
+                {"type": "RESPONSE", "content": first + " dear"},
+                {"type": "RESPONSE", "content": " world"}], "status": "FINISHED"}}})
+            patch_update = event({"p": "response/fragments/0/content", "o": "APPEND", "v": " dear"})
+            for update in (snapshot_update, patch_update):
+                with self.subTest(first=first, update=update), self.assertRaises(DeepSeekStreamError):
+                    parse(initial + update + "data: [DONE]\n\n")
+
+    def test_last_response_fragment_can_grow_without_reordering(self):
+        def fragments(last, status=None):
+            response = {"message_id": 2, "fragments": [
+                {"type": "RESPONSE", "content": "Hello"},
+                {"type": "RESPONSE", "content": last}]}
+            if status:
+                response["status"] = status
+            return event({"v": {"response": response}})
+        self.assertEqual(parse(fragments(" world") + fragments(" world dear", "FINISHED"))[0],
+                         "Hello world dear")
+        self.assertEqual(parse(fragments("") + fragments(" world", "FINISHED"))[0],
+                         "Hello world")
+
+    def test_unsupported_fragment_list_patch_cannot_succeed_partially(self):
+        for operation in ("SET", "REMOVE", "INSERT", None):
+            patch = {"p": "response/fragments", "v": [{"type": "RESPONSE", "content": "replacement"}]}
+            if operation is not None:
+                patch["o"] = operation
+            with self.subTest(operation=operation), self.assertRaises(DeepSeekStreamError):
+                parse(snapshot("partial") + event(patch) + "data: [DONE]\n\n")
+
     def test_eof_and_errors_fail_instead_of_successful_empty_stop(self):
         payloads = [snapshot("partial"), "", event({"error":{"code":403,"message":"token expired"}}),
                     event({"code":1,"msg":"upstream error"}),

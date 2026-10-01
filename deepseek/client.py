@@ -278,6 +278,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
     meta = meta if meta is not None else {}
     types: list[Optional[str]] = []
     emitted: dict[int, str] = {}
+    last_emitted_index = -1
     current_path, current_operation = None, None
     terminal = False
 
@@ -290,6 +291,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             raise DeepSeekStreamError(f"DeepSeek response status: {value}")
 
     def claim(index, fragment):
+        nonlocal last_emitted_index
         content = fragment.get("content", "")
         if not isinstance(content, str):
             raise DeepSeekStreamError("DeepSeek fragment content is not text")
@@ -297,6 +299,9 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         if not content.startswith(previous):
             raise DeepSeekStreamError("DeepSeek rewrote an already emitted response prefix")
         if len(content) > len(previous):
+            if index < last_emitted_index:
+                raise DeepSeekStreamError("DeepSeek extended a response fragment after later text was emitted")
+            last_emitted_index = index
             emitted[index] = content
             yield content[len(previous):]
 
@@ -359,7 +364,9 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         if current_path in ("response/message_id", "response/id"):
             _set_message_id(meta, value)
             continue
-        if current_path == "response/fragments" and current_operation == "APPEND":
+        if current_path == "response/fragments":
+            if current_operation != "APPEND":
+                raise DeepSeekStreamError("Unsupported DeepSeek fragment list patch")
             for fragment in _parse_fragment_list(value):
                 index = len(types)
                 types.append(fragment.get("type"))
@@ -375,8 +382,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         if index == -1:
             index = len(types) - 1
         if 0 <= index < len(types) and types[index] == "RESPONSE":
-            emitted[index] = emitted.get(index, "") + value
-            yield value
+            yield from claim(index, {"content": emitted.get(index, "") + value})
         elif not 0 <= index < len(types):
             raise DeepSeekStreamError("DeepSeek content patch references an unknown fragment")
 
