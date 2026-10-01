@@ -47,6 +47,9 @@ def _decode_cid(value: str):
 
 def _parse_sse(lines, meta: dict) -> Iterator[str]:
     terminal = False
+    primary_id = None
+    active_id = None
+    known_ids, ignored_ids = set(), set()
     for event, payload in sse_events(lines):
         if event == "error":
             raise QwenStreamError("Qwen emitted an error event")
@@ -75,9 +78,28 @@ def _parse_sse(lines, meta: dict) -> Iterator[str]:
             if created.get("chat_id") not in (None, meta.get("chat_id")):
                 raise QwenStreamError("Qwen returned a different chat_id")
             if isinstance(created.get("response_id"), str):
-                meta["message_id"] = created["response_id"]
-        if isinstance(obj.get("response_id"), str):
-            meta["message_id"] = obj["response_id"]
+                active_id = created["response_id"]
+                known_ids.add(active_id)
+                if created.get("response_index") not in (None, 0, "0"):
+                    ignored_ids.add(active_id)
+                elif primary_id is None:
+                    primary_id = active_id
+        response_id = obj.get("response_id")
+        if isinstance(response_id, str):
+            active_id = response_id
+            known_ids.add(active_id)
+        elif obj.get("choices") and len(known_ids) > 1:
+            raise QwenStreamError("Ambiguous Qwen response without response_id")
+        # The web service can stream parallel candidates, all with choice index 0.
+        # Only candidate 0 contributes text, completion status and the resume id.
+        if active_id in ignored_ids:
+            continue
+        if primary_id is None and active_id is not None:
+            primary_id = active_id
+        if active_id is not None and active_id != primary_id:
+            continue
+        if primary_id is not None:
+            meta["message_id"] = primary_id
         choices = obj.get("choices") or []
         if not isinstance(choices, list):
             raise QwenStreamError("Invalid Qwen choices")

@@ -127,6 +127,43 @@ class QwenStreamTests(unittest.TestCase):
         with self.assertRaises(QwenStreamError):
             list(_parse_sse(events({"response.created": {"chat_id": MESSAGE}}), {"chat_id": CHAT}))
 
+    def test_parallel_responses_are_not_interleaved_or_used_as_the_resume_parent(self):
+        other = "00000000-0000-4000-8000-000000000003"
+        meta = {"chat_id": CHAT}
+        stream = events(
+            {"response.created": {"response_id": MESSAGE, "chat_id": CHAT, "response_index": "0"}},
+            {"response.created": {"response_id": other, "chat_id": CHAT, "response_index": "1"}},
+            answer("hello"),
+            {"response_id": other, "choices": [{"delta": {"phase": "answer", "content": "duplicate"}, "finish_reason": "length"}]},
+            answer(" world", status="finished"),
+            {"response_id": other, "choices": [{"delta": {"phase": "answer", "content": " tail", "status": "finished"}}]},
+        )
+        self.assertEqual("".join(_parse_sse(stream, meta)), "hello world")
+        self.assertEqual(meta["message_id"], MESSAGE)
+        self.assertEqual(meta["finish_reason"], "stop")
+
+    def test_secondary_response_arriving_first_is_ignored(self):
+        other = "00000000-0000-4000-8000-000000000003"
+        meta = {"chat_id": CHAT}
+        stream = events(
+            {"response.created": {"response_id": other, "chat_id": CHAT, "response_index": "1"}},
+            {"response_id": other, "choices": [{"delta": {"content": "not primary"}}]},
+            {"response.created": {"response_id": MESSAGE, "chat_id": CHAT, "response_index": "0"}},
+            answer("primary", status="finished"),
+        )
+        self.assertEqual("".join(_parse_sse(stream, meta)), "primary")
+        self.assertEqual(meta["message_id"], MESSAGE)
+
+    def test_parallel_content_without_a_response_id_is_rejected(self):
+        other = "00000000-0000-4000-8000-000000000003"
+        stream = events(
+            {"response.created": {"response_id": MESSAGE, "response_index": "0"}},
+            {"response.created": {"response_id": other, "response_index": "1"}},
+            {"choices": [{"delta": {"phase": "answer", "content": "ambiguous"}}]},
+        )
+        with self.assertRaisesRegex(QwenStreamError, "Ambiguous"):
+            list(_parse_sse(stream, {}))
+
     def test_transport_model_and_resume_contract(self):
         requests = []
         def handler(request):
