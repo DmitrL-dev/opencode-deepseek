@@ -15,6 +15,7 @@ import httpx
 from providers import tab_bridge
 from providers.common import ProviderUnavailable
 from server import api, config
+from server.schemas import ChatCompletionRequest
 from chat_protocol import Reply
 
 OWNER = "browser-owner-123456789"
@@ -189,6 +190,53 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.post("/v1/chat/completions",json={"model":"grok-web","messages":[{"role":"user","content":"marker"}]})
         self.assertEqual(response.status_code,500)
         self.assertEqual(client.chat.call_count,1)
+
+    async def test_browser_routes_see_cancelled_origin_before_its_worker_wakes(self):
+        broker = tab_bridge.Broker()
+        waiting, release = threading.Event(), threading.Event()
+        signals = []
+
+        def pause_worker(timeout):
+            # Keep the original job pending while browser routes execute in
+            # their own context, exposing the cancellation race deterministically.
+            signals.append(api._worker_cancellation.get())
+            broker.condition.release()
+            waiting.set()
+            try:
+                if not release.wait(5):
+                    raise TimeoutError("test did not release the origin worker")
+            finally:
+                broker.condition.acquire()
+
+        async def until(predicate):
+            async def poll():
+                while not predicate():
+                    await asyncio.sleep(.005)
+            await asyncio.wait_for(poll(), 2)
+
+        headers = {'Authorization':'Bearer ' + 'x' * 43}
+        req = ChatCompletionRequest(model='glm-web',messages=[{'role':'user','content':'marker'}])
+        with patch.dict(os.environ,{'BROWSER_BRIDGE_ENABLED':'1'}), patch.dict(config.MODEL_MAP,{'glm-web':'default'}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS,{'glm-web':'glm'}), patch.dict(api._provider_request_gates,{'glm':asyncio.Lock()}), patch.object(tab_bridge,'bridge_token',return_value='x' * 43), patch.object(tab_bridge,'broker',broker), patch('server.browser_routes.broker',broker), patch.object(broker.condition,'wait',side_effect=pause_worker):
+            task = asyncio.create_task(api._run_chat_with_retry('marker',req,'default'))
+            try:
+                await until(waiting.is_set)
+                job = (await self.client.get('/browser/jobs/glm',params={'owner':OWNER,'document':DOCUMENT},headers=headers)).json()['job']
+                value = {'provider':'glm','id':job['id'],'owner':OWNER,'lease':job['lease'],'document':DOCUMENT}
+                task.cancel()
+                await until(signals[0].is_set)
+                self.assertIsNone(api._worker_cancellation.get())
+                self.assertIn('glm',broker.pending)
+                self.assertFalse((await self.client.post('/browser/check',json=value,headers=headers)).json()['active'])
+                for path in ('/browser/submit','/browser/navigate'):
+                    self.assertEqual((await self.client.post(path,json=value,headers=headers)).status_code,409)
+                self.assertIsNone((await self.client.get('/browser/jobs/glm',params={'owner':OWNER,'document':DOCUMENT},headers=headers)).json()['job'])
+                self.assertFalse(broker.pending['glm'].submitted)
+            finally:
+                release.set()
+                task.cancel()
+                result = await asyncio.wait_for(asyncio.gather(task,return_exceptions=True),2)
+        self.assertIsInstance(result[0],asyncio.CancelledError)
+        self.assertEqual(broker.pending,{})
 
     async def test_kimi_tools_are_rejected_before_any_browser_job(self):
         tools = [{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}]

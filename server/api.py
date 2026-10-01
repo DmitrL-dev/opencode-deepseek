@@ -92,10 +92,13 @@ _MISSING = object()
 _worker_cancellation = ContextVar("worker_cancellation", default=None)
 
 
-def _check_cancelled():
-    signal = _worker_cancellation.get()
+def _check_cancellation(signal):
     if signal is not None and signal.is_set():
         raise asyncio.CancelledError()
+
+
+def _check_cancelled():
+    _check_cancellation(_worker_cancellation.get())
 
 # Substrings that mark an upstream rejection as an auth/session problem (worth a
 # session refresh + one retry). Deliberately broad: we only retry once, so a
@@ -201,7 +204,10 @@ def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
 def _request_client(req, force_refresh=False, rejected_client=None):
     provider = model_provider(req.model)
     if provider in PROVIDERS:
-        return build_provider_client(provider, _check_cancelled)
+        # Browser routes run in another worker context. Bind the originating
+        # request's Event now so they see cancellation before this worker wakes.
+        signal = _worker_cancellation.get()
+        return build_provider_client(provider, lambda: _check_cancellation(signal))
     factory = get_qwen_client if provider == "qwen" else get_client
     if force_refresh:
         return factory(True, rejected_client=rejected_client)
