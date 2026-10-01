@@ -13,7 +13,10 @@
 // Hooks are `experimental.*` (opencode ~1.18.x). If a future opencode renames
 // them, the plugin simply stops firing — it never breaks startup.
 
-const PROVIDER_IDS = new Set(["local-deepseek", "local-qwen"]);
+const PROVIDER_IDS = new Set([
+  "local-deepseek", "local-qwen", "local-gemini", "local-grok",
+  "local-mistral", "local-kimi", "local-glm",
+]);
 
 export const DeepSeekToolDiscipline = async () => ({
   "experimental.chat.system.transform": async (input, output) => {

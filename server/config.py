@@ -1,6 +1,8 @@
 """Server configuration: the OpenAI-facing model names and what they map to."""
 
 import os
+import json
+import re
 
 from settings import load_environment
 
@@ -58,9 +60,30 @@ QWEN_ENABLED = os.getenv("QWEN_ENABLED", "0").lower() not in ("", "0", "false", 
 if QWEN_ENABLED:
     MODEL_MAP.update(QWEN_MODEL_MAP)
 
+OPTIONAL_MODEL_PROVIDERS = {}
+for provider in ("grok", "mistral", "kimi", "glm"):
+    enabled = os.getenv(provider.upper() + "_ENABLED", "0").lower() not in ("", "0", "false", "no", "off")
+    if enabled:
+        name = provider + "-web"
+        MODEL_MAP[name] = "default"
+        OPTIONAL_MODEL_PROVIDERS[name] = provider
+
+# Model availability differs by Google account and region. Require slugs from
+# `agy models`, rather than advertising an invented or silently substituted one.
+if os.getenv("GEMINI_ENABLED", "0").lower() not in ("", "0", "false", "no", "off"):
+    google_models = json.loads(os.getenv("GEMINI_MODELS", "{}"))
+    if not isinstance(google_models, dict) or len(google_models) > 50:
+        raise ValueError("GEMINI_MODELS must be a JSON object with at most 50 models")
+    for name, slug in google_models.items():
+        if (not isinstance(name, str) or not re.fullmatch(r"gemini-[a-zA-Z0-9._-]{1,100}", name)
+                or not isinstance(slug, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", slug)):
+            raise ValueError("Invalid GEMINI_MODELS model name or CLI slug")
+        MODEL_MAP[name] = slug
+        OPTIONAL_MODEL_PROVIDERS[name] = "gemini"
+
 
 def model_provider(name: str) -> str:
-    return "qwen" if name in QWEN_MODEL_MAP else "deepseek"
+    return OPTIONAL_MODEL_PROVIDERS.get(name, "qwen" if name in QWEN_MODEL_MAP else "deepseek")
 
 DEFAULT_MODEL = "deepseek-chat"
 

@@ -9,6 +9,11 @@ payment**.
 The same bridge optionally supports **Qwen Chat**: `Qwen3.8-Omni-Flash`
 and `Qwen3.8-Max`. See [Qwen Chat](#qwen-chat) for setup.
 
+Experimental **Grok, Mistral, Kimi and GLM** adapters use an already signed-in
+tab in your normal browser. **Gemini** uses the official Antigravity CLI when
+Google allows the account and region. All new providers are disabled by
+default; see [setup and limitations](browser/README.md).
+
 > **Original project:** <https://github.com/sums001/Deepseek-API>
 > This is an unofficial project, not affiliated with DeepSeek. You use your
 > regular DeepSeek account and are responsible for complying with its terms.

@@ -1,5 +1,5 @@
 """
-OpenAI-compatible FastAPI server for DeepSeek and optional Qwen Chat.
+OpenAI-compatible FastAPI server for DeepSeek and opt-in account providers.
 
 Point any OpenAI client at http://localhost:8000/v1 :
 
@@ -48,6 +48,8 @@ from chat_protocol import Reply
 from deepseek.client import DeepSeekClient
 from qwen.auth import get_session as get_qwen_session
 from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
+from providers.conversations import decode as decode_provider_cid, PROVIDERS
+from providers.registry import build_client as build_provider_client
 
 from .config import (
     MODEL_MAP,
@@ -73,6 +75,7 @@ from .openai_format import (
     validate_tool_choice,
 )
 from .ratelimit import RateLimiter, install_rate_limit
+from .browser_routes import router as browser_router
 from .schemas import ChatCompletionRequest
 
 # One shared client (and its signed-in session) built lazily on first use.
@@ -83,6 +86,7 @@ _request_gate = asyncio.Lock()
 _qwen_request_gate = asyncio.Lock()
 _qwen_client: QwenClient | None = None
 _qwen_client_lock = threading.Lock()
+_provider_request_gates = {name: asyncio.Lock() for name in PROVIDERS}
 
 _MISSING = object()
 _worker_cancellation = ContextVar("worker_cancellation", default=None)
@@ -195,14 +199,26 @@ def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
 
 
 def _request_client(req, force_refresh=False, rejected_client=None):
-    factory = get_qwen_client if model_provider(req.model) == "qwen" else get_client
+    provider = model_provider(req.model)
+    if provider in PROVIDERS:
+        return build_provider_client(provider, _check_cancelled)
+    factory = get_qwen_client if provider == "qwen" else get_client
     if force_refresh:
         return factory(True, rejected_client=rejected_client)
     return factory()
 
 
 def _request_queue(req):
-    return _qwen_request_gate if model_provider(req.model) == "qwen" else _request_gate
+    provider = model_provider(req.model)
+    if provider in PROVIDERS:
+        return _provider_request_gates[provider]
+    return _qwen_request_gate if provider == "qwen" else _request_gate
+
+
+def _can_refresh(req, error):
+    # A region/security/quota rejection from a browser or official CLI is
+    # terminal. Reopening a profile cannot repair it and may repeat a prompt.
+    return model_provider(req.model) not in PROVIDERS and _is_auth_error(error)
 
 
 async def _run_worker(function, *args):
@@ -256,7 +272,7 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
     except Exception as e:
         _check_cancelled()
-        if not _is_auth_error(e):
+        if not _can_refresh(req, e):
             raise
         print(f"[retry] {model_provider(req.model)} rejected the session ({type(e).__name__}); refreshing...", flush=True)
         client = _request_client(req, True, rejected_client=client)
@@ -407,7 +423,7 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             if iterator is not None and hasattr(iterator, "close"):
                 iterator.close()
             _check_cancelled()
-            if attempt == 0 and _is_auth_error(exc):
+            if attempt == 0 and _can_refresh(req, exc):
                 try:
                     client = _request_client(req, True, rejected_client=client)
                 except LoginRequired as refresh_error:
@@ -453,6 +469,32 @@ async def _plain_stream(client, prompt, req, model_type):
                 await _run_worker(generator.close)
 
 
+async def _buffered_plain_stream(req, prompt, model_type):
+    """Keep the connection alive while optional transports validate an answer."""
+    task = asyncio.ensure_future(_run_chat_with_retry(prompt, req, model_type))
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=_KEEPALIVE_SECONDS)
+            if task in done:
+                break
+            yield ": keep-alive\n\n"
+        try:
+            reply = task.result()
+        except LoginRequired as exc:
+            yield _sse_error(str(exc), "login_required")
+            return
+        except Exception as exc:
+            yield _sse_error(f"{model_provider(req.model)} request failed: {exc}")
+            return
+        for frame in sse_frames(req.model, reply.text, None, reply.conversation_id,
+                                finish_reason=reply.finish_reason):
+            yield frame
+    finally:
+        if not task.done():
+            task.cancel()
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+
+
 def _refresh_loop(stop_event=None) -> None:
     """Daemon loop: re-capture the token from the browser profile every interval.
 
@@ -474,9 +516,10 @@ def _refresh_loop(stop_event=None) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _request_gate, _qwen_request_gate, _stop_refresh
+    global _request_gate, _qwen_request_gate, _stop_refresh, _provider_request_gates
     _request_gate = asyncio.Lock()
     _qwen_request_gate = asyncio.Lock()
+    _provider_request_gates = {name: asyncio.Lock() for name in PROVIDERS}
     _stop_refresh = threading.Event()
     stop_event = _stop_refresh
     thread = None
@@ -494,7 +537,8 @@ async def lifespan(app: FastAPI):
             thread.join(timeout=5)
 
 
-app = FastAPI(title="DeepSeek and Qwen OpenAI-compatible API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Account providers OpenAI-compatible API", version="0.2.0", lifespan=lifespan)
+app.include_router(browser_router)
 install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
 
 
@@ -536,10 +580,13 @@ async def chat_completions(req: ChatCompletionRequest):
 
     if req.conversation_id:
         try:
-            if model_provider(req.model) == "qwen":
+            provider = model_provider(req.model)
+            if provider in PROVIDERS:
+                decode_provider_cid(req.conversation_id, provider)
+            elif provider == "qwen":
                 decode_qwen_cid(req.conversation_id)
-            elif req.conversation_id.startswith("qwen:"):
-                raise ValueError("A Qwen conversation cannot be resumed through DeepSeek")
+            elif req.conversation_id.startswith(("qwen:", "web:")):
+                raise ValueError("A provider conversation cannot be resumed through DeepSeek")
         except ValueError as exc:
             return _error(str(exc), status=400, err_type="invalid_request_error")
 
@@ -581,6 +628,9 @@ async def chat_completions(req: ChatCompletionRequest):
 
     # Plain chat: real incremental streaming, or a buffered retryable call.
     if req.stream:
+        if model_provider(req.model) in PROVIDERS:
+            return StreamingResponse(_buffered_plain_stream(req, prompt, model_type),
+                                     media_type="text/event-stream")
         try:
             client = await _run_queued(_request_client, req, gate=_request_queue(req))
         except LoginRequired as e:
