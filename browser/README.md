@@ -20,10 +20,16 @@ content context and keeps its local pairing key out of page JavaScript.
 2. Install Userscripts and add the two exported `.user.js` files to its scripts
    directory. Grant access only to `chat.z.ai`, `grok.com`, `chat.mistral.ai`, and
    `www.kimi.com`; the bridge does not need access to Google sign-in pages.
+   After adding or replacing files, open the Userscripts toolbar popup and wait
+   until both script names appear. The extension must rescan externally edited
+   files before the next page load, as described in its linked README.
 3. Keep the API bound to `127.0.0.1:8000`. Set `BROWSER_BRIDGE_ENABLED=1` and enable
    the provider you want, e.g. `GLM_ENABLED=1`, then restart the API.
 4. Open the provider in your normal signed-in browser and reload once to load
    both scripts. Click **Подключить вкладку к OpenCode**. Keep that tab open.
+   Userscripts may separately ask for `127.0.0.1` access for local job exchange;
+   grant only that address, without choosing all websites. The controller checks
+   that its observer is ready before sending a prompt.
    Do not use it for manual chat while a bridge request is running.
 5. Point an OpenAI-compatible client at the same `/v1` URL. Model ids are
    `grok-web`, `mistral-web`, `kimi-web`, and `glm-web`. They deliberately do not
