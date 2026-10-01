@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.6
+// @version      0.1.7
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -18,6 +18,7 @@
 
 (async () => {
   "use strict";
+  class BridgeFailure extends Error {}
   const TOKEN = "__BRIDGE_TOKEN__"; // Replaced only in ignored private exports.
   const BASE = "http://127.0.0.1:8000";
   const sites = {
@@ -56,7 +57,7 @@
       headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
       ...(data ? { data: JSON.stringify(data) } : {}),
     });
-    if (response.status !== 200) throw new Error("Local bridge rejected the request");
+    if (response.status !== 200) throw new BridgeFailure("Local bridge rejected the request");
     return JSON.parse(response.responseText);
   }
 
@@ -78,6 +79,7 @@
 
   button.addEventListener("click", async () => {
     if (TOKEN === "__BRIDGE_TOKEN__") { label("Сначала экспортируй приватные скрипты моста"); return; }
+    button.title = "";
     enabled = !enabled;
     await GM.setValue(activeKey, enabled);
     if (!enabled && pending) await finish({ error: "Tab disconnected by user" }).catch(() => {});
@@ -129,9 +131,9 @@
 
   async function execute(job) {
     let input = editor();
-    if (draft(input)?.trim()) throw new Error("The tab has an unsent draft");
+    if (draft(input)?.trim()) throw new BridgeFailure("The tab has an unsent draft");
     const target = job.path || site.home;
-    if (target !== site.home && !site.path.test(target)) throw new Error("Invalid conversation route");
+    if (target !== site.home && !site.path.test(target)) throw new BridgeFailure("Invalid conversation route");
     if (location.pathname !== target) {
       // Keep only a tab id and execution flag across navigation. No prompts,
       // response bodies or local pairing key are put in page storage.
@@ -145,17 +147,17 @@
     // The extension can run before the SPA hydrates its signed-in editor.
     for (let attempt = 0; !input && enabled && attempt < 50; attempt++) {
       if (attempt % 5 === 0 && !(await rpc("/browser/check", "POST", identity(job))).active) {
-        throw new Error("The browser job was cancelled");
+        throw new BridgeFailure("The browser job was cancelled");
       }
       await new Promise(resolve => setTimeout(resolve, 100));
       input = editor();
     }
-    if (!enabled || location.pathname !== target) throw new Error("The tab changed before submission");
-    if (!input) throw new Error("The signed-in chat input is unavailable");
-    if (draft(input)?.trim()) throw new Error("The tab has an unsent draft");
-    if (input.disabled || input.getAttribute("aria-disabled") === "true") throw new Error("The chat input is busy");
-    if (job.submitted) throw new Error("The prompt was already submitted");
-    if (!Number.isFinite(job.expires_in) || job.expires_in <= 0) throw new Error("Invalid browser job deadline");
+    if (!enabled || location.pathname !== target) throw new BridgeFailure("The tab changed before submission");
+    if (!input) throw new BridgeFailure("The signed-in chat input is unavailable");
+    if (draft(input)?.trim()) throw new BridgeFailure("The tab has an unsent draft");
+    if (input.disabled || input.getAttribute("aria-disabled") === "true") throw new BridgeFailure("The chat input is busy");
+    if (job.submitted) throw new BridgeFailure("The prompt was already submitted");
+    if (!Number.isFinite(job.expires_in) || job.expires_in <= 0) throw new BridgeFailure("Invalid browser job deadline");
     pending = { ...job, nonce: crypto.randomUUID(), previousAnswers: answers().length,
       deadline: performance.now() + Math.min(job.expires_in, 1800) * 1000 };
     // Use strings across Safari's isolated/page worlds. Do not send upstream
@@ -164,7 +166,7 @@
       const nonce = pending.nonce;
       const timeout = setTimeout(() => {
         document.removeEventListener("opencode-local-ready-v1", ready);
-        reject(new Error("Reload the tab to load the response observer"));
+        reject(new BridgeFailure("Reload the tab to load the response observer"));
       }, 1500);
       function ready(event) {
         let value;
@@ -180,16 +182,16 @@
       }));
     });
     await rpc("/browser/submit", "POST", identity(job));
-    if (!enabled || pending?.id !== job.id) throw new Error("The tab was disconnected before submission");
+    if (!enabled || pending?.id !== job.id) throw new BridgeFailure("The tab was disconnected before submission");
     if (location.pathname !== target || editor() !== input || draft(input)?.trim()) {
-      throw new Error("The editor changed before submission");
+      throw new BridgeFailure("The editor changed before submission");
     }
     input.focus();
     if (input.isContentEditable) {
-      if (!document.execCommand("insertText", false, job.prompt)) throw new Error("Chat editor did not accept the prompt");
+      if (!document.execCommand("insertText", false, job.prompt)) throw new BridgeFailure("Chat editor did not accept the prompt");
     } else {
       const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-      if (!setter) throw new Error("Unsupported chat input");
+      if (!setter) throw new BridgeFailure("Unsupported chat input");
       setter.call(input, job.prompt);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }
@@ -203,12 +205,12 @@
       if (!(await rpc("/browser/check", "POST", identity(job))).active
           || !enabled || pending?.id !== job.id || location.pathname !== target || editor() !== input
           || draft(input) !== insertedDraft) {
-        throw new Error("The tab changed or the browser job was cancelled");
+        throw new BridgeFailure("The tab changed or the browser job was cancelled");
       }
     }
     if (site.provider === "grok") {
       const form = input.closest('form[data-composer=true]');
-      if (!form) throw new Error("The chat submission form is unavailable");
+      if (!form) throw new BridgeFailure("The chat submission form is unavailable");
       form.requestSubmit();
     } else {
       input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
@@ -232,12 +234,14 @@
       if (!job) label();
       if (job) {
         try { await execute(job); }
-        catch (_) {
+        catch (error) {
+          const reason = error instanceof BridgeFailure ? error.message : "Tab unavailable, reloaded, or contains an unsent draft";
           pending = { ...job };
-          await finish({ error: "Tab unavailable, reloaded, or contains an unsent draft" });
+          await finish({ error: reason });
           enabled = false;
           await GM.setValue(activeKey, false);
           label("OpenCode: остановлено · подключить");
+          button.title = reason;
         }
       }
     } catch (_) { label("OpenCode: локальный мост недоступен"); }
