@@ -53,6 +53,7 @@ def stop_process_group(process):
                 try:
                     os.killpg(process.pid, 0)
                 except ProcessLookupError:
+                    process.wait()
                     return
                 time.sleep(.05)
     process.wait()
