@@ -56,13 +56,28 @@ class StreamProtocolTests(unittest.TestCase):
     def test_set_operation_is_not_mistaken_for_append(self):
         payload = snapshot() + event({"p":"response/fragments/0/content","o":"SET","v":"replacement"})
         payload += event({"v":"metadata"}) + "data: [DONE]\n\n"
-        self.assertEqual(parse(payload)[0],"Hello")
+        with self.assertRaises(DeepSeekStreamError):
+            parse(payload)
 
     def test_repeated_snapshot_does_not_duplicate_emitted_text(self):
         payload = snapshot("Hi")
         payload += event({"p":"response/fragments/0/content","o":"APPEND","v":" there"})
         payload += snapshot("Hi there","FINISHED")
         self.assertEqual(parse(payload)[0],"Hi there")
+
+    def test_response_identity_and_emitted_prefix_cannot_change(self):
+        other = event({"v": {"response": {"message_id": 4, "fragments": [{"type": "RESPONSE", "content": "Bravo extended"}], "status": "FINISHED"}}})
+        for payload in (snapshot("Alpha") + other,
+                        snapshot("ABC") + snapshot("XYZmore", "FINISHED"),
+                        snapshot() + event({"p": "response/message_id", "o": "SET", "v": 4}) + "data: [DONE]\n\n"):
+            with self.subTest(payload=payload), self.assertRaises(DeepSeekStreamError):
+                parse(payload)
+
+    def test_damaged_fragments_never_complete_a_partial_response(self):
+        for bad in ('not json', [42], False, [{}], [{"type": False}], [{"type": "RESPONSE", "content": False}]):
+            payload = snapshot("partial") + event({"p": "response/fragments", "o": "APPEND", "v": bad}) + "data: [DONE]\n\n"
+            with self.subTest(bad=bad), self.assertRaises(DeepSeekStreamError):
+                parse(payload)
 
     def test_eof_and_errors_fail_instead_of_successful_empty_stop(self):
         payloads = [snapshot("partial"), "", event({"error":{"code":403,"message":"token expired"}}),

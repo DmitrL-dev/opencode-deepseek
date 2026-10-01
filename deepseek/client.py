@@ -277,7 +277,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
     """
     meta = meta if meta is not None else {}
     types: list[Optional[str]] = []
-    emitted: dict[int, int] = {}
+    emitted: dict[int, str] = {}
     current_path, current_operation = None, None
     terminal = False
 
@@ -290,13 +290,15 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             raise DeepSeekStreamError(f"DeepSeek response status: {value}")
 
     def claim(index, fragment):
-        content = fragment.get("content") or ""
+        content = fragment.get("content", "")
         if not isinstance(content, str):
             raise DeepSeekStreamError("DeepSeek fragment content is not text")
-        seen = emitted.get(index, 0)
-        if len(content) > seen:
-            emitted[index] = len(content)
-            yield content[seen:]
+        previous = emitted.get(index, "")
+        if not content.startswith(previous):
+            raise DeepSeekStreamError("DeepSeek rewrote an already emitted response prefix")
+        if len(content) > len(previous):
+            emitted[index] = content
+            yield content[len(previous):]
 
     for event, payload in _sse_events(lines):
         if payload == "[DONE]":
@@ -334,8 +336,13 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
                 raise DeepSeekStreamError("Unexpected DeepSeek response snapshot")
             _capture_message_id(meta, value)
             status(response.get("status"))
-            fragments = [f for f in response.get("fragments", []) if isinstance(f, dict)]
+            fragments = response.get("fragments", [])
+            if not isinstance(fragments, list):
+                raise DeepSeekStreamError("Invalid DeepSeek snapshot fragments")
+            fragments = _parse_fragment_list(fragments)
             types = [f.get("type") for f in fragments]
+            if any(index >= len(types) or types[index] != "RESPONSE" for index in emitted):
+                raise DeepSeekStreamError("DeepSeek replaced an already emitted response fragment")
             current_path, current_operation = None, None
             for index, fragment in enumerate(fragments):
                 if types[index] == "RESPONSE":
@@ -350,8 +357,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             status(value)
             continue
         if current_path in ("response/message_id", "response/id"):
-            if isinstance(value, int) and not isinstance(value, bool):
-                meta["message_id"] = value
+            _set_message_id(meta, value)
             continue
         if current_path == "response/fragments" and current_operation == "APPEND":
             for fragment in _parse_fragment_list(value):
@@ -361,14 +367,18 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
                     yield from claim(index, fragment)
             continue
         match = _CONTENT_PATH.fullmatch(current_path) if isinstance(current_path, str) else None
-        if not match or current_operation != "APPEND" or not isinstance(value, str):
+        if not match:
             continue
+        if current_operation != "APPEND" or not isinstance(value, str):
+            raise DeepSeekStreamError("Unsupported DeepSeek content patch")
         index = int(match.group(1))
         if index == -1:
             index = len(types) - 1
         if 0 <= index < len(types) and types[index] == "RESPONSE":
-            emitted[index] = emitted.get(index, 0) + len(value)
+            emitted[index] = emitted.get(index, "") + value
             yield value
+        elif not 0 <= index < len(types):
+            raise DeepSeekStreamError("DeepSeek content patch references an unknown fragment")
 
     if not terminal:
         raise DeepSeekStreamError("DeepSeek stream ended before a terminal marker")
@@ -377,23 +387,35 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
 def _parse_fragment_list(v) -> list:
     """Read the fragment descriptors out of a `response/fragments` APPEND frame.
 
-    The payload is a JSON array of one fragment object, but tolerate a bare
-    object (or something unreadable) rather than dropping the stream.
+    Accept a JSON array or a bare descriptor; reject damaged payloads atomically.
     """
     if isinstance(v, str):
         try:
             v = json.loads(v)
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            raise DeepSeekStreamError("Invalid DeepSeek fragment JSON") from exc
     if isinstance(v, dict):
-        return [v]
-    if isinstance(v, list):
-        return [f for f in v if isinstance(f, dict)]
-    return []
+        v = [v]
+    if not isinstance(v, list) or any(not isinstance(f, dict) for f in v):
+        raise DeepSeekStreamError("Invalid DeepSeek fragment descriptors")
+    for fragment in v:
+        if not isinstance(fragment.get("type"), str) or not fragment["type"]:
+            raise DeepSeekStreamError("Invalid DeepSeek fragment type")
+        if "content" in fragment and not isinstance(fragment["content"], str):
+            raise DeepSeekStreamError("DeepSeek fragment content is not text")
+    return v
+
+
+def _set_message_id(meta, value):
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise DeepSeekStreamError("Invalid DeepSeek response message_id")
+    if "message_id" in meta and meta["message_id"] != value:
+        raise DeepSeekStreamError("DeepSeek changed response message_id within one stream")
+    meta["message_id"] = value
 
 
 def _capture_message_id(meta: dict, snapshot: dict) -> None:
-    """Best-effort: pull the assistant message_id out of a snapshot frame.
+    """Pull the assistant message_id out of a snapshot without changing ownership.
 
     DeepSeek nests the assistant message under `response`; we check there first,
     then the snapshot root, accepting `message_id` or `id`.
@@ -401,6 +423,6 @@ def _capture_message_id(meta: dict, snapshot: dict) -> None:
     for container in (snapshot.get("response"), snapshot):
         if isinstance(container, dict):
             mid = container.get("message_id", container.get("id"))
-            if isinstance(mid, int) and not isinstance(mid, bool):
-                meta["message_id"] = mid
+            if mid is not None:
+                _set_message_id(meta, mid)
                 return
