@@ -200,7 +200,7 @@ def parse_browser_result(provider, result, path=None, prompt=None):
     elif provider == "grok":
         text = grok_answer(body)
     elif provider == "mistral":
-        text = mistral_answer(body, prompt)
+        text = mistral_answer(body, prompt, reference.rsplit("/", 1)[-1])
     else:
         connect_completed(body)
         text = result.get("text")

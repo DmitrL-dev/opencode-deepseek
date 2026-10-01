@@ -112,7 +112,7 @@ def connect_completed(body):
         raise ProviderUnavailable("Kimi disconnected before Connect completion")
 
 
-def _mistral_patch_answer(body, prompt):
+def _mistral_patch_answer(body, prompt, expected_chat):
     """Vibe's data stream: bind text patches to its completed assistant turn."""
     user = None
     assistant = None
@@ -158,6 +158,8 @@ def _mistral_patch_answer(body, prompt):
                     or (prompt is not None and user.get("content") != prompt)):
                 raise ProviderUnavailable("Mistral bootstrap does not identify this user turn")
             chat_id = chat["id"]
+            if expected_chat is not None and chat_id != expected_chat:
+                raise ProviderUnavailable("Mistral response belongs to a different conversation")
             continue
         if kind != "message" or user is None or ended:
             raise ProviderUnavailable("Unsupported Mistral message event")
@@ -213,9 +215,9 @@ def _mistral_patch_answer(body, prompt):
     return text
 
 
-def mistral_answer(body, prompt=None):
+def mistral_answer(body, prompt=None, expected_chat=None):
     if body.lstrip().startswith(b"15:"):
-        return _mistral_patch_answer(body, prompt)
+        return _mistral_patch_answer(body, prompt, expected_chat)
     text, done, ended = "", False, False
     for event, payload in sse_events(body.decode("utf-8").splitlines()):
         if payload == "[DONE]":

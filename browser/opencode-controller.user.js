@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.8
+// @version      0.2.0
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -110,6 +110,7 @@
     let value;
     try { value = JSON.parse(event.detail); } catch (_) { return; }
     if (!pending || value?.nonce !== pending.nonce) return;
+    if (value.observing === true) { button.title = "Receiving the matched site response"; return; }
     if (value.error) { await finish({ error: "Provider response could not be observed" }).catch(() => {}); return; }
     const job = pending;
     // Give the frontend a bounded chance to render its final answer and route.
@@ -174,6 +175,10 @@
         if (value?.nonce !== nonce) return;
         clearTimeout(timeout);
         document.removeEventListener("opencode-local-ready-v1", ready);
+        if (value.observing !== true) {
+          reject(new BridgeFailure("The site replaced the response observer; reload the tab"));
+          return;
+        }
         resolve();
       }
       document.addEventListener("opencode-local-ready-v1", ready);
@@ -187,7 +192,7 @@
       throw new BridgeFailure("The editor changed before submission");
     }
     const originalDraft = draft(input);
-    let insertedDraft, dispatching = false;
+    let insertedDraft, insertedMarkup, dispatching = false;
     try {
       input.focus();
       if (input.isContentEditable) {
@@ -204,6 +209,15 @@
       if (site.provider !== "glm") {
         // Allow the frontend to commit the insertion before its send handler.
         await new Promise(resolve => setTimeout(resolve, 0));
+        // Safari can expose the inserted text only on the next event-loop turn.
+        // Rich editors also represent line breaks with DOM nodes, not text.
+        const current = draft(input);
+        const comparable = value => value.replace(/\u00a0/g, " ").replace(/\r?\n/g, "");
+        if (typeof current !== "string" || comparable(current) !== comparable(job.prompt)) {
+          throw new BridgeFailure("The editor did not retain the requested prompt");
+        }
+        insertedDraft = current;
+        insertedMarkup = input.isContentEditable ? input.innerHTML : null;
         if (!(await rpc("/browser/check", "POST", identity(job))).active) {
           throw new BridgeFailure("The browser job was cancelled after insertion");
         }
@@ -211,6 +225,7 @@
         if (location.pathname !== target) throw new BridgeFailure("The conversation changed after insertion");
         if (editor() !== input) throw new BridgeFailure("The editor was replaced after insertion");
         if (draft(input) !== insertedDraft) throw new BridgeFailure("The editor draft changed after insertion");
+        if (insertedMarkup !== null && input.innerHTML !== insertedMarkup) throw new BridgeFailure("The editor markup changed after insertion");
       }
       if (site.provider === "grok") {
         const form = input.closest('form[data-composer=true]');
@@ -226,7 +241,8 @@
       // Remove only our unchanged insertion when no send handler was invoked.
       // Local cleanup must not depend on a cancelled lease accepting a result.
       if (!dispatching && insertedDraft !== undefined && input.isConnected
-          && location.pathname === target && editor() === input && draft(input) === insertedDraft) {
+          && location.pathname === target && editor() === input && draft(input) === insertedDraft
+          && (insertedMarkup === undefined || insertedMarkup === null || input.innerHTML === insertedMarkup)) {
         input.focus();
         if (input.isContentEditable) {
           const range = document.createRange();

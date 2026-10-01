@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False, replaced_observer=False, async_insertion=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
                "path":"/c/fixture", "lease":"fixture-lease", "submitted":False, "expires_in":180}
@@ -149,6 +149,10 @@ class UserscriptFixtureTests(unittest.TestCase):
                     page.locator("#chat-input").fill(draft)
                 if user_edit_on_cancel:
                     page.evaluate("window.fixtureUserEdit = true")
+                if replaced_observer:
+                    page.evaluate("const siteFetch = window.fetch; window.fetch = (...args) => { window.siteFetchUsed = true; return siteFetch(...args); }")
+                if async_insertion:
+                    page.evaluate("const insert = document.execCommand.bind(document); document.execCommand = (command, ...args) => { if(command === 'insertText'){setTimeout(() => insert(command, ...args),0);return true;}return insert(command,...args);}")
                 controller = (ROOT/"browser/opencode-controller.user.js").read_text().replace("__BRIDGE_TOKEN__","x"*43,1)
                 page.add_script_tag(content=controller)
                 page.wait_for_function("window.fixtureRoots.length > 0 && window.fixtureRoots[0].querySelector('button')")
@@ -170,6 +174,8 @@ class UserscriptFixtureTests(unittest.TestCase):
                 while not results and __import__("time").monotonic() < deadline:
                     page.wait_for_timeout(50)
                 self.assertEqual(len(results),1)
+                if replaced_observer:
+                    self.assertTrue(page.evaluate('window.siteFetchUsed === true'))
                 if recover_cancelled:
                     page.wait_for_function("window.fixtureRoots[0].querySelector('button').textContent === 'OpenCode: остановлено · подключить'")
                     value = page.locator('#chat-input').text_content()
@@ -223,6 +229,17 @@ class UserscriptFixtureTests(unittest.TestCase):
         result, requests, _, _ = self.fixture(observer=False)
         self.assertEqual(requests,[])
         self.assertIn('error',result['result'])
+
+    def test_site_fetch_wrapper_is_preserved_and_job_observer_is_installed_after_it(self):
+        result, requests, _, _ = self.fixture(replaced_observer=True)
+        self.assertEqual(len(requests),1)
+        self.assertEqual(glm_answer(base64.b64decode(result['result']['body'])),'FIXTURE_OK')
+
+    def test_async_native_insertion_is_visible_before_site_submission(self):
+        result, requests, _, prompt = self.fixture(grok_editor=True,async_insertion=True)
+        self.assertEqual(len(requests),1)
+        self.assertEqual(json.loads(requests[0])['message'],prompt)
+        self.assertEqual(grok_answer(base64.b64decode(result['result']['body'])),'FIXTURE_OK')
 
     def test_slow_navigation_is_not_restarted_by_polling(self):
         status, requests, _, _ = self.fixture(navigation=True)

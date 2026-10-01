@@ -13,6 +13,7 @@ from providers.antigravity import AntigravityClient, parse_result, parse_stream
 from providers.browser_protocol import connect_completed, glm_answer, grok_answer, mistral_answer
 from providers.common import ProviderUnavailable, completion_timeout
 from providers.conversations import decode, encode
+from providers.tab_bridge import parse_browser_result
 
 UUID = "12345678-1234-4234-8234-123456789abc"
 
@@ -168,6 +169,17 @@ class ProviderTests(unittest.TestCase):
                      prefix + success + b'8:null\n' + append):
             with self.subTest(body=body), self.assertRaises(ProviderUnavailable):
                 mistral_answer(body,"owned prompt")
+
+    def test_mistral_wire_chat_must_match_validated_result_and_resume_route(self):
+        bootstrap, root, chunks, append, success, _, _ = self.mistral_patch_fixture()
+        body = base64.b64encode(bootstrap + root + chunks + append + success + b'8:null\n').decode()
+        for prefix in ('/work/','/chat/'):
+            path = prefix + 'owned-chat'
+            result = {'status':200,'path':path,'body':body}
+            self.assertEqual(parse_browser_result('mistral',result,path,'owned prompt').text,'answer')
+            other = prefix + 'other-chat'
+            with self.assertRaises(ProviderUnavailable):
+                parse_browser_result('mistral',{**result,'path':other},other,'owned prompt')
 
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
         for value in ("nan", "inf", "0", "-1", "1801"):

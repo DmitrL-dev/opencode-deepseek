@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.1.8
+// @version      0.2.0
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -19,7 +19,6 @@
   "use strict";
   const CHANNEL = "opencode-local-response-v1";
   const LIMIT = 8 * 1024 * 1024;
-  const nativeFetch = window.fetch.bind(window);
   const completionPath = path => {
     if (location.hostname === "chat.z.ai") return path === "/api/chat/completions"
       || path === "/api/v2/chat/completions";
@@ -29,13 +28,21 @@
     return location.hostname === "chat.mistral.ai";
   };
   let active = null;
+  function retire() {
+    if (active && window.fetch === active.fetch) window.fetch = active.restore;
+    active = null;
+  }
   document.addEventListener("opencode-local-job-v1", event => {
     let value;
     try { value = JSON.parse(event.detail); } catch (_) { return; }
-    active = value && typeof value.nonce === "string" && typeof value.prompt === "string"
-      ? { nonce: value.nonce, prompt: value.prompt } : null;
-    if (active) document.dispatchEvent(new CustomEvent("opencode-local-ready-v1", {
-      detail: JSON.stringify({ nonce: active.nonce }),
+    retire();
+    if (!value || typeof value.nonce !== "string" || typeof value.prompt !== "string") return;
+    const restore = window.fetch;
+    active = { nonce: value.nonce, prompt: value.prompt, restore,
+      fetch: createObserver(restore.bind(window)) };
+    window.fetch = active.fetch;
+    document.dispatchEvent(new CustomEvent("opencode-local-ready-v1", {
+      detail: JSON.stringify({ nonce: active.nonce, observing: window.fetch === active.fetch }),
     }));
   });
 
@@ -71,34 +78,37 @@
     }) }));
   }
 
-  window.fetch = async function (input, init) {
-    const job = active;
-    let candidate = null;
-    if (job) {
-      try {
-        const request = new Request(input instanceof Request ? input.clone() : input, init);
-        const url = new URL(request.url);
-        if (request.method === "POST" && url.origin === location.origin && completionPath(url.pathname)) {
-          // No request headers, cookies, tokens or unrelated responses are
-          // read. The site's own request must contain this job's exact prompt.
-          candidate = request.clone().text().then(body =>
-            body.includes(job.prompt) || body.includes(JSON.stringify(job.prompt).slice(1, -1)));
-        }
-      } catch (_) { /* Nonstandard requests are left untouched. */ }
-    }
-    const matches = candidate ? await candidate.catch(() => false) : false;
-    const response = await nativeFetch(input, init);
-    const compatibleResponse = location.hostname !== "chat.mistral.ai" || response.status !== 200
-      || (response.headers.get("Content-Type") || "").includes("text/event-stream");
-    if (matches && compatibleResponse && active?.nonce === job.nonce) {
-      // Clone before returning: the frontend may immediately consume its own
-      // body. Never await the clone's stream or block frontend rendering.
-      void observe(response.clone(), job).catch(() => {
-        document.dispatchEvent(new CustomEvent(CHANNEL, {
-          detail: JSON.stringify({ nonce: job.nonce, error: "Completion observation failed" }),
-        }));
-      });
-    }
-    return response;
-  };
+  function createObserver(nativeFetch) {
+    return async function bridgeFetch(input, init) {
+      const job = active?.fetch === bridgeFetch ? active : null;
+      let candidate = null;
+      if (job) {
+        try {
+          const request = new Request(input instanceof Request ? input.clone() : input, init);
+          const url = new URL(request.url);
+          if (request.method === "POST" && url.origin === location.origin && completionPath(url.pathname)) {
+            // No request headers, cookies, tokens or unrelated responses are
+            // read. The site's own request must contain this job's exact prompt.
+            candidate = request.clone().text().then(body =>
+              body.includes(job.prompt) || body.includes(JSON.stringify(job.prompt).slice(1, -1)));
+          }
+        } catch (_) { /* Nonstandard requests are left untouched. */ }
+      }
+      const matches = candidate ? await candidate.catch(() => false) : false;
+      const response = await nativeFetch(input, init);
+      const compatibleResponse = location.hostname !== "chat.mistral.ai" || response.status !== 200
+        || (response.headers.get("Content-Type") || "").includes("text/event-stream");
+      if (matches && compatibleResponse && active?.nonce === job.nonce) {
+        document.dispatchEvent(new CustomEvent(CHANNEL, { detail: JSON.stringify({ nonce: job.nonce, observing: true }) }));
+        // Clone before returning: the frontend may immediately consume its own
+        // body. Never await the clone's stream or block frontend rendering.
+        void observe(response.clone(), job).catch(() => {
+          document.dispatchEvent(new CustomEvent(CHANNEL, {
+            detail: JSON.stringify({ nonce: job.nonce, error: "Completion observation failed" }),
+          }));
+        });
+      }
+      return response;
+    };
+  }
 })();
