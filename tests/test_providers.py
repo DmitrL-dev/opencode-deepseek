@@ -94,6 +94,15 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaises(ProviderUnavailable):
                 glm_answer(body)
 
+    def test_glm_v2_global_terminal_confirms_only_the_main_answer(self):
+        answer = sse({"type":"chat:completion","data":{"phase":"answer","delta_content":"answer"}})
+        terminal = sse({"type":"chat:completion","data":{"phase":"done","done":True}})
+        subagent = sse({"type":"chat:completion","data":{"scope":"subagent","phase":"done","done":True}})
+        self.assertEqual(glm_answer(answer + terminal), "answer")
+        for body in (terminal, answer + subagent, answer + terminal + answer):
+            with self.assertRaises(ProviderUnavailable):
+                glm_answer(body)
+
     def test_mistral_missing_terminal_and_errors_are_rejected(self):
         body = sse({"choices":[{"delta":{"content":"answer"},"finish_reason":None}]})
         with self.assertRaises(ProviderUnavailable):

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions"):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
                "path":"/c/fixture", "lease":"fixture-lease"}
@@ -35,7 +35,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                     request = request_route.request
                     if navigation and urlsplit(request.url).path == "/":
                         # Hold navigation open while the old document is alive.
-                        navigation_requests.append(request.url)
+                        navigation_requests.append(request_route)
                         return
                     if request.method == "POST":
                         upstream.append(request.post_data)
@@ -61,6 +61,9 @@ class UserscriptFixtureTests(unittest.TestCase):
                         if unrelated:
                             html = html.replace('/* unrelated-request */', "await fetch('/api/chats/new', {method:'POST', body:JSON.stringify({message:editor.value})});")
                         html = html.replace("/api/chat/completions", completion_path)
+                        if delayed_editor:
+                            html = html.replace('<textarea id="chat-input">', '<textarea id="chat-input" style="display:none">')
+                            html = html.replace('const editor =', 'setTimeout(() => document.querySelector("textarea").style.display = "", 1500); const editor =')
                         request_route.fulfill(status=200,content_type="text/html",body=html)
 
                 context.route("**/*", route)
@@ -132,6 +135,11 @@ class UserscriptFixtureTests(unittest.TestCase):
                 self.assertTrue(page.evaluate("window.fixtureEventTypes.every(value => value === 'string')"))
                 return results[0], upstream, page.locator("#chat-input").input_value(), prompt
             finally:
+                for held_route in navigation_requests:
+                    try:
+                        held_route.abort()
+                    except Exception:
+                        pass  # A replacement navigation may already have cancelled it.
                 context.unroute_all(behavior="ignoreErrors")
                 browser.close()
 
@@ -171,5 +179,10 @@ class UserscriptFixtureTests(unittest.TestCase):
 
     def test_glm_v2_completion_route_is_observed(self):
         result, requests, _, _ = self.fixture(completion_path="/api/v2/chat/completions")
+        self.assertEqual(len(requests),1)
+        self.assertEqual(glm_answer(base64.b64decode(result["result"]["body"])),"FIXTURE_OK")
+
+    def test_delayed_editor_is_ready_before_the_prompt_is_sent(self):
+        result, requests, _, _ = self.fixture(delayed_editor=True)
         self.assertEqual(len(requests),1)
         self.assertEqual(glm_answer(base64.b64decode(result["result"]["body"])),"FIXTURE_OK")

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.2
+// @version      0.1.3
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -119,7 +119,7 @@
   });
 
   async function execute(job) {
-    const input = editor();
+    let input = editor();
     if (draft(input)?.trim()) throw new Error("The tab has an unsent draft");
     const target = job.path || site.home;
     if (target !== site.home && !site.path.test(target)) throw new Error("Invalid conversation route");
@@ -132,7 +132,14 @@
       location.assign(location.origin + target);
       return;
     }
+    // The extension can run before the SPA hydrates its signed-in editor.
+    for (let attempt = 0; !input && enabled && attempt < 50; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      input = editor();
+    }
+    if (!enabled || location.pathname !== target) throw new Error("The tab changed before submission");
     if (!input) throw new Error("The signed-in chat input is unavailable");
+    if (draft(input)?.trim()) throw new Error("The tab has an unsent draft");
     if (input.disabled || input.getAttribute("aria-disabled") === "true") throw new Error("The chat input is busy");
     const submitted = await GM.getValue(activeKey + ":submitted", "");
     if (submitted === job.id) throw new Error("The tab was reloaded during a request");

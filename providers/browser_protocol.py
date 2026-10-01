@@ -58,6 +58,15 @@ def glm_answer(body):
         data = frame.get("data")
         if not isinstance(data, dict) or data.get("error"):
             raise ProviderUnavailable("Invalid GLM completion frame")
+        if data.get("scope", "legacy") != "legacy":
+            continue
+        # The v2 frontend uses a separate global terminal phase. It confirms
+        # the accumulated answer, but must never import reasoning snapshots.
+        if data.get("phase") == "done" and data.get("done") is True:
+            if not text.strip():
+                raise ProviderUnavailable("GLM completed without an answer phase")
+            done = True
+            continue
         # Reasoning/tool phases must not become executable tool-call text.
         if data.get("phase") in (None, "answer", "final"):
             if done and ("content" in data or "delta_content" in data):
