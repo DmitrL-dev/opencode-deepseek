@@ -132,6 +132,43 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaises(ProviderUnavailable):
                 mistral_answer(body)
 
+    def mistral_patch_fixture(self):
+        def record(value):
+            return ("15:" + json.dumps({"json":value}) + "\n").encode()
+        bootstrap = record({"type":"bootstrap", "chat":{"id":"owned-chat"},
+                            "messages":[{"id":"owned-user","role":"user","version":0,"content":"owned prompt"}]})
+        def message(patches, message_id="owned-assistant", version=0):
+            return record({"type":"message","messageId":message_id,"messageVersion":version,"patches":patches})
+        root = message([{"op":"replace","path":"/","value":{"role":"assistant","id":"owned-assistant",
+            "version":0,"parentId":"owned-user","parentVersion":0,"chatId":"owned-chat",
+            "content":"","contentChunks":None,"generationStatus":"in-progress"}}])
+        chunks = message([{"op":"replace","path":"/contentChunks","value":[{"type":"text","text":"ans"}]}])
+        append = message([{"op":"append","path":"/contentChunks/0/text","value":"wer"}])
+        success = message([{"op":"replace","path":"/generationStatus","value":"success"}])
+        title = record({"type":"chat","patches":[{"op":"replace","path":"/generatedTitle","value":"owned title"}]})
+        return bootstrap, root, chunks, append, success, title, message
+
+    def test_mistral_current_patch_stream_binds_completed_assistant(self):
+        bootstrap, root, chunks, append, success, title, message = self.mistral_patch_fixture()
+        moderation = message([{"op":"replace","path":"/moderationCategory","value":"safe"}],"owned-user")
+        body = bootstrap + root + moderation + chunks + append + title + success + b'8:null\n' + title
+        self.assertEqual(mistral_answer(body,"owned prompt"),'answer')
+        with self.assertRaises(ProviderUnavailable):
+            mistral_answer(body,"different prompt")
+
+    def test_mistral_patch_stream_rejects_partial_late_and_wrong_turns(self):
+        bootstrap, root, chunks, append, success, title, message = self.mistral_patch_fixture()
+        prefix = bootstrap + root + chunks + append
+        failure = message([{"op":"replace","path":"/generationStatus","value":"failed"}])
+        wrong_version = message([{"op":"append","path":"/contentChunks/0/text","value":"late"}],version=1)
+        for body in (prefix, prefix + b'8:null\n', prefix + success,
+                     prefix + failure + b'8:null\n', prefix + wrong_version + success + b'8:null\n',
+                     prefix + success + append + b'8:null\n', prefix + success + b'8:null\n8:null\n',
+                     bootstrap + root.replace(b'owned-user',b'other-user') + chunks + success + b'8:null\n',
+                     prefix + success + b'8:null\n' + append):
+            with self.subTest(body=body), self.assertRaises(ProviderUnavailable):
+                mistral_answer(body,"owned prompt")
+
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
         for value in ("nan", "inf", "0", "-1", "1801"):
             with patch.dict(os.environ, {"WEB_PROVIDER_TIMEOUT": value}), self.assertRaises(ValueError):

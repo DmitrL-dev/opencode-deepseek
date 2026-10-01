@@ -112,7 +112,110 @@ def connect_completed(body):
         raise ProviderUnavailable("Kimi disconnected before Connect completion")
 
 
-def mistral_answer(body):
+def _mistral_patch_answer(body, prompt):
+    """Vibe's data stream: bind text patches to its completed assistant turn."""
+    user = None
+    assistant = None
+    chunks, content = None, ""
+    done, ended = False, False
+    for line in body.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        code, separator, payload = line.partition(":")
+        if not separator:
+            raise ProviderUnavailable("Invalid Mistral data-stream record")
+        if code == "8":
+            if payload != "null" or ended or not done:
+                raise ProviderUnavailable("Invalid Mistral stream ending")
+            ended = True
+            continue
+        if code != "15":
+            raise ProviderUnavailable("Unsupported Mistral data-stream record")
+        envelope = _object(payload)
+        frame = envelope.get("json")
+        if not isinstance(frame, dict) or frame.get("error"):
+            raise ProviderUnavailable("Invalid Mistral message event")
+        kind = frame.get("type")
+        if kind == "chat":
+            # Title updates can follow the end marker; they are not answer text.
+            patches = frame.get("patches")
+            if not isinstance(patches, list) or any(
+                not isinstance(p, dict) or p.get("path") not in ("/generatedTitle", "/title", "/updatedAt")
+                for p in patches
+            ):
+                raise ProviderUnavailable("Unsupported Mistral chat update")
+            continue
+        if kind == "bootstrap":
+            if user is not None or done or ended:
+                raise ProviderUnavailable("Duplicate Mistral bootstrap")
+            messages, chat = frame.get("messages"), frame.get("chat")
+            if not isinstance(messages, list) or not isinstance(chat, dict) or not isinstance(chat.get("id"), str):
+                raise ProviderUnavailable("Invalid Mistral conversation bootstrap")
+            users = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
+            user = users[-1] if users else None
+            if (not user or not isinstance(user.get("id"), str)
+                    or type(user.get("version")) is not int
+                    or (prompt is not None and user.get("content") != prompt)):
+                raise ProviderUnavailable("Mistral bootstrap does not identify this user turn")
+            chat_id = chat["id"]
+            continue
+        if kind != "message" or user is None or ended:
+            raise ProviderUnavailable("Unsupported Mistral message event")
+        message_id, version, patches = frame.get("messageId"), frame.get("messageVersion"), frame.get("patches")
+        if not isinstance(message_id, str) or type(version) is not int or not isinstance(patches, list):
+            raise ProviderUnavailable("Invalid Mistral message patches")
+        if message_id == user["id"]:
+            if version != user["version"] or any(
+                not isinstance(p, dict) or p.get("path") != "/moderationCategory" for p in patches
+            ):
+                raise ProviderUnavailable("Unsupported Mistral user update")
+            continue
+        for patch in patches:
+            if not isinstance(patch, dict):
+                raise ProviderUnavailable("Invalid Mistral patch")
+            op, path, value = patch.get("op"), patch.get("path"), patch.get("value")
+            if path == "/" and op == "replace":
+                if (assistant is not None or not isinstance(value, dict) or value.get("role") != "assistant"
+                        or value.get("id") != message_id or value.get("version") != version
+                        or value.get("parentId") != user["id"] or value.get("parentVersion") != user["version"]
+                        or value.get("chatId") != chat_id or value.get("generationStatus") != "in-progress"):
+                    raise ProviderUnavailable("Mistral assistant is not bound to this user turn")
+                assistant = (message_id, version)
+                content, chunks = value.get("content", ""), value.get("contentChunks")
+                if not isinstance(content, str) or chunks is not None:
+                    raise ProviderUnavailable("Unsupported Mistral initial assistant content")
+                continue
+            if assistant != (message_id, version) or done:
+                raise ProviderUnavailable("Mistral sent patches outside the active assistant turn")
+            if path == "/contentChunks" and op == "replace":
+                if not isinstance(value, list) or any(
+                    not isinstance(c, dict) or c.get("type") != "text" or not isinstance(c.get("text"), str)
+                    for c in value
+                ):
+                    raise ProviderUnavailable("Unsupported Mistral answer chunks")
+                chunks = [c["text"] for c in value]
+            elif isinstance(path, str) and path.startswith("/contentChunks/") and path.endswith("/text") and op == "append":
+                index = path[len("/contentChunks/"):-len("/text")]
+                if not index.isascii() or not index.isdecimal() or chunks is None or int(index) >= len(chunks) or not isinstance(value, str):
+                    raise ProviderUnavailable("Invalid Mistral text append")
+                chunks[int(index)] += value
+            elif path == "/content" and op in ("replace", "append") and isinstance(value, str):
+                content = value if op == "replace" else content + value
+            elif path == "/generationStatus" and op == "replace":
+                if value != "success":
+                    raise ProviderUnavailable("Mistral assistant did not complete successfully")
+                done = True
+            else:
+                raise ProviderUnavailable("Unsupported Mistral assistant patch")
+    text = "".join(chunks) if chunks is not None else content
+    if not done or not ended or not text.strip() or (content and chunks is not None and content != text):
+        raise ProviderUnavailable("Mistral disconnected before a complete assistant answer")
+    return text
+
+
+def mistral_answer(body, prompt=None):
+    if body.lstrip().startswith(b"15:"):
+        return _mistral_patch_answer(body, prompt)
     text, done, ended = "", False, False
     for event, payload in sse_events(body.decode("utf-8").splitlines()):
         if payload == "[DONE]":

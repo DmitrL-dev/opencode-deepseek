@@ -177,7 +177,7 @@ class Broker:
 broker = Broker()
 
 
-def parse_browser_result(provider, result, path=None):
+def parse_browser_result(provider, result, path=None, prompt=None):
     if not isinstance(result, dict) or result.get("error"):
         raise ProviderUnavailable(f"{provider} browser did not complete the request")
     if result.get("status") != 200:
@@ -200,7 +200,7 @@ def parse_browser_result(provider, result, path=None):
     elif provider == "grok":
         text = grok_answer(body)
     elif provider == "mistral":
-        text = mistral_answer(body)
+        text = mistral_answer(body, prompt)
     else:
         connect_completed(body)
         text = result.get("text")
@@ -227,7 +227,7 @@ class TabClient:
             raise ValueError("Browser providers use the account's selected web model")
         self.check_cancelled()
         result = broker.submit(self.provider, prompt, path, self.check_cancelled, completion_timeout())
-        return parse_browser_result(self.provider, result, path)
+        return parse_browser_result(self.provider, result, path, prompt)
 
     def stream(self, *args, **kwargs):
         return BufferedStream(self.chat(*args, **kwargs))
