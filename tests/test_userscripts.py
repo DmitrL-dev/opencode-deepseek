@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False, replaced_observer=False, async_insertion=False):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False, replaced_observer=False, async_insertion=False, cached_fetch=False, two_jobs=False, edit_newlines=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
                "path":"/c/fixture", "lease":"fixture-lease", "submitted":False, "expires_in":180}
@@ -68,10 +68,17 @@ class UserscriptFixtureTests(unittest.TestCase):
                             html = html.replace('/* unrelated-request */', "await fetch('/api/chats/new', {method:'POST', body:JSON.stringify({message:editor.value})});")
                         html = html.replace("/api/chat/completions", completion_path)
                         if grok_editor:
-                            html = html.replace('<textarea id="chat-input"></textarea>', '<form data-composer="true"><textarea aria-hidden="true" style="visibility:hidden;position:absolute"></textarea><div id="chat-input" class="query-bar-editor" contenteditable="true" aria-label="Задай Grok любой вопрос"></div></form>')
+                            markup = '<form data-composer="true"><textarea id="chat-input" aria-label="Ask Grok anything"></textarea></form>' if grok_editor == 'textarea' else '<form data-composer="true"><textarea aria-hidden="true" style="visibility:hidden;position:absolute"></textarea><div id="chat-input" class="query-bar-editor" contenteditable="true" aria-label="Задай Grok любой вопрос"></div></form>'
+                            html = html.replace('<textarea id="chat-input"></textarea>', markup)
                             html = html.replace("editor.value", "window.committedDraft")
-                            html = html.replace("editor.addEventListener('keydown'", "editor.addEventListener('input', () => setTimeout(() => window.committedDraft = editor.innerText, 0)); editor.closest('form').addEventListener('submit'")
+                            read = 'editor.value' if grok_editor == 'textarea' else 'editor.innerText'
+                            html = html.replace("editor.addEventListener('keydown'", "editor.addEventListener('input', () => setTimeout(() => window.committedDraft = " + read + ", 0)); editor.closest('form').addEventListener('submit'")
                             html = html.replace("if (event.key !== 'Enter') return;", "event.preventDefault();")
+                        if cached_fetch:
+                            html = html.replace('const editor =', 'window.cachedSiteFetch = window.fetch; const editor =')
+                            html = html.replace('await fetch(', 'await window.cachedSiteFetch(')
+                        if two_jobs:
+                            html = html.replace('await response.text();', "await response.text(); editor.value = ''; editor.textContent = '';")
                         if abandon_first:
                             html = html.replace('/* unrelated-request */', "if (!window.fixtureSent) {window.fixtureSent=1;editor.value='';return;}")
                         if request_object:
@@ -93,8 +100,8 @@ class UserscriptFixtureTests(unittest.TestCase):
                             return {"status":503,"responseText":'{}'}
                         if idle_recovery:
                             return {"status":200,"responseText":'{"job":null}'}
-                        current = {**job, "id":"fixture-job-2", "prompt":prompt + '\nSECOND_REQUEST'} if abandoned or cancelled else job
-                        payload = {"job":None if len(results) >= (2 if recover_cancelled else 1) else current}
+                        current = {**job, "id":"fixture-job-2", "prompt":prompt + '\nSECOND_REQUEST'} if abandoned or cancelled or (two_jobs and results) else job
+                        payload = {"job":None if len(results) >= (2 if recover_cancelled or two_jobs else 1) else current}
                     elif path == "/browser/check":
                         if recover_cancelled and not cancelled:
                             cancelled = True
@@ -108,7 +115,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                         payload = {"ok":True}
                     elif path == "/browser/result":
                         results.append(json.loads(value["data"]))
-                        if recover_cancelled and len(results) == 1:
+                        if (recover_cancelled or edit_newlines) and len(results) == 1:
                             return {"status":409,"responseText":'{}'}
                         payload = {"ok":True}
                     else:
@@ -130,6 +137,9 @@ class UserscriptFixtureTests(unittest.TestCase):
                       const root = nativeShadow.call(this, options);
                       window.fixtureRoots.push(root); return root;
                     };
+                    window.fixtureResponseClones = 0;
+                    const nativeClone = Response.prototype.clone;
+                    Response.prototype.clone = function() { window.fixtureResponseClones++; return nativeClone.call(this); };
                     window.GM = {xmlHttpRequest:async value => {
                       window.fixtureRpcCalls = (window.fixtureRpcCalls || 0) + 1;
                       const response = await window.fixtureRpc(value);
@@ -150,9 +160,11 @@ class UserscriptFixtureTests(unittest.TestCase):
                 if user_edit_on_cancel:
                     page.evaluate("window.fixtureUserEdit = true")
                 if replaced_observer:
-                    page.evaluate("const siteFetch = window.fetch; window.fetch = (...args) => { window.siteFetchUsed = true; return siteFetch(...args); }")
+                    page.evaluate("const siteFetch = window.fetch; window.siteWrapper = (...args) => { window.siteFetchUsed = true; return siteFetch(...args); }; window.fetch = window.siteWrapper;")
                 if async_insertion:
                     page.evaluate("const insert = document.execCommand.bind(document); document.execCommand = (command, ...args) => { if(command === 'insertText'){setTimeout(() => insert(command, ...args),0);return true;}return insert(command,...args);}")
+                if edit_newlines:
+                    page.evaluate("document.querySelector('#chat-input').addEventListener('input', () => { if(window.fixtureEdited) return; window.fixtureEdited = true; setTimeout(() => { const editor = document.querySelector('#chat-input'); const text = (editor.isContentEditable ? editor.innerText : editor.value).replaceAll('\\n',''); if(editor.isContentEditable) editor.textContent = text; else editor.value = text; },0); })")
                 controller = (ROOT/"browser/opencode-controller.user.js").read_text().replace("__BRIDGE_TOKEN__","x"*43,1)
                 page.add_script_tag(content=controller)
                 page.wait_for_function("window.fixtureRoots.length > 0 && window.fixtureRoots[0].querySelector('button')")
@@ -176,6 +188,19 @@ class UserscriptFixtureTests(unittest.TestCase):
                 self.assertEqual(len(results),1)
                 if replaced_observer:
                     self.assertTrue(page.evaluate('window.siteFetchUsed === true'))
+                    self.assertTrue(page.evaluate('window.fetch === window.siteWrapper'))
+                    self.assertEqual(page.evaluate('window.fixtureResponseClones'),1)
+                if edit_newlines:
+                    page.wait_for_function("window.fixtureRoots[0].querySelector('button').textContent === 'OpenCode: остановлено · подключить'")
+                    value = page.locator('#chat-input').evaluate('e => e.isContentEditable ? e.textContent : e.value')
+                    self.assertEqual(value,prompt.replace('\n',''))
+                    return results[0], upstream, value, prompt
+                if two_jobs:
+                    deadline = __import__('time').monotonic() + 5
+                    while len(results) < 2 and __import__('time').monotonic() < deadline:
+                        page.wait_for_timeout(50)
+                    self.assertEqual(len(results),2)
+                    self.assertEqual(page.evaluate('window.fixtureResponseClones'),2)
                 if recover_cancelled:
                     page.wait_for_function("window.fixtureRoots[0].querySelector('button').textContent === 'OpenCode: остановлено · подключить'")
                     value = page.locator('#chat-input').text_content()
@@ -190,7 +215,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                         page.wait_for_timeout(50)
                     self.assertEqual(len(results),2)
                 self.assertTrue(page.evaluate("window.fixtureEventTypes.every(value => value === 'string')"))
-                value = page.locator("#chat-input").text_content() if grok_editor else page.locator("#chat-input").input_value()
+                value = page.locator("#chat-input").evaluate('e => e.isContentEditable ? e.textContent : e.value')
                 return results[-1], upstream, value, prompt
             finally:
                 for held_route in navigation_requests:
@@ -240,6 +265,22 @@ class UserscriptFixtureTests(unittest.TestCase):
         self.assertEqual(len(requests),1)
         self.assertEqual(json.loads(requests[0])['message'],prompt)
         self.assertEqual(grok_answer(base64.b64decode(result['result']['body'])),'FIXTURE_OK')
+
+    def test_cached_startup_fetch_observes_two_jobs_without_duplicate_capture(self):
+        result, requests, _, prompt = self.fixture(cached_fetch=True,two_jobs=True)
+        self.assertEqual(result['id'],'fixture-job-2')
+        self.assertEqual(len(requests),2)
+        self.assertEqual(json.loads(requests[0])['message'],prompt)
+        self.assertEqual(json.loads(requests[1])['message'],prompt + '\nSECOND_REQUEST')
+        self.assertEqual(glm_answer(base64.b64decode(result['result']['body'])),'FIXTURE_OK')
+
+    def test_user_removing_prompt_newline_is_preserved_and_cannot_send(self):
+        for editor in (True,'textarea'):
+            with self.subTest(editor=editor):
+                result, requests, value, prompt = self.fixture(grok_editor=editor,edit_newlines=True)
+                self.assertEqual(requests,[])
+                self.assertEqual(value,prompt.replace('\n',''))
+                self.assertIn('error',result['result'])
 
     def test_slow_navigation_is_not_restarted_by_polling(self):
         status, requests, _, _ = self.fixture(navigation=True)

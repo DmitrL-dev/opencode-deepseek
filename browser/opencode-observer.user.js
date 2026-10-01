@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.2.0
+// @version      0.2.1
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -39,7 +39,7 @@
     if (!value || typeof value.nonce !== "string" || typeof value.prompt !== "string") return;
     const restore = window.fetch;
     active = { nonce: value.nonce, prompt: value.prompt, restore,
-      fetch: createObserver(restore.bind(window)) };
+      observed: false, fetch: restore === earlyObserver ? earlyObserver : createObserver(restore.bind(window)) };
     window.fetch = active.fetch;
     document.dispatchEvent(new CustomEvent("opencode-local-ready-v1", {
       detail: JSON.stringify({ nonce: active.nonce, observing: window.fetch === active.fetch }),
@@ -80,7 +80,7 @@
 
   function createObserver(nativeFetch) {
     return async function bridgeFetch(input, init) {
-      const job = active?.fetch === bridgeFetch ? active : null;
+      const job = active;
       let candidate = null;
       if (job) {
         try {
@@ -98,7 +98,9 @@
       const response = await nativeFetch(input, init);
       const compatibleResponse = location.hostname !== "chat.mistral.ai" || response.status !== 200
         || (response.headers.get("Content-Type") || "").includes("text/event-stream");
-      if (matches && compatibleResponse && active?.nonce === job.nonce) {
+      if (matches && compatibleResponse && active === job && !job.observed) {
+        // Early cached fetch and the per-job outer wrapper share one capture.
+        job.observed = true;
         document.dispatchEvent(new CustomEvent(CHANNEL, { detail: JSON.stringify({ nonce: job.nonce, observing: true }) }));
         // Clone before returning: the frontend may immediately consume its own
         // body. Never await the clone's stream or block frontend rendering.
@@ -111,4 +113,8 @@
       return response;
     };
   }
+  // Frontends can cache fetch during startup; that reference must keep
+  // observing future jobs even when the site later adds its own wrapper.
+  const earlyObserver = createObserver(window.fetch.bind(window));
+  window.fetch = earlyObserver;
 })();

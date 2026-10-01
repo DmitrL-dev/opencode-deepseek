@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.2.0
+// @version      0.2.1
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -90,7 +90,22 @@
   const visible = element => !!element && element.getClientRects().length > 0
     && getComputedStyle(element).visibility === "visible" && !element.closest('[inert], [aria-hidden=true]');
   const editor = () => Array.from(document.querySelectorAll(site.input)).find(visible);
-  const draft = input => input?.isContentEditable ? input.textContent : input?.value;
+  const block = node => node.nodeType === Node.ELEMENT_NODE && /^(P|DIV|LI|PRE|BLOCKQUOTE)$/.test(node.tagName);
+  function editorText(node) {
+    if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+    if (node.nodeName === "BR") {
+      // A lone BR is an empty paragraph's caret placeholder.
+      return block(node.parentNode) && node.parentNode.childNodes.length === 1 ? "" : "\n";
+    }
+    let text = "", previous = null;
+    for (const child of node.childNodes) {
+      if (previous && (block(previous) || block(child))) text += "\n";
+      text += editorText(child);
+      previous = child;
+    }
+    return text;
+  }
+  const draft = input => input?.isContentEditable ? editorText(input) : input?.value;
   const answers = () => Array.from(document.querySelectorAll(".segment:has(.segment-assistant-actions) .segment-content-box"));
 
   function markdown(element) {
@@ -212,8 +227,7 @@
         // Safari can expose the inserted text only on the next event-loop turn.
         // Rich editors also represent line breaks with DOM nodes, not text.
         const current = draft(input);
-        const comparable = value => value.replace(/\u00a0/g, " ").replace(/\r?\n/g, "");
-        if (typeof current !== "string" || comparable(current) !== comparable(job.prompt)) {
+        if (current !== job.prompt) {
           throw new BridgeFailure("The editor did not retain the requested prompt");
         }
         insertedDraft = current;
