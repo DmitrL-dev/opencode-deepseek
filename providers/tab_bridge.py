@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import hmac
 import json
 import os
@@ -10,8 +11,9 @@ import secrets
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 from chat_protocol import Reply
 from settings import ROOT
@@ -72,6 +74,10 @@ class Job:
     owner: str | None = None
     lease: str | None = None
     result: dict | None = None
+    document: str | None = None
+    submitted: bool = False
+    deadline: float = 0
+    check_cancelled: Callable[[], None] | None = field(default=None, repr=False)
 
 
 class Broker:
@@ -82,16 +88,16 @@ class Broker:
     def submit(self, provider, prompt, path, check_cancelled, timeout):
         if provider not in BROWSER_PROVIDERS:
             raise ValueError("Unsupported browser provider")
-        job = Job(secrets.token_urlsafe(24), provider, prompt, path)
+        job = Job(secrets.token_urlsafe(24), provider, prompt, path,
+                  deadline=time.monotonic() + timeout, check_cancelled=check_cancelled)
         with self.condition:
             if provider in self.pending:
                 raise ProviderUnavailable("The provider already has an active browser job")
             self.pending[provider] = job
-            deadline = time.monotonic() + timeout
             try:
                 while job.result is None:
                     check_cancelled()
-                    remaining = deadline - time.monotonic()
+                    remaining = job.deadline - time.monotonic()
                     if remaining <= 0:
                         raise ProviderUnavailable(f"{provider} browser tab did not complete the request; connect it and keep it open")
                     self.condition.wait(min(remaining, 0.1))
@@ -102,24 +108,68 @@ class Broker:
                 # browser results cannot satisfy the next completion.
                 self.pending.pop(provider, None)
 
-    def claim(self, provider, owner):
-        if provider not in BROWSER_PROVIDERS or not isinstance(owner, str) or not 16 <= len(owner) <= 128:
+    @staticmethod
+    def _live(job):
+        if job is None or job.result is not None or time.monotonic() >= job.deadline:
+            return False
+        try:
+            if job.check_cancelled is not None:
+                job.check_cancelled()
+        except asyncio.CancelledError:
+            return False
+        return True
+
+    def claim(self, provider, owner, document):
+        if (provider not in BROWSER_PROVIDERS or not isinstance(owner, str) or not 16 <= len(owner) <= 128
+                or not isinstance(document, str) or not 16 <= len(document) <= 128):
             raise ValueError("Invalid browser tab identity")
         with self.condition:
             job = self.pending.get(provider)
-            if job is None or job.result is not None or job.owner not in (None, owner):
+            if not self._live(job) or job.owner not in (None, owner) or job.document not in (None, document):
                 return None
             if job.owner is None:
                 job.owner, job.lease = owner, secrets.token_urlsafe(24)
+            job.document = document
             return {"id":job.id, "provider":provider, "prompt":job.prompt,
-                    "path":job.path, "lease":job.lease}
+                    "path":job.path, "lease":job.lease, "submitted":job.submitted,
+                    "expires_in":max(0, job.deadline - time.monotonic())}
 
-    def finish(self, provider, job_id, owner, lease, result):
+    def _owned(self, provider, job_id, owner, lease, document):
+        job = self.pending.get(provider)
+        if (not self._live(job) or job.id != job_id or job.owner != owner or job.document != document
+                or not isinstance(lease, str) or not hmac.compare_digest(job.lease or "", lease)):
+            raise ValueError("The browser job is stale or belongs to another document")
+        return job
+
+    def active(self, provider, job_id, owner, lease, document):
         with self.condition:
-            job = self.pending.get(provider)
-            if (job is None or job.result is not None or job.id != job_id or job.owner != owner
-                    or not isinstance(lease, str) or not hmac.compare_digest(job.lease or "", lease)):
-                raise ValueError("The browser job is stale or belongs to another tab")
+            try:
+                self._owned(provider, job_id, owner, lease, document)
+                return True
+            except ValueError:
+                return False
+
+    def begin(self, provider, job_id, owner, lease, document):
+        with self.condition:
+            job = self._owned(provider, job_id, owner, lease, document)
+            if job.submitted:
+                raise ValueError("The browser prompt has already been authorized")
+            job.submitted = True
+
+    def navigate(self, provider, job_id, owner, lease, document):
+        with self.condition:
+            job = self._owned(provider, job_id, owner, lease, document)
+            if job.submitted:
+                raise ValueError("A submitted job cannot transfer documents")
+            # Only an explicit navigation releases the old document. The first
+            # successor claim binds a fresh instance; other copies stay blocked.
+            job.document = None
+
+    def finish(self, provider, job_id, owner, lease, document, result):
+        with self.condition:
+            job = self._owned(provider, job_id, owner, lease, document)
+            if not job.submitted and not result.get("error"):
+                raise ValueError("The browser prompt was not authorized")
             job.result = result
             self.condition.notify_all()
 

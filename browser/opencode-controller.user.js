@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.3
+// @version      0.1.4
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -31,9 +31,11 @@
   let owner = sessionStorage.getItem(key);
   if (!owner) { owner = crypto.randomUUID(); sessionStorage.setItem(key, owner); }
   const activeKey = site.provider + ":" + owner;
+  const documentId = crypto.randomUUID();
   let enabled = await GM.getValue(activeKey, false);
   let pending = null;
   let busy = false;
+  let finishing = false;
   let timer;
 
   const badge = document.createElement("div");
@@ -56,16 +58,20 @@
     return JSON.parse(response.responseText);
   }
 
-  async function finish(result) {
-    const job = pending;
+  const identity = job => ({provider:site.provider, id:job.id, owner, lease:job.lease, document:documentId});
+  function retire() {
     pending = null;
     document.dispatchEvent(new CustomEvent("opencode-local-job-v1", { detail: "null" }));
-    if (!job) return;
-    await rpc("/browser/result", "POST", {
-      provider: site.provider, id: job.id, owner, lease: job.lease, result,
-    });
-    await GM.setValue(activeKey + ":submitted", "");
     label();
+  }
+
+  async function finish(result) {
+    const job = pending;
+    retire();
+    if (!job) return;
+    finishing = true;
+    try { await rpc("/browser/result", "POST", { ...identity(job), result }); }
+    finally { finishing = false; }
   }
 
   button.addEventListener("click", async () => {
@@ -128,12 +134,16 @@
       // response bodies or local pairing key are put in page storage.
       // The old document remains alive until navigation commits. Stop polling
       // now so it cannot repeatedly abort a slow navigation to the same route.
+      await rpc("/browser/navigate", "POST", identity(job));
       clearInterval(timer);
       location.assign(location.origin + target);
       return;
     }
     // The extension can run before the SPA hydrates its signed-in editor.
     for (let attempt = 0; !input && enabled && attempt < 50; attempt++) {
+      if (attempt % 5 === 0 && !(await rpc("/browser/check", "POST", identity(job))).active) {
+        throw new Error("The browser job was cancelled");
+      }
       await new Promise(resolve => setTimeout(resolve, 100));
       input = editor();
     }
@@ -141,9 +151,10 @@
     if (!input) throw new Error("The signed-in chat input is unavailable");
     if (draft(input)?.trim()) throw new Error("The tab has an unsent draft");
     if (input.disabled || input.getAttribute("aria-disabled") === "true") throw new Error("The chat input is busy");
-    const submitted = await GM.getValue(activeKey + ":submitted", "");
-    if (submitted === job.id) throw new Error("The tab was reloaded during a request");
-    pending = { ...job, nonce: crypto.randomUUID(), previousAnswers: answers().length };
+    if (job.submitted) throw new Error("The prompt was already submitted");
+    if (!Number.isFinite(job.expires_in) || job.expires_in <= 0) throw new Error("Invalid browser job deadline");
+    pending = { ...job, nonce: crypto.randomUUID(), previousAnswers: answers().length,
+      deadline: performance.now() + Math.min(job.expires_in, 1800) * 1000 };
     // Use strings across Safari's isolated/page worlds. Do not send upstream
     // until the observer confirms that this exact job can be captured.
     await new Promise((resolve, reject) => {
@@ -165,8 +176,11 @@
         detail: JSON.stringify({ nonce, prompt: job.prompt }),
       }));
     });
-    await GM.setValue(activeKey + ":submitted", job.id);
+    await rpc("/browser/submit", "POST", identity(job));
     if (!enabled || pending?.id !== job.id) throw new Error("The tab was disconnected before submission");
+    if (location.pathname !== target || editor() !== input || draft(input)?.trim()) {
+      throw new Error("The editor changed before submission");
+    }
     input.focus();
     if (input.isContentEditable) {
       if (!document.execCommand("insertText", false, job.prompt)) throw new Error("Chat editor did not accept the prompt");
@@ -183,10 +197,18 @@
   }
 
   async function poll() {
-    if (busy || !enabled || pending) return;
+    if (busy || finishing || !enabled) return;
     busy = true;
     try {
-      const { job } = await rpc("/browser/jobs/" + site.provider + "?owner=" + encodeURIComponent(owner));
+      if (pending) {
+        const job = pending;
+        if (performance.now() >= job.deadline || !(await rpc("/browser/check", "POST", identity(job))).active) {
+          if (pending === job) retire();
+        }
+        return;
+      }
+      const { job } = await rpc("/browser/jobs/" + site.provider + "?owner=" + encodeURIComponent(owner)
+        + "&document=" + encodeURIComponent(documentId));
       if (!job) label();
       if (job) {
         try { await execute(job); }

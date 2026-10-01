@@ -5,6 +5,8 @@ signed-in tab. They do not copy cookies, passwords or Google OAuth tokens into
 the bridge. Each provider has a separate queue and scoped conversation ids.
 All four integrations are opt-in, use the selected web model, and remain
 experimental until verified with the provider's current frontend and account.
+Kimi currently rejects requests with tools: its completed assistant message
+must be linked to the transport result before DOM text can become tool calls.
 
 ## Safari
 
@@ -37,7 +39,10 @@ content context and keeps its local pairing key out of page JavaScript.
 
 Requests to the local job endpoints require the private pairing key and a
 loopback client address. There is no CORS grant. A claimed job is tied to one
-tab, provider, random id and lease; cancelled, late and replayed results fail.
+tab, provider, document instance, random id and lease. Sending requires a
+one-time server authorization; only explicit navigation can hand an unsubmitted
+job to a new document. Cancelled, late and replayed results fail, and the
+controller checks lease liveness while waiting for a response.
 Unsent drafts cause a failure rather than being overwritten. A reload during
 generation fails the job instead of automatically repeating its prompt.
 
@@ -63,6 +68,9 @@ agent, empty tool list and normal permission mode before the prompt is sent.
 Only one successful terminal result is accepted; tool/subagent events fail.
 An available model list does not prove account eligibility: the CLI checks
 regional access again when starting a completion.
+The adapter currently requires POSIX process groups and terminates the entire
+owned group before deleting its temporary workspace, including descendants
+whose parent has already exited.
 
 If the official CLI's token exchange fails specifically on an IPv6 socket,
 `python -m providers.antigravity_ipv4` runs the same official CLI through a

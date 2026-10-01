@@ -15,16 +15,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
-               "path":"/c/fixture", "lease":"fixture-lease"}
+               "path":"/c/fixture", "lease":"fixture-lease", "submitted":False, "expires_in":180}
         if navigation:
             job["path"] = None
         body = ('data: ' + json.dumps({"type":"chat:completion","data":{"phase":"answer","content":"FIXTURE_OK","done":True}}) + '\n\n').encode()
         results, upstream = [], []
         store = {}
         polls = 0
+        abandoned = False
         navigation_requests = []
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
@@ -61,6 +62,11 @@ class UserscriptFixtureTests(unittest.TestCase):
                         if unrelated:
                             html = html.replace('/* unrelated-request */', "await fetch('/api/chats/new', {method:'POST', body:JSON.stringify({message:editor.value})});")
                         html = html.replace("/api/chat/completions", completion_path)
+                        if abandon_first:
+                            html = html.replace('/* unrelated-request */', "if (!window.fixtureSent) {window.fixtureSent=1;editor.value='';return;}")
+                        if request_object:
+                            html = html.replace("fetch('/api/chat/completions', {", "fetch(new Request('/api/chat/completions', {")
+                            html = html.replace("body:JSON.stringify({message:editor.value})\n                            });", "body:JSON.stringify({message:editor.value})\n                            }));")
                         if delayed_editor:
                             html = html.replace('<textarea id="chat-input">', '<textarea id="chat-input" style="display:none">')
                             html = html.replace('const editor =', 'setTimeout(() => document.querySelector("textarea").style.display = "", 1500); const editor =')
@@ -69,7 +75,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                 context.route("**/*", route)
 
                 def rpc(_, value):
-                    nonlocal polls
+                    nonlocal polls, abandoned
                     path = urlsplit(value["url"]).path
                     if path.startswith("/browser/jobs/"):
                         polls += 1
@@ -77,7 +83,16 @@ class UserscriptFixtureTests(unittest.TestCase):
                             return {"status":503,"responseText":'{}'}
                         if idle_recovery:
                             return {"status":200,"responseText":'{"job":null}'}
-                        payload = {"job":None if results else job}
+                        current = {**job, "id":"fixture-job-2", "prompt":prompt + '\nSECOND_REQUEST'} if abandoned else job
+                        payload = {"job":None if results else current}
+                    elif path == "/browser/check":
+                        if abandon_first and not abandoned:
+                            abandoned = True
+                            payload = {"active":False}
+                        else:
+                            payload = {"active":not cancel_before_editor}
+                    elif path in ("/browser/submit", "/browser/navigate"):
+                        payload = {"ok":True}
                     elif path == "/browser/result":
                         results.append(json.loads(value["data"]))
                         payload = {"ok":True}
@@ -186,3 +201,20 @@ class UserscriptFixtureTests(unittest.TestCase):
         result, requests, _, _ = self.fixture(delayed_editor=True)
         self.assertEqual(len(requests),1)
         self.assertEqual(glm_answer(base64.b64decode(result["result"]["body"])),"FIXTURE_OK")
+
+    def test_fetch_request_keeps_its_original_body_and_is_sent_once(self):
+        result, requests, _, prompt = self.fixture(request_object=True)
+        self.assertEqual(len(requests),1)
+        self.assertEqual(json.loads(requests[0])["message"],prompt)
+        self.assertEqual(glm_answer(base64.b64decode(result["result"]["body"])),"FIXTURE_OK")
+
+    def test_cancelled_job_does_not_send_after_editor_hydration(self):
+        result, requests, _, _ = self.fixture(delayed_editor=True, cancel_before_editor=True)
+        self.assertEqual(requests,[])
+        self.assertIn('error',result['result'])
+
+    def test_retired_job_without_response_releases_controller_for_next_job(self):
+        result, requests, _, prompt = self.fixture(abandon_first=True)
+        self.assertEqual(result['id'],'fixture-job-2')
+        self.assertEqual(len(requests),1)
+        self.assertEqual(json.loads(requests[0])['message'],prompt + '\nSECOND_REQUEST')

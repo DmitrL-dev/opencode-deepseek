@@ -67,6 +67,15 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaises(ProviderUnavailable):
                 grok_answer(bad)
 
+    def test_grok_resumed_shape_and_nested_errors(self):
+        model = {"message":"answer", "partial":False}
+        for wrapper in (lambda value: {"result":{"response":{"modelResponse":value}}},
+                        lambda value: {"result":{"modelResponse":value}}):
+            self.assertEqual(grok_answer(json.dumps(wrapper(model)).encode()), "answer")
+            for error in ({"error":True}, {"streamErrors":[{"error":"fatal"}]}):
+                with self.assertRaises(ProviderUnavailable):
+                    grok_answer(json.dumps(wrapper({**model, **error})).encode())
+
     def test_glm_requires_completion_and_excludes_reasoning(self):
         body = (sse({"type":"chat:completion","data":{"phase":"thinking","delta_content":"secret reasoning"}})
                 + sse({"type":"chat:completion","data":{"phase":"answer","delta_content":"answer"}}))
@@ -111,6 +120,17 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(mistral_answer(finished), "answer")
         with self.assertRaises(ProviderUnavailable):
             mistral_answer(finished + sse({"error":"quota"}))
+
+    def test_mistral_never_appends_text_after_terminal_completion(self):
+        text = sse({"choices":[{"delta":{"content":"answer"},"finish_reason":None}]})
+        stop = sse({"choices":[{"delta":{},"finish_reason":"stop"}]})
+        delta = sse({"type":"message.delta","text":"late"})
+        complete = sse({"type":"message.completed"})
+        self.assertEqual(mistral_answer(text + stop + b'data: [DONE]\n\n'), "answer")
+        for body in (text + stop + text, text + complete + delta,
+                     text + complete + complete, text + b'data: [DONE]\n\n' + delta):
+            with self.assertRaises(ProviderUnavailable):
+                mistral_answer(body)
 
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
         for value in ("nan", "inf", "0", "-1", "1801"):
@@ -167,6 +187,43 @@ class ProviderTests(unittest.TestCase):
             pid = int(pidfile.read_text())
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
+
+    @unittest.skipUnless(os.name == 'posix', 'Owned process-group fixture')
+    def test_cli_descendant_ignoring_term_does_not_survive_success_cancel_or_timeout(self):
+        import signal
+        import subprocess
+        for mode in ('success','cancel','timeout'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                pidfile = root / 'child-pid'
+                child = "import os,signal,time,pathlib;signal.signal(signal.SIGTERM,signal.SIG_IGN);pathlib.Path(" + repr(str(pidfile)) + ").write_text(str(os.getpid()));time.sleep(30)"
+                script = root / 'agy-test'
+                script.write_text('#!' + sys.executable + '\nimport sys,json,time,subprocess,pathlib\n'
+                    + 'subprocess.Popen([sys.executable,"-c",' + repr(child) + '])\n'
+                    + 'while not pathlib.Path(' + repr(str(pidfile)) + ').exists(): time.sleep(.01)\n'
+                    + 'print(' + repr(json.dumps(cli_init())) + ',flush=True)\n'
+                    + 'sys.stdin.readline()\n'
+                    + ('print(' + repr(json.dumps({'event':'result','result':{'status':'SUCCESS','response':'answer','conversation_id':UUID}})) + ',flush=True)\n' if mode == 'success' else 'time.sleep(30)\n'))
+                script.chmod(0o700)
+                def cancelled():
+                    if mode == 'cancel' and pidfile.exists():
+                        raise asyncio.CancelledError()
+                try:
+                    with patch.dict(os.environ, {'ANTIGRAVITY_BIN':str(script),'WEB_PROVIDER_TIMEOUT':'2'}):
+                        if mode == 'success':
+                            self.assertEqual(AntigravityClient(cancelled).chat('marker',model='flash').text,'answer')
+                        else:
+                            with self.assertRaises(asyncio.CancelledError if mode == 'cancel' else ProviderUnavailable):
+                                AntigravityClient(cancelled).chat('marker',model='flash')
+                    pid = int(pidfile.read_text())
+                    state = subprocess.run(['ps','-p',str(pid),'-o','stat='],capture_output=True,text=True).stdout.strip()
+                    self.assertTrue(not state or state.startswith('Z'), 'Owned descendant remains runnable: ' + state)
+                finally:
+                    if pidfile.exists():
+                        try:
+                            os.kill(int(pidfile.read_text()),signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
 
     def test_cli_rejects_tool_capabilities_before_sending_prompt(self):
         with tempfile.TemporaryDirectory() as directory:

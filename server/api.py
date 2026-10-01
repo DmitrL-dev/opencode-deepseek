@@ -578,6 +578,12 @@ async def chat_completions(req: ChatCompletionRequest):
             status=404, err_type="model_not_found",
         )
 
+    # Kimi's transport end does not yet identify a successfully completed
+    # assistant message. DOM text must not become executable tool calls.
+    if model_provider(req.model) == "kimi" and req.tools:
+        return _error("Kimi tool calls require verified assistant-message completion; currently unavailable",
+                      status=400, err_type="unsupported_tools")
+
     if req.conversation_id:
         try:
             provider = model_provider(req.model)

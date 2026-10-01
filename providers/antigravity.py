@@ -39,6 +39,25 @@ def cli_path():
     return resolved
 
 
+def stop_process_group(process):
+    """Retire the owned group even when its leader has already exited."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            break
+        if sig == signal.SIGTERM:
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                process.poll()  # Reap the leader without mistaking it for the group.
+                try:
+                    os.killpg(process.pid, 0)
+                except ProcessLookupError:
+                    return
+                time.sleep(.05)
+    process.wait()
+
+
 def parse_result(output, returncode, model, expected_id=None):
     try:
         result = json.loads(output)
@@ -114,6 +133,8 @@ class AntigravityClient:
         if not model:
             raise ValueError("An Antigravity model slug is required")
         validate_model(model)
+        if os.name != "posix":
+            raise ProviderUnavailable("Antigravity adapter requires POSIX process-group cleanup")
         binary = cli_path()
         self.check_cancelled()
         timeout = completion_timeout()
@@ -180,24 +201,11 @@ class AntigravityClient:
                         raise ProviderUnavailable("Antigravity response exceeded the size limit")
                     return parse_stream(output, process.returncode, model, cid)
                 finally:
-                    if process.stdin is not None:
-                        process.stdin.close()
-                    if process.poll() is None:
-                        if os.name == "posix":
-                            try:
-                                os.killpg(process.pid, signal.SIGTERM)
-                            except ProcessLookupError:
-                                pass
-                        else:
-                            process.terminate()
-                        try:
-                            process.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            if os.name == "posix":
-                                os.killpg(process.pid, signal.SIGKILL)
-                            else:
-                                process.kill()
-                            process.wait()
+                    try:
+                        if process.stdin is not None:
+                            process.stdin.close()
+                    finally:
+                        stop_process_group(process)
 
     def stream(self, *args, **kwargs):
         return BufferedStream(self.chat(*args, **kwargs))

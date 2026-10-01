@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.1.2
+// @version      0.1.4
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -75,7 +75,7 @@
     let candidate = null;
     if (job) {
       try {
-        const request = new Request(input, init);
+        const request = new Request(input instanceof Request ? input.clone() : input, init);
         const url = new URL(request.url);
         if (request.method === "POST" && url.origin === location.origin && completionPath(url.pathname)) {
           // No request headers, cookies, tokens or unrelated responses are
