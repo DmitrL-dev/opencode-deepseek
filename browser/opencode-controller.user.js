@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.1.5
+// @version      0.1.6
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -22,7 +22,7 @@
   const BASE = "http://127.0.0.1:8000";
   const sites = {
     "chat.z.ai": { provider: "glm", home: "/", input: "#chat-input", path: /^\/c\/[\w-]+$/ },
-    "grok.com": { provider: "grok", home: "/", input: 'textarea[aria-label="Ask Grok anything"], [contenteditable=true][aria-label="Ask Grok anything"]', path: /^\/c\/[\w-]+$/ },
+    "grok.com": { provider: "grok", home: "/", input: 'form[data-composer=true] .query-bar-editor[contenteditable=true], form[data-composer=true] textarea[aria-label]', path: /^\/c\/[\w-]+$/ },
     "chat.mistral.ai": { provider: "mistral", home: "/work", input: ".ProseMirror[contenteditable=true]", path: /^\/(?:chat|work)\/[\w-]+$/ },
     "www.kimi.com": { provider: "kimi", home: "/", input: ".chat-input-editor[contenteditable=true]", path: /^\/chat\/[\w-]+$/ },
     "www.kimi.ai": { provider: "kimi", home: "/", input: ".chat-input-editor[contenteditable=true]", path: /^\/chat\/[\w-]+$/ },
@@ -85,7 +85,8 @@
     if (enabled) void poll();
   });
 
-  const visible = element => !!element && element.getClientRects().length > 0;
+  const visible = element => !!element && element.getClientRects().length > 0
+    && getComputedStyle(element).visibility === "visible" && !element.closest('[inert], [aria-hidden=true]');
   const editor = () => Array.from(document.querySelectorAll(site.input)).find(visible);
   const draft = input => input?.isContentEditable ? input.textContent : input?.value;
   const answers = () => Array.from(document.querySelectorAll(".segment:has(.segment-assistant-actions) .segment-content-box"));
@@ -194,7 +195,24 @@
     }
     // Invoke the site's own send handler. The observer never constructs an
     // upstream request or touches the user's account credentials.
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    if (site.provider !== "glm") {
+      // Allow the frontend to commit the insertion before its send handler.
+      // A synthetic Enter can otherwise run before React/Vue state updates.
+      const insertedDraft = draft(input);
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (!(await rpc("/browser/check", "POST", identity(job))).active
+          || !enabled || pending?.id !== job.id || location.pathname !== target || editor() !== input
+          || draft(input) !== insertedDraft) {
+        throw new Error("The tab changed or the browser job was cancelled");
+      }
+    }
+    if (site.provider === "grok") {
+      const form = input.closest('form[data-composer=true]');
+      if (!form) throw new Error("The chat submission form is unavailable");
+      form.requestSubmit();
+    } else {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    }
     label("OpenCode: запрос выполняется · отключить");
   }
 

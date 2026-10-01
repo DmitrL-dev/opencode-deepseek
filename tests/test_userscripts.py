@@ -67,8 +67,10 @@ class UserscriptFixtureTests(unittest.TestCase):
                             html = html.replace('/* unrelated-request */', "await fetch('/api/chats/new', {method:'POST', body:JSON.stringify({message:editor.value})});")
                         html = html.replace("/api/chat/completions", completion_path)
                         if grok_editor:
-                            html = html.replace('<textarea id="chat-input"></textarea>', '<div id="chat-input" contenteditable="true" aria-label="Ask Grok anything"></div>')
-                            html = html.replace("editor.value", "editor.innerText")
+                            html = html.replace('<textarea id="chat-input"></textarea>', '<form data-composer="true"><textarea aria-hidden="true" style="visibility:hidden;position:absolute"></textarea><div id="chat-input" class="query-bar-editor" contenteditable="true" aria-label="Задай Grok любой вопрос"></div></form>')
+                            html = html.replace("editor.value", "window.committedDraft")
+                            html = html.replace("editor.addEventListener('keydown'", "editor.addEventListener('input', () => setTimeout(() => window.committedDraft = editor.innerText, 0)); editor.closest('form').addEventListener('submit'")
+                            html = html.replace("if (event.key !== 'Enter') return;", "event.preventDefault();")
                         if abandon_first:
                             html = html.replace('/* unrelated-request */', "if (!window.fixtureSent) {window.fixtureSent=1;editor.value='';return;}")
                         if request_object:
@@ -237,4 +239,9 @@ class UserscriptFixtureTests(unittest.TestCase):
         result, requests, value, _ = self.fixture(grok_editor=True, draft="owned draft")
         self.assertEqual(requests,[])
         self.assertEqual(value,"owned draft")
+        self.assertIn("error",result["result"])
+
+    def test_cancelled_grok_job_cannot_submit_its_form_after_insertion(self):
+        result, requests, _, _ = self.fixture(grok_editor=True, cancel_before_editor=True)
+        self.assertEqual(requests,[])
         self.assertIn("error",result["result"])
