@@ -17,7 +17,8 @@ from typing import Callable
 
 from chat_protocol import Reply
 from settings import ROOT
-from .browser_protocol import connect_completed, glm_answer, grok_answer, mistral_answer
+from .browser_protocol import glm_answer, grok_answer, mistral_answer
+from .kimi_protocol import kimi_answer
 from .common import BufferedStream, ProviderUnavailable, completion_timeout
 from .conversations import decode, encode
 
@@ -202,10 +203,7 @@ def parse_browser_result(provider, result, path=None, prompt=None):
     elif provider == "mistral":
         text = mistral_answer(body, prompt, reference.rsplit("/", 1)[-1])
     else:
-        connect_completed(body)
-        text = result.get("text")
-        if not isinstance(text, str) or not text.strip() or len(text) > 8 * 1024 * 1024:
-            raise ProviderUnavailable("Kimi returned no new completed assistant text")
+        text = kimi_answer(body, prompt, reference.rsplit("/", 1)[-1])
     return Reply(text, token)
 
 

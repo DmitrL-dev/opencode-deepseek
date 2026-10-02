@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.2.1
+// @version      0.2.2
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -106,21 +106,6 @@
     return text;
   }
   const draft = input => input?.isContentEditable ? editorText(input) : input?.value;
-  const answers = () => Array.from(document.querySelectorAll(".segment:has(.segment-assistant-actions) .segment-content-box"));
-
-  function markdown(element) {
-    const root = element.cloneNode(true);
-    root.querySelectorAll("button,svg,[aria-hidden=true]").forEach(e => e.remove());
-    root.querySelectorAll("pre").forEach(pre => {
-      const code = pre.querySelector("code") || pre;
-      const language = (code.className.match(/language-([\w-]+)/) || [])[1] || "";
-      pre.replaceWith(document.createTextNode("\n```" + language + "\n" + code.textContent + "\n```\n"));
-    });
-    root.querySelectorAll("br").forEach(e => e.replaceWith(document.createTextNode("\n")));
-    root.querySelectorAll("p,li,h1,h2,h3,h4,blockquote").forEach(e => e.appendChild(document.createTextNode("\n")));
-    return root.textContent.trim();
-  }
-
   document.addEventListener("opencode-local-response-v1", async event => {
     let value;
     try { value = JSON.parse(event.detail); } catch (_) { return; }
@@ -130,19 +115,11 @@
     const job = pending;
     // Give the frontend a bounded chance to render its final answer and route.
     for (let attempt = 0; attempt < 50 && pending === job; attempt++) {
-      if (site.path.test(location.pathname) && (site.provider !== "kimi" || answers().length > job.previousAnswers)) break;
+      if (site.path.test(location.pathname)) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     if (pending !== job) return;
-    let text;
-    if (site.provider === "kimi") {
-      const current = answers();
-      if (current.length <= job.previousAnswers) {
-        await finish({ error: "No new assistant answer was rendered" }).catch(() => {}); return;
-      }
-      text = markdown(current[current.length - 1]);
-    }
-    await finish({ status: value.status, body: value.body, path: location.pathname, ...(text ? { text } : {}) }).catch(() => label("OpenCode: ответ не принят"));
+    await finish({ status: value.status, body: value.body, path: location.pathname }).catch(() => label("OpenCode: ответ не принят"));
   });
 
   async function execute(job) {
@@ -174,7 +151,7 @@
     if (input.disabled || input.getAttribute("aria-disabled") === "true") throw new BridgeFailure("The chat input is busy");
     if (job.submitted) throw new BridgeFailure("The prompt was already submitted");
     if (!Number.isFinite(job.expires_in) || job.expires_in <= 0) throw new BridgeFailure("Invalid browser job deadline");
-    pending = { ...job, nonce: crypto.randomUUID(), previousAnswers: answers().length,
+    pending = { ...job, nonce: crypto.randomUUID(),
       deadline: performance.now() + Math.min(job.expires_in, 1800) * 1000 };
     // Use strings across Safari's isolated/page worlds. Do not send upstream
     // until the observer confirms that this exact job can be captured.
