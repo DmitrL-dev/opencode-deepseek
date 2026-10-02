@@ -360,6 +360,55 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[1].text,"answer")
         self.assertEqual(calls,["first","second"])
 
+    async def test_cancel_during_dispatch_journal_prevents_http_and_cli_submission(self):
+        import tempfile
+        from pathlib import Path
+        from deepseek.client import DeepSeekClient
+        from qwen.client import QwenClient
+        from providers.access import AccessGuard
+        from providers import antigravity
+        from server import config
+        for provider, model in (('deepseek', 'deepseek-chat'), ('qwen', 'qwen3.8-omni-flash'), ('gemini', 'gemini-owned')):
+            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
+                guard = AccessGuard(Path(directory) / 'pauses.json', interval=0)
+                entered, release = threading.Event(), threading.Event()
+                signals, requests = [], []
+                def save(state):
+                    if state.get(provider, {}).get('dispatched') and not entered.is_set():
+                        signals.append(api._worker_cancellation.get())
+                        entered.set()
+                        if not release.wait(10):
+                            raise TimeoutError('owned test did not release journal write')
+                    original_save(state)
+                def upstream(request):
+                    requests.append(request.url.path)
+                    return httpx.Response(403)
+                if provider == 'gemini':
+                    client = antigravity.AntigravityClient()
+                else:
+                    client_type = DeepSeekClient if provider == 'deepseek' else QwenClient
+                    client = client_type.__new__(client_type)
+                    client.access_guard = None
+                    client._request_lock = threading.Lock()
+                    client._http = httpx.Client(base_url='https://offline.invalid', transport=httpx.MockTransport(upstream))
+                original_save = guard._save
+                wire_model = model if provider == 'qwen' else 'flash' if provider == 'gemini' else 'default'
+                req = ChatCompletionRequest(model=model, messages=[ChatMessage(role='user', content='owned cancellation fixture')])
+                with patch.object(api, 'guard', guard), patch.object(api, '_request_client', return_value=client), patch.dict(api.MODEL_MAP, {model:wire_model}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS, {model:provider}), patch.dict(api._provider_request_gates, {provider:asyncio.Lock()}), patch.object(guard, '_save', side_effect=save), patch.object(antigravity, 'cli_path', return_value='/offline-owned-cli'), patch.object(antigravity.subprocess, 'Popen', side_effect=AssertionError('cancelled attempt must not spawn')) as spawn:
+                    task = asyncio.create_task(api._run_chat_with_retry('owned cancellation fixture', req, wire_model))
+                    try:
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 3))
+                        task.cancel()
+                        self.assertTrue(await asyncio.to_thread(signals[0].wait, 2))
+                    finally:
+                        release.set()
+                        result = await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+                        if provider != 'gemini':
+                            client.close()
+                    self.assertIsInstance(result[0], asyncio.CancelledError)
+                    self.assertEqual(requests, [])
+                    spawn.assert_not_called()
+
     async def test_cancelled_tool_request_starts_no_continuation_or_auth_retry(self):
         for auth_failure in (False, True):
             with self.subTest(auth_failure=auth_failure):
