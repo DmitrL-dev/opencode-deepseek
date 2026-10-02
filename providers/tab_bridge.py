@@ -201,6 +201,8 @@ def parse_browser_result(provider, result, path=None, prompt=None):
     elif provider == "grok":
         text = grok_answer(body)
     elif provider == "mistral":
+        if not body.lstrip().startswith(b"15:"):
+            raise ProviderUnavailable("Mistral browser response lacks verifiable turn binding")
         request_turn = result.get("request_turn")
         if path is not None and (not isinstance(request_turn, dict)
                                  or request_turn.get("chat_id") != reference.rsplit("/", 1)[-1]):

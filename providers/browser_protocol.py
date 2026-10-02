@@ -214,15 +214,15 @@ def _mistral_patch_answer(body, prompt, expected_chat, request_turn):
                     raise ProviderUnavailable("Unsupported Mistral answer chunks")
                 chunks = [_mistral_text_chunk(c) for c in value]
             elif isinstance(path, str) and path.startswith("/contentChunks/"):
-                index, _, field = path[len("/contentChunks/"):].partition("/")
+                index, separator, field = path[len("/contentChunks/"):].partition("/")
                 if not 1 <= len(index) <= 6 or not index.isascii() or not index.isdecimal() or chunks is None:
                     raise ProviderUnavailable("Invalid Mistral chunk index")
                 index = int(index)
-                if not field and op == "add" and index <= len(chunks):
+                if not separator and op == "add" and index <= len(chunks):
                     chunks.insert(index, _mistral_text_chunk(value))
                 elif index >= len(chunks):
                     raise ProviderUnavailable("Mistral patched a missing chunk")
-                elif not field and op == "remove":
+                elif not separator and op == "remove":
                     del chunks[index]
                 elif field == "text" and op in ("append", "replace") and isinstance(value, str):
                     chunks[index]["text"] = value if op == "replace" else chunks[index]["text"] + value

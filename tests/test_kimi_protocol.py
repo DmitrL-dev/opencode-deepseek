@@ -88,6 +88,23 @@ class KimiProtocolTests(unittest.TestCase):
             with self.assertRaises(ProviderUnavailable):
                 self.answer(value)
 
+    def test_inline_assistant_blocks_cannot_lose_thinking_provenance(self):
+        frames = copy.deepcopy(fixture())
+        frames[3]['message']['blocks'] = [{'id':'text','parentId':'',
+            'think':{'content':'owned seed thought'}}]
+        with self.assertRaises(ProviderUnavailable):
+            self.answer(frames)
+        frames[3]['message']['blocks'] = []
+        self.assertEqual(self.answer(frames),'answer')
+
+    def test_assistant_identity_cannot_equal_its_user_parent(self):
+        frames = copy.deepcopy(fixture())
+        frames[3]['message']['id'] = 'user'
+        frames[4]['block']['messageId'] = 'user'
+        frames[9]['message']['id'] = 'user'
+        with self.assertRaises(ProviderUnavailable):
+            self.answer(frames)
+
     def test_error_or_notification_cannot_complete_a_partial_answer(self):
         for event in ({'error':{'code':'quota'}},{'notification':{'type':'quota'}},{'unknown':{}}):
             with self.subTest(event=event), self.assertRaises(ProviderUnavailable):

@@ -59,8 +59,10 @@ def kimi_answer(body, prompt, expected_chat):
                         raise ProviderUnavailable("Kimi user turn does not match this request")
                     user = identity
                 elif role == "assistant" and user is not None and assistant is None:
-                    if value.get("parentId") != user or status != "MESSAGE_STATUS_GENERATING":
+                    if identity == user or value.get("parentId") != user or status != "MESSAGE_STATUS_GENERATING":
                         raise ProviderUnavailable("Kimi assistant is not bound to this user turn")
+                    if "blocks" in value and value["blocks"] != []:
+                        raise ProviderUnavailable("Unsupported Kimi inline assistant blocks")
                     assistant = identity
                 else:
                     raise ProviderUnavailable("Kimi returned ambiguous message turns")

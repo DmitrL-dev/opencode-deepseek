@@ -226,6 +226,24 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaises(ProviderUnavailable):
             parse_browser_result('mistral',{**result,'request_turn':None},None,'owned prompt')
 
+    def test_mistral_browser_api_rejects_unbound_legacy_streams(self):
+        legacy = sse({'type':'message.delta','text':'unbound legacy answer'}) + sse({'type':'message.completed'}) + b'data: [DONE]\n\n'
+        result = {'status':200,'path':'/work/owned-chat','body':base64.b64encode(legacy).decode()}
+        for path, turn in ((None,None), ('/work/owned-chat',{'chat_id':'owned-chat'}),
+                           ('/work/owned-chat',{'chat_id':'owned-chat','user_id':'owned-user','version':99}),
+                           ('/work/owned-chat',{'chat_id':'owned-chat','user_id':'owned-user','version':0})):
+            with self.subTest(path=path,turn=turn), self.assertRaises(ProviderUnavailable):
+                parse_browser_result('mistral',{**result,'request_turn':turn},path,'owned prompt')
+
+    def test_mistral_trailing_chunk_separator_is_not_a_whole_chunk(self):
+        bootstrap, root, _, _, success, _, message = self.mistral_patch_fixture()
+        chunks = message([{'op':'replace','path':'/contentChunks','value':[
+            {'type':'text','text':'first'}, {'type':'text','text':'second'}]}])
+        for patch in ({'op':'remove','path':'/contentChunks/0/'},
+                      {'op':'add','path':'/contentChunks/0/','value':{'type':'text','text':'inserted'}}):
+            with self.subTest(patch=patch), self.assertRaises(ProviderUnavailable):
+                mistral_answer(bootstrap+root+chunks+message([patch])+success+b'8:null\n','owned prompt','owned-chat')
+
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
         for value in ("nan", "inf", "0", "-1", "1801"):
             with patch.dict(os.environ, {"WEB_PROVIDER_TIMEOUT": value}), self.assertRaises(ValueError):
