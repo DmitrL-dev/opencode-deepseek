@@ -562,7 +562,8 @@ opencode run --model local-qwen/qwen3.8-max "Explain this project"
 
 Qwen uses separate private state: `session/qwen/session.json` and
 `session/qwen/profile/`. The server loads a usable cache only. Missing or expired
-sessions return `401 login_required`: run `python -m qwen.auth` manually, then
+sessions return `401 login_required`, or a terminal `login_required` error in an
+already-open SSE stream: run `python -m qwen.auth` manually, then
 restart the server. Upstream rejection persists a pause; no automatic refresh
 or replay occurs.
 
