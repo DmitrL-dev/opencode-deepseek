@@ -238,14 +238,37 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(result[0],asyncio.CancelledError)
         self.assertEqual(broker.pending,{})
 
-    async def test_kimi_tools_are_rejected_before_any_browser_job(self):
+    async def test_kimi_only_bound_completed_wire_answers_can_become_tools(self):
+        from tests.test_kimi_protocol import fixture, wire
         tools = [{"type":"function","function":{"name":"read","parameters":{"type":"object"}}}]
-        with patch.dict(config.MODEL_MAP,{"kimi-web":"default"}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS,{"kimi-web":"kimi"}), patch.object(api,"build_provider_client") as factory:
+        text = '```tool_calls\n[{"name":"read","arguments":{"filePath":"fixture.txt"}}]\n```'
+        for completed in (False, True):
             for stream in (False, True):
-                response = await self.client.post("/v1/chat/completions",json={"model":"kimi-web","tools":tools,"stream":stream,"messages":[{"role":"user","content":"marker"}]})
-                self.assertEqual(response.status_code,400)
-                self.assertEqual(response.json()["error"]["type"],"unsupported_tools")
-        factory.assert_not_called()
+                def submit_result(provider, prompt, *args, **kwargs):
+                    frames = fixture()
+                    frames[2]['message']['blocks'][0]['text']['content'] = prompt
+                    frames[7]['block']['text']['content'] = text
+                    frames[8]['block']['text']['content'] = ''
+                    if not completed:
+                        frames = frames[:-2] + frames[-1:]
+                    return {'status':200,'path':'/chat/owned-chat','body':base64.b64encode(wire(frames)).decode()}
+                with patch.dict(os.environ,{'BROWSER_BRIDGE_ENABLED':'1'}), patch.dict(config.MODEL_MAP,{'kimi-web':'default'}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS,{'kimi-web':'kimi'}), patch.object(api,'build_provider_client',return_value=tab_bridge.TabClient('kimi')), patch.object(tab_bridge.broker,'submit',side_effect=submit_result) as submit:
+                    response = await self.client.post('/v1/chat/completions',json={'model':'kimi-web','tools':tools,'stream':stream,'messages':[{'role':'user','content':'marker'}]})
+                submit.assert_called_once()
+                if not completed:
+                    self.assertNotIn('"tool_calls":',response.text)
+                    self.assertIn('error',response.text)
+                    continue
+                self.assertEqual(response.status_code,200)
+                if stream:
+                    frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith('data: ') and line != 'data: [DONE]']
+                    self.assertTrue(any(frame['choices'][0]['delta'].get('tool_calls',[{}])[0].get('function',{}).get('name') == 'read' for frame in frames))
+                    self.assertTrue(any(frame['choices'][0]['finish_reason'] == 'tool_calls' for frame in frames))
+                    self.assertIn('data: [DONE]',response.text)
+                else:
+                    choice = response.json()['choices'][0]
+                    self.assertEqual(choice['message']['tool_calls'][0]['function']['name'],'read')
+                    self.assertEqual(choice['finish_reason'],'tool_calls')
 
     async def test_failed_grok_terminal_never_becomes_tool_calls(self):
         tools = [{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]
