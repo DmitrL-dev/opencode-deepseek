@@ -112,6 +112,15 @@ def connect_completed(body):
         raise ProviderUnavailable("Kimi disconnected before Connect completion")
 
 
+def _mistral_text_chunk(value):
+    if not isinstance(value, dict) or value.get("type") != "text" or not isinstance(value.get("text"), str):
+        raise ProviderUnavailable("Unsupported Mistral answer chunk")
+    context = value.get("_context")
+    if "_context" in value and (not isinstance(context, dict) or context.get("type") != "reasoning"):
+        raise ProviderUnavailable("Unsupported Mistral text context")
+    return {"text": value["text"], "reasoning": "_context" in value}
+
+
 def _mistral_patch_answer(body, prompt, expected_chat):
     """Vibe's data stream: bind text patches to its completed assistant turn."""
     user = None
@@ -190,17 +199,28 @@ def _mistral_patch_answer(body, prompt, expected_chat):
             if assistant != (message_id, version) or done:
                 raise ProviderUnavailable("Mistral sent patches outside the active assistant turn")
             if path == "/contentChunks" and op == "replace":
-                if not isinstance(value, list) or any(
-                    not isinstance(c, dict) or c.get("type") != "text" or not isinstance(c.get("text"), str)
-                    for c in value
-                ):
+                if not isinstance(value, list):
                     raise ProviderUnavailable("Unsupported Mistral answer chunks")
-                chunks = [c["text"] for c in value]
-            elif isinstance(path, str) and path.startswith("/contentChunks/") and path.endswith("/text") and op == "append":
-                index = path[len("/contentChunks/"):-len("/text")]
-                if not index.isascii() or not index.isdecimal() or chunks is None or int(index) >= len(chunks) or not isinstance(value, str):
-                    raise ProviderUnavailable("Invalid Mistral text append")
-                chunks[int(index)] += value
+                chunks = [_mistral_text_chunk(c) for c in value]
+            elif isinstance(path, str) and path.startswith("/contentChunks/"):
+                index, _, field = path[len("/contentChunks/"):].partition("/")
+                if not 1 <= len(index) <= 6 or not index.isascii() or not index.isdecimal() or chunks is None:
+                    raise ProviderUnavailable("Invalid Mistral chunk index")
+                index = int(index)
+                if not field and op == "add" and index <= len(chunks):
+                    chunks.insert(index, _mistral_text_chunk(value))
+                elif index >= len(chunks):
+                    raise ProviderUnavailable("Mistral patched a missing chunk")
+                elif not field and op == "remove":
+                    del chunks[index]
+                elif field == "text" and op in ("append", "replace") and isinstance(value, str):
+                    chunks[index]["text"] = value if op == "replace" else chunks[index]["text"] + value
+                elif field == "_context" and op == "remove" and chunks[index]["reasoning"]:
+                    chunks[index]["reasoning"] = False
+                elif field == "_context/endTime" and op == "replace" and chunks[index]["reasoning"] and type(value) in (int, float):
+                    continue  # Presentation timing does not change answer text.
+                else:
+                    raise ProviderUnavailable("Unsupported Mistral chunk patch")
             elif path == "/content" and op in ("replace", "append") and isinstance(value, str):
                 content = value if op == "replace" else content + value
             elif path == "/generationStatus" and op == "replace":
@@ -209,7 +229,7 @@ def _mistral_patch_answer(body, prompt, expected_chat):
                 done = True
             else:
                 raise ProviderUnavailable("Unsupported Mistral assistant patch")
-    text = "".join(chunks) if chunks is not None else content
+    text = "".join(c["text"] for c in chunks if not c["reasoning"]) if chunks is not None else content
     if not done or not ended or not text.strip() or (content and chunks is not None and content != text):
         raise ProviderUnavailable("Mistral disconnected before a complete assistant answer")
     return text

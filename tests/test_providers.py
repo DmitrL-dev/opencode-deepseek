@@ -181,6 +181,35 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaises(ProviderUnavailable):
                 parse_browser_result('mistral',{**result,'path':other},other,'owned prompt')
 
+    def test_mistral_temporary_chunks_are_removed_before_final_answer(self):
+        bootstrap, root, chunks, _, success, _, message = self.mistral_patch_fixture()
+        temporary = message([{'op':'add','path':'/contentChunks/1','value':{'type':'text','text':'temporary tool-call text','_context':{'type':'reasoning'}}},
+                             {'op':'add','path':'/contentChunks/2','value':{'type':'text','text':'temporary second chunk'}}])
+        final = message([{'op':'replace','path':'/contentChunks/1/_context/endTime','value':123},
+                         {'op':'remove','path':'/contentChunks/2'},
+                         {'op':'remove','path':'/contentChunks/1/_context'},
+                         {'op':'replace','path':'/contentChunks/1/text','value':''},
+                         {'op':'append','path':'/contentChunks/0/text','value':'wer'}])
+        prefix = bootstrap + root + chunks + temporary
+        self.assertEqual(mistral_answer(prefix+final+success+b'8:null\n','owned prompt','owned-chat'),'answer')
+        for patch in ({'op':'add','path':'/contentChunks/99','value':{'type':'text','text':'wrong'}},
+                      {'op':'remove','path':'/contentChunks/99'},
+                      {'op':'replace','path':'/contentChunks/0/text','value':{}},
+                      {'op':'replace','path':'/contentChunks/0/unknown','value':'wrong'}):
+            with self.subTest(patch=patch), self.assertRaises(ProviderUnavailable):
+                mistral_answer(prefix+message([patch])+success+b'8:null\n','owned prompt','owned-chat')
+
+    def test_mistral_reasoning_context_never_becomes_final_answer_text(self):
+        bootstrap, root, _, _, success, _, message = self.mistral_patch_fixture()
+        chunks = message([{'op':'replace','path':'/contentChunks','value':[
+            {'type':'text','text':'owned reasoning','_context':{'type':'reasoning'}},
+            {'type':'text','text':'answer'}]}])
+        self.assertEqual(mistral_answer(bootstrap+root+chunks+success+b'8:null\n','owned prompt','owned-chat'),'answer')
+        for context in (None,{'type':'unknown'}):
+            bad = message([{'op':'replace','path':'/contentChunks','value':[{'type':'text','text':'answer','_context':context}]}])
+            with self.assertRaises(ProviderUnavailable):
+                mistral_answer(bootstrap+root+bad+success+b'8:null\n','owned prompt','owned-chat')
+
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
         for value in ("nan", "inf", "0", "-1", "1801"):
             with patch.dict(os.environ, {"WEB_PROVIDER_TIMEOUT": value}), self.assertRaises(ValueError):
