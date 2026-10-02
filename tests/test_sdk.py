@@ -18,7 +18,7 @@ class OpenAISdkTests(unittest.TestCase):
         isolated_access(self)
         self.addCleanup(patch.stopall)
         patch.object(api, "SESSION_REFRESH_ENABLED", False).start()
-        self.transport = TestClient(api.app)
+        self.transport = TestClient(api.app, client=(self.id(), 123))
         self.transport.__enter__()
         self.addCleanup(self.transport.__exit__, None, None, None)
         self.sdk = OpenAI(api_key="offline", base_url="http://testserver/v1",

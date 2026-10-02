@@ -13,6 +13,7 @@ from pathlib import Path
 
 from chat_protocol import Reply
 from .common import BufferedStream, ProviderUnavailable, completion_timeout
+from .access import provider_attempt
 from .conversations import decode, encode, validate_model
 
 AGENT = """---
@@ -130,6 +131,10 @@ class AntigravityClient:
         self.check_cancelled = check_cancelled
 
     def chat(self, prompt, conversation_id=None, model=None, thinking=False, search=False):
+        with provider_attempt("gemini", self.check_cancelled) as attempt:
+            return self._chat(prompt, conversation_id, model, thinking, search, attempt)
+
+    def _chat(self, prompt, conversation_id, model, thinking, search, attempt):
         if thinking or search:
             raise ProviderUnavailable("Gemini bridge does not support thinking/search switches")
         cid = None
@@ -161,6 +166,7 @@ class AntigravityClient:
             with tempfile.TemporaryDirectory(prefix="opencode-agy-io-") as output_directory, \
                     open(Path(output_directory) / "stdout", "w+b") as stdout, \
                     tempfile.TemporaryFile() as stderr:
+                attempt.dispatch()
                 process = subprocess.Popen(command, cwd=directory, stdin=subprocess.PIPE,
                                            stdout=stdout, stderr=stderr, start_new_session=True)
                 try:
@@ -187,6 +193,7 @@ class AntigravityClient:
                     validate_init(first, model)
                     # Send no prompt until the CLI confirms its exact model,
                     # selected agent, and empty tool capability list.
+                    attempt.check()
                     pending = (json.dumps({"event":"user", "message":{"content":prompt}}) + "\n").encode()
                     while process.poll() is None:
                         self.check_cancelled()
@@ -194,6 +201,7 @@ class AntigravityClient:
                             raise ProviderUnavailable("Antigravity output exceeded the size limit")
                         if time.monotonic() >= deadline:
                             raise ProviderUnavailable("Antigravity completion timed out")
+                        attempt.check()
                         try:
                             process.communicate(input=pending, timeout=0.1)
                         except subprocess.TimeoutExpired:

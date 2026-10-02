@@ -20,6 +20,7 @@ from settings import ROOT
 from .browser_protocol import glm_answer, grok_answer, mistral_answer
 from .kimi_protocol import kimi_answer
 from .common import BufferedStream, ProviderUnavailable, completion_timeout
+from .access import provider_attempt, current_attempt, ProviderRejected
 from .conversations import decode, encode
 
 BROWSER_PROVIDERS = frozenset(("grok", "mistral", "kimi", "glm"))
@@ -79,6 +80,7 @@ class Job:
     submitted: bool = False
     deadline: float = 0
     check_cancelled: Callable[[], None] | None = field(default=None, repr=False)
+    access_attempt: object = field(default=None, repr=False)
 
 
 class Broker:
@@ -90,7 +92,8 @@ class Broker:
         if provider not in BROWSER_PROVIDERS:
             raise ValueError("Unsupported browser provider")
         job = Job(secrets.token_urlsafe(24), provider, prompt, path,
-                  deadline=time.monotonic() + timeout, check_cancelled=check_cancelled)
+                  deadline=time.monotonic() + timeout, check_cancelled=check_cancelled,
+                  access_attempt=current_attempt(provider))
         with self.condition:
             if provider in self.pending:
                 raise ProviderUnavailable("The provider already has an active browser job")
@@ -98,6 +101,8 @@ class Broker:
             try:
                 while job.result is None:
                     check_cancelled()
+                    if job.access_attempt is not None:
+                        job.access_attempt.check()
                     remaining = job.deadline - time.monotonic()
                     if remaining <= 0:
                         raise ProviderUnavailable(f"{provider} browser tab did not complete the request; connect it and keep it open")
@@ -114,9 +119,11 @@ class Broker:
         if job is None or job.result is not None or time.monotonic() >= job.deadline:
             return False
         try:
+            if job.access_attempt is not None:
+                job.access_attempt.check()
             if job.check_cancelled is not None:
                 job.check_cancelled()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, ProviderRejected):
             return False
         return True
 
@@ -155,6 +162,8 @@ class Broker:
             job = self._owned(provider, job_id, owner, lease, document)
             if job.submitted:
                 raise ValueError("The browser prompt has already been authorized")
+            if job.access_attempt is not None:
+                job.access_attempt.dispatch()
             job.submitted = True
 
     def navigate(self, provider, job_id, owner, lease, document):
@@ -220,6 +229,10 @@ class TabClient:
         self.provider, self.check_cancelled = provider, check_cancelled
 
     def chat(self, prompt, conversation_id=None, model=None, thinking=False, search=False):
+        with provider_attempt(self.provider, self.check_cancelled):
+            return self._chat(prompt, conversation_id, model, thinking, search)
+
+    def _chat(self, prompt, conversation_id, model, thinking, search):
         if not bridge_enabled():
             raise ProviderUnavailable("Enable BROWSER_BRIDGE_ENABLED and pair your normal browser tab first")
         if thinking or search:

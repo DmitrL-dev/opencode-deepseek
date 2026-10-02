@@ -97,6 +97,12 @@ def _check_cancellation(signal):
 def _check_cancelled():
     _check_cancellation(_worker_cancellation.get())
 
+
+def _cancellation_check():
+    # Browser lease routes run in another worker; retain the origin's Event.
+    signal = _worker_cancellation.get()
+    return lambda: _check_cancellation(signal)
+
 def _tool_names(tools) -> set:
     """Extract requested tool names from OpenAI tool objects, defensively."""
     names = set()
@@ -125,7 +131,7 @@ def get_client(force_refresh: bool = False, rejected_client=None) -> DeepSeekCli
     """Cache a client; an explicit reset reloads the session file without browsing."""
     global _client
     with _client_lock:
-        if _client is None or (force_refresh and (
+        if _client is None or _client.session.age >= SESSION_MAX_AGE or (force_refresh and (
             rejected_client is None or _client is rejected_client
         )):
             _client = _build_client(force=force_refresh)
@@ -220,17 +226,31 @@ async def _run_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_ty
     return await _run_queued(_chat_with_retry, prompt, req, model_type, gate=_request_queue(req))
 
 
+def _invalidate_client(provider, client=None):
+    global _client, _qwen_client
+    lock = _qwen_client_lock if provider == "qwen" else _client_lock
+    if provider in ("deepseek", "qwen"):
+        with lock:
+            if provider == "deepseek" and (client is None or _client is client):
+                _client = None
+            elif provider == "qwen" and (client is None or _qwen_client is client):
+                _qwen_client = None
+
+
 def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
-    """One attempt only. An uncertain outcome must never replay a prompt."""
+    """One durable attempt; cancellation cannot erase an uncertain dispatch."""
     provider = model_provider(req.model)
-    guard.wait(provider, _check_cancelled)
+    client = None
     try:
-        client = _request_client(req)
-        _check_cancelled()
-        return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
+        with guard.attempt(provider, _cancellation_check()) as attempt:
+            client = _request_client(req)
+            attempt.check()  # Recheck a pause that happened while building a client.
+            return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
     except LoginRequired:
+        _invalidate_client(provider, client)
         raise
     except Exception as exc:
+        _invalidate_client(provider, client)
         raise guard.reject(provider, exc) from exc
 
 
@@ -367,11 +387,12 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
 
 def _stream_with_retry(client: DeepSeekClient, prompt: str,
                        req: ChatCompletionRequest, model_type):
-    """Expose one stream; latch every upstream failure before reporting it."""
     iterator = None
+    attempt = None
     try:
-        guard.wait(model_provider(req.model), _check_cancelled)
+        attempt = guard.begin(model_provider(req.model), _cancellation_check())
         stream = _open_stream(client, prompt, req, model_type)
+        stream.access_attempt = attempt
         iterator = iter(stream)
         first = next(iterator, _MISSING)
 
@@ -379,16 +400,22 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             if first is not _MISSING:
                 yield first
             yield from iterator
+            # Verify and clear the journal before yielding final SSE frames.
+            attempt.complete()
 
         yield from stream_chunks(req.model, stream, iterator=remaining())
     except LoginRequired as exc:
+        _invalidate_client(model_provider(req.model), client)
         yield _sse_error(str(exc), "login_required")
     except Exception as exc:
+        _invalidate_client(model_provider(req.model), client)
         error = guard.reject(model_provider(req.model), exc)
         yield _sse_error(str(error), error.code)
     finally:
         if iterator is not None and hasattr(iterator, "close"):
             iterator.close()
+        if attempt is not None:
+            attempt.abort()
 
 
 async def _plain_stream(client, prompt, req, model_type):
@@ -494,7 +521,7 @@ async def chat_completions(req: ChatCompletionRequest):
         )
 
     try:
-        guard.check(model_provider(req.model))
+        await _run_worker(guard.check, model_provider(req.model))
     except ProviderRejected as exc:
         return _error(str(exc), status=403, err_type=exc.code)
 

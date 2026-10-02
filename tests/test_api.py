@@ -465,6 +465,7 @@ class RefreshAndStartupTests(unittest.TestCase):
 
     def test_rejected_stale_client_reuses_already_refreshed_client(self):
         old, current = Mock(),Mock()
+        current.session.age = 0
         with patch.object(api,"_client",current), patch.object(api,"_build_client") as build:
             self.assertIs(api.get_client(True,rejected_client=old),current)
             build.assert_not_called()

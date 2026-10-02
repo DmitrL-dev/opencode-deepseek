@@ -30,8 +30,8 @@ def parse(payload):
 def mock_client(payload):
     client = DeepSeekClient.__new__(DeepSeekClient)
     client._request_lock = threading.Lock()
-    client.create_chat_session = lambda: "fake-session"
-    client._pow_header = lambda: "fake-pow"
+    client.create_chat_session = lambda **kwargs: "fake-session"
+    client._pow_header = lambda **kwargs: "fake-pow"
     client._http = httpx.Client(base_url="https://chat.deepseek.com",
                                transport=httpx.MockTransport(lambda request: httpx.Response(200,text=payload,headers={"content-type":"text/event-stream"})))
     return client

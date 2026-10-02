@@ -86,6 +86,8 @@ class LoginRequired(RuntimeError):
     (e.g. inside the server, where we can't pop open a browser mid-request).
     The message tells the user how to log in."""
 
+    before_dispatch = True
+
     DEFAULT = (
         "No DeepSeek session found. Log in first by running:\n"
         "    python -m deepseek.auth\n"

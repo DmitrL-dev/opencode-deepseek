@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -86,6 +87,94 @@ class AccessTests(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", "from server.config import MODEL_MAP; print(MODEL_MAP)"], env=env, capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), "{}")
 
+    def test_failed_pause_write_and_crash_keep_dispatch_durably_blocked(self):
+        guard = AccessGuard(self.path, interval=0)
+        attempt = guard.begin("deepseek")
+        attempt.dispatch()
+        with patch.object(guard, "_save", side_effect=OSError("disk full")):
+            attempt.abort(ProviderRejected("account_restricted"))
+        restarted = AccessGuard(self.path, interval=0)
+        with self.assertRaises(ProviderRejected):
+            restarted.begin("deepseek")
+
+    def test_failed_journal_write_prevents_dispatch(self):
+        guard = AccessGuard(self.path, interval=0)
+        with patch.object(guard, "_save", side_effect=OSError("disk full")), self.assertRaises(ProviderRejected):
+            guard.begin("deepseek")
+
+    def test_cancellation_before_dispatch_and_after_verified_finish_are_harmless(self):
+        guard = AccessGuard(self.path, interval=0)
+        before = guard.begin("deepseek")
+        before.abort(asyncio.CancelledError())
+        guard.check("deepseek")
+        verified = guard.begin("deepseek")
+        verified.dispatch()
+        verified.complete()
+        verified.abort(GeneratorExit())
+        guard.check("deepseek")
+        submitted = guard.begin("deepseek")
+        submitted.dispatch()
+        submitted.abort(asyncio.CancelledError())
+        with self.assertRaises(ProviderRejected):
+            AccessGuard(self.path, interval=0).check("deepseek")
+
+    def test_pacing_reservation_is_shared_with_another_process(self):
+        guard = AccessGuard(self.path, interval=2)
+        guard.wait("qwen")
+        code = "from providers.access import AccessGuard; from pathlib import Path; import sys,time; g=AccessGuard(Path(sys.argv[1]),interval=2); g.wait('qwen'); print(time.time())"
+        first_dispatch = json.loads(self.path.read_text())["qwen"]["next_at"] - 2
+        run = subprocess.run([sys.executable, "-c", code, str(self.path)], capture_output=True, text=True, check=True, timeout=60)
+        self.assertGreaterEqual(float(run.stdout.strip()) - first_dispatch, 1.95)
+
+    def test_paused_direct_browser_and_cli_adapters_create_no_job_or_process(self):
+        from providers import access, tab_bridge, antigravity
+        guard = AccessGuard(self.path, interval=0)
+        for provider in ("glm", "gemini"):
+            guard.reject(provider, ProviderRejected("access_denied"))
+        with patch.object(access, "guard", guard), patch.object(tab_bridge.broker, "submit") as submit, patch.object(antigravity.subprocess, "Popen") as spawn:
+            for client in (tab_bridge.TabClient("glm"), antigravity.AntigravityClient()):
+                with self.assertRaises(ProviderRejected):
+                    client.chat("offline", model="default")
+            submit.assert_not_called()
+            spawn.assert_not_called()
+
+    def test_existing_browser_lease_is_revoked_by_pause_and_submitted_cancel_latches(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from providers.tab_bridge import Broker
+        for submitted in (False, True):
+            guard = AccessGuard(self.path, interval=0)
+            guard.resume("glm")
+            broker, cancelled = Broker(), threading.Event()
+            def check():
+                if cancelled.is_set():
+                    raise asyncio.CancelledError()
+            def submit():
+                with guard.attempt("glm", check):
+                    return broker.submit("glm", "offline", None, check, 10)
+            with ThreadPoolExecutor() as pool:
+                future = pool.submit(submit)
+                deadline = time.monotonic() + 5
+                while not broker.pending and time.monotonic() < deadline:
+                    time.sleep(.005)
+                job = broker.claim("glm", "owner-123456789012345", "document-123456789012345")
+                self.assertIsNotNone(job)
+                args = ("glm", job["id"], "owner-123456789012345", job["lease"], "document-123456789012345")
+                if submitted:
+                    broker.begin(*args)
+                    cancelled.set()
+                    with self.assertRaises(asyncio.CancelledError):
+                        future.result(timeout=5)
+                    self.assertEqual(guard.status()["glm"], "upstream_failure")
+                else:
+                    pending = broker.pending["glm"]
+                    guard.reject("glm", ProviderRejected("account_restricted"))
+                    self.assertFalse(broker.active(*args))
+                    with self.assertRaises(ValueError):
+                        broker.begin(*args)
+                    self.assertFalse(pending.submitted)
+                    with self.assertRaises(ProviderRejected):
+                        future.result(timeout=5)
+
 
 class SafetySdkTests(unittest.TestCase):
     def setUp(self):
@@ -95,7 +184,7 @@ class SafetySdkTests(unittest.TestCase):
         for patcher in (patch.object(api, "guard", self.guard), patch.dict(api.MODEL_MAP, {**DEEPSEEK_MODEL_MAP, **QWEN_MODEL_MAP}, clear=True)):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.transport = TestClient(api.app)
+        self.transport = TestClient(api.app, client=(self.id(), 123))
         self.transport.__enter__()
         self.addCleanup(self.transport.__exit__, None, None, None)
         # Keep the SDK's actual default retry policy enabled.
@@ -180,3 +269,43 @@ class SafetySdkTests(unittest.TestCase):
             with TestClient(api.app):
                 pass
         build.assert_not_called()
+
+    def test_pause_after_factory_prevents_actual_http_dispatch(self):
+        client, calls = self.deepseek_fixture("/api/v0/chat/completion")
+        def factory():
+            self.guard.reject("deepseek", ProviderRejected("account_restricted"))
+            return client
+        with patch.object(api, "get_client", side_effect=factory), self.assertRaises(PermissionDeniedError):
+            self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
+        self.assertEqual(calls, [])
+
+    def test_signin_and_resume_replace_rejected_clients_without_server_restart(self):
+        from chat_protocol import Reply
+        for provider, model in (("deepseek", "deepseek-chat"), ("qwen", "qwen3.8-max")):
+            old, fresh = Mock(), Mock()
+            old.session.age = 0
+            old.session.usable = True
+            old.chat.side_effect = ProviderRejected("session_expired")
+            fresh.chat.return_value = Reply("verified", None)
+            cache = "_client" if provider == "deepseek" else "_qwen_client"
+            builder = "_build_client" if provider == "deepseek" else "QwenClient"
+            with patch.object(api, cache, old), patch.object(api, builder, return_value=fresh) as build, patch.object(api, "get_qwen_session"):
+                with self.assertRaises(PermissionDeniedError):
+                    self.sdk.chat.completions.create(model=model, messages=self.messages)
+                AccessGuard(self.guard.path, interval=0).resume(provider)
+                reply = self.sdk.chat.completions.create(model=model, messages=self.messages)
+                self.assertEqual(reply.choices[0].message.content, "verified")
+                self.assertEqual(old.chat.call_count, 1)
+                self.assertEqual(fresh.chat.call_count, 1)
+                build.assert_called_once()
+
+    def test_close_real_stream_before_terminal_blocks_another_completion(self):
+        from tests.test_stream import mock_client, snapshot
+        client = mock_client(snapshot("partial"))
+        client.access_guard = self.guard
+        stream = iter(client.stream("fixture"))
+        self.assertEqual(next(stream), "partial")
+        stream.close()
+        with self.assertRaises(ProviderRejected):
+            list(client.stream("must not send"))
+        client.close()
