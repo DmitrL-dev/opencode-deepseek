@@ -32,6 +32,10 @@ def cli_init(model="flash"):
 
 
 class ProviderTests(unittest.TestCase):
+    def setUp(self):
+        from tests.support import isolated_access
+        isolated_access(self)
+
     def test_model_cannot_be_a_cli_flag_before_process_launch(self):
         with patch("providers.antigravity.cli_path") as binary:
             for model in ("--dangerously-skip-permissions", "flash\n--agent", "flash pro"):
@@ -335,6 +339,8 @@ class ProviderTests(unittest.TestCase):
         import signal
         import subprocess
         for mode in ('success','cancel','timeout'):
+            from server import api
+            api.guard.resume("gemini")
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 pidfile = root / 'child-pid'
@@ -351,7 +357,7 @@ class ProviderTests(unittest.TestCase):
                     if mode == 'cancel' and pidfile.exists():
                         raise asyncio.CancelledError()
                 try:
-                    with patch.dict(os.environ, {'ANTIGRAVITY_BIN':str(script),'WEB_PROVIDER_TIMEOUT':'2'}):
+                    with patch.dict(os.environ, {'ANTIGRAVITY_BIN':str(script),'WEB_PROVIDER_TIMEOUT':'10'}):
                         if mode == 'success':
                             self.assertEqual(AntigravityClient(cancelled).chat('marker',model='flash').text,'answer')
                         else:

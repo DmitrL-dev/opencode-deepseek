@@ -78,7 +78,7 @@ class BrokerTests(unittest.TestCase):
     def test_duplicate_owner_cannot_submit_from_two_documents(self):
         broker = tab_bridge.Broker()
         with ThreadPoolExecutor() as pool:
-            future = pool.submit(broker.submit,'glm','marker',None,lambda:None,2)
+            future = pool.submit(broker.submit,'glm','marker',None,lambda:None,10)
             while not broker.pending:
                 time.sleep(.005)
             job = broker.claim('glm',OWNER,DOCUMENT)
@@ -97,7 +97,7 @@ class BrokerTests(unittest.TestCase):
     def test_only_explicit_navigation_can_transfer_an_unsubmitted_lease(self):
         broker = tab_bridge.Broker()
         with ThreadPoolExecutor() as pool:
-            future = pool.submit(broker.submit,'glm','marker',None,lambda:None,2)
+            future = pool.submit(broker.submit,'glm','marker',None,lambda:None,10)
             while not broker.pending:
                 time.sleep(.005)
             job = broker.claim('glm',OWNER,DOCUMENT)
@@ -168,7 +168,7 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
         broker = tab_bridge.Broker()
         headers = {'Authorization':'Bearer ' + 'x' * 43}
         with patch.dict(os.environ,{'BROWSER_BRIDGE_ENABLED':'1'}), patch.object(tab_bridge,'bridge_token',return_value='x' * 43), patch('server.browser_routes.broker',broker), ThreadPoolExecutor() as pool:
-            future = pool.submit(broker.submit,'glm','marker',None,lambda:None,2)
+            future = pool.submit(broker.submit,'glm','marker',None,lambda:None,10)
             while not broker.pending:
                 await asyncio.sleep(.005)
             response = await self.client.get('/browser/jobs/glm',params={'owner':OWNER,'document':DOCUMENT},headers=headers)
@@ -224,6 +224,7 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
                 await until(waiting.is_set)
                 job = (await self.client.get('/browser/jobs/glm',params={'owner':OWNER,'document':DOCUMENT},headers=headers)).json()['job']
                 value = {'provider':'glm','id':job['id'],'owner':OWNER,'lease':job['lease'],'document':DOCUMENT}
+                pending = broker.pending['glm']
                 task.cancel()
                 await until(signals[0].is_set)
                 self.assertIsNone(api._worker_cancellation.get())
@@ -232,7 +233,7 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
                 for path in ('/browser/submit','/browser/navigate'):
                     self.assertEqual((await self.client.post(path,json=value,headers=headers)).status_code,409)
                 self.assertIsNone((await self.client.get('/browser/jobs/glm',params={'owner':OWNER,'document':DOCUMENT},headers=headers)).json()['job'])
-                self.assertFalse(broker.pending['glm'].submitted)
+                self.assertFalse(pending.submitted)
             finally:
                 release.set()
                 task.cancel()

@@ -11,7 +11,7 @@ from typing import Iterator, Optional
 import httpx
 
 from chat_protocol import Reply, sse_events
-from providers.access import rejection, guard
+from providers.access import rejection, guard, current_attempt
 from .auth import Session, get_session
 
 BASE = "https://chat.qwen.ai"
@@ -200,7 +200,12 @@ class QwenClient:
             timeout=httpx.Timeout(120, read=300),
         )
 
-    def create_chat(self, model: str) -> str:
+    def create_chat(self, model: str, access_attempt=None) -> str:
+        if access_attempt is None and self.access_guard is not None:
+            with self.access_guard.attempt("qwen") as attempt:
+                return self.create_chat(model, attempt)
+        if access_attempt is not None:
+            access_attempt.dispatch()
         response = self._http.post("/api/v2/chats/new", json={
             "chatId": "", "models": [model], "timestamp": int(time.time() * 1000),
             "chat_type": "t2t", "chat_mode": "normal",
@@ -248,19 +253,28 @@ class _Stream:
 
     def __iter__(self):
         with self.client._request_lock:
-            access = self.client.access_guard
-            if access is not None:
-                access.wait("qwen")
+            access = getattr(self.client, "access_guard", None)
+            attempt = getattr(self, "access_attempt", None) or current_attempt("qwen")
+            owned = attempt is None and access is not None
+            if owned:
+                attempt = access.begin("qwen")
+            self.access_attempt = attempt
             try:
                 yield from self._generate()
-            except Exception as exc:
-                if access is not None:
-                    raise access.reject("qwen", exc) from exc
+                if owned:
+                    attempt.complete()
+            except BaseException as exc:
+                if attempt is not None:
+                    attempt.abort(exc)
                 raise
+
+    def _dispatch(self):
+        if self.access_attempt is not None:
+            self.access_attempt.dispatch()
 
     def _generate(self):
         if self.chat_id is None:
-            self.chat_id = self.client.create_chat(self.model)
+            self.chat_id = self.client.create_chat(self.model, self.access_attempt)
         timestamp = int(time.time())
         chat_type = "search" if self.search else "t2t"
         feature_config = {"thinking_enabled": self.thinking, "auto_thinking": False,
@@ -277,6 +291,7 @@ class _Stream:
                           "timestamp": timestamp, "user_action": "chat", "feature_config": feature_config}],
         }
         meta = {"chat_id": self.chat_id}
+        self._dispatch()
         with self.client._http.stream("POST", "/api/v2/chat/completions", params={"chat_id": self.chat_id},
                                      json=body, headers={"X-Request-Id": str(uuid.uuid4()),
                                                          "X-Accel-Buffering": "no"}) as response:

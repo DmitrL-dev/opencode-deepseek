@@ -29,7 +29,7 @@ from typing import Iterator, Optional
 import httpx
 
 from chat_protocol import Reply, sse_events as _sse_events
-from providers.access import ProviderRejected, rejection, guard
+from providers.access import ProviderRejected, rejection, guard, current_attempt
 
 from .auth import Session, get_session
 from .pow import DeepSeekPow
@@ -119,12 +119,22 @@ class DeepSeekClient:
 
     # --- protocol steps -----------------------------------------------------
 
-    def create_chat_session(self) -> str:
+    def create_chat_session(self, access_attempt=None) -> str:
+        if access_attempt is None and getattr(self, "access_guard", None) is not None:
+            with self.access_guard.attempt("deepseek") as attempt:
+                return self.create_chat_session(attempt)
+        if access_attempt is not None:
+            access_attempt.dispatch()
         r = self._http.post("/api/v0/chat_session/create", json={})
         r.raise_for_status()
         return _biz(r.json())["chat_session"]["id"]
 
-    def _pow_header(self, target_path: str = COMPLETION_PATH) -> str:
+    def _pow_header(self, target_path: str = COMPLETION_PATH, access_attempt=None) -> str:
+        if access_attempt is None and getattr(self, "access_guard", None) is not None:
+            with self.access_guard.attempt("deepseek") as attempt:
+                return self._pow_header(target_path, attempt)
+        if access_attempt is not None:
+            access_attempt.dispatch()
         r = self._http.post(
             "/api/v0/chat/create_pow_challenge", json={"target_path": target_path}
         )
@@ -203,21 +213,30 @@ class _Stream:
         self._message_id: Optional[int] = parent_id
         self.finish_reason = "stop"
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self):
         with self._client._request_lock:
             access = getattr(self._client, "access_guard", None)
-            if access is not None:
-                access.wait("deepseek")
+            attempt = getattr(self, "access_attempt", None) or current_attempt("deepseek")
+            owned = attempt is None and access is not None
+            if owned:
+                attempt = access.begin("deepseek")
+            self.access_attempt = attempt
             try:
                 yield from self._generate()
-            except Exception as exc:
-                if access is not None:
-                    raise access.reject("deepseek", exc) from exc
+                if owned:
+                    attempt.complete()
+            except BaseException as exc:
+                if attempt is not None:
+                    attempt.abort(exc)
                 raise
+
+    def _dispatch(self):
+        if self.access_attempt is not None:
+            self.access_attempt.dispatch()
 
     def _generate(self) -> Iterator[str]:
         if self._session_id is None:
-            self._session_id = self._client.create_chat_session()
+            self._session_id = self._client.create_chat_session(access_attempt=self.access_attempt)
         body = {
             "chat_session_id": self._session_id,
             "parent_message_id": self._parent_id,
@@ -232,8 +251,9 @@ class _Stream:
         if self._model is not None:
             body["model_type"] = self._model
         # PoW challenges are short-lived, so solve right before the request.
-        headers = {"x-ds-pow-response": self._client._pow_header()}
+        headers = {"x-ds-pow-response": self._client._pow_header(access_attempt=self.access_attempt)}
         meta: dict = {}
+        self._dispatch()
         with self._client._http.stream(
             "POST", COMPLETION_PATH, json=body, headers=headers
         ) as resp:

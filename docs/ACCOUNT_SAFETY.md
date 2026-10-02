@@ -25,8 +25,11 @@ auxiliary provider for tasks using another account.
 Each request gets one attempt. The server never refreshes and resubmits an
 authentication rejection. JSON business errors, SSE error events, HTTP denials,
 quotas, unsupported protocols and uncertain transport outcomes stop access to
-that provider. The pause is saved privately in `session/provider-pauses.json`
-and survives restarts. An account restriction or malformed pause file is not a
+that provider. Before any provider dispatch, an attempt journal is saved privately in
+`session/provider-pauses.json`. Failure to write it prevents dispatch. An
+unfinished dispatch remains blocked after a crash or failed pause write; only
+a verified completion clears it. Cancellation before dispatch does not create
+a pause, but cancellation after dispatch without a verified result does. An account restriction or malformed pause file is not a
 reason to create another conversation, switch models, relogin automatically,
 rotate accounts, change fingerprints or try another regional route.
 
@@ -39,11 +42,15 @@ an upstream-shaped `5xx` error. No raw upstream error payload is published or
 stored in the pause file.
 
 Attempts, including valid tool continuations, are spaced by 10 seconds by
-default (`PROVIDER_MIN_INTERVAL`). This is pacing, not an account quota or a
+default (`PROVIDER_MIN_INTERVAL`); the reservation is shared between processes
+using the same checkout. This is pacing, not an account quota or a
 promise that automation is permitted. Use one server process: multiple workers
 or direct client instances do not share an in-flight queue. Direct DeepSeek and
 Qwen client streams also use the default guard; custom guard injection is for
-transport ownership and isolated offline tests.
+transport ownership and isolated offline tests. Default browser/CLI clients
+also share attempt ownership, and an existing browser lease checks the pause
+again before authorization to submit. Rejected cached sessions are invalidated
+so a manual sign-in plus explicit resume can load the new token.
 
 ## Manual recovery
 
