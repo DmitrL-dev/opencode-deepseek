@@ -56,6 +56,70 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
 
+    async def test_concurrent_http_requests_queue_behind_a_live_attempt(self):
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        def chat(prompt, *args):
+            calls.append(prompt)
+            if len(calls) == 1:
+                entered.set()
+                release.wait(timeout=5)
+            return Reply("answer", "fixture:2")
+        fake = Mock()
+        fake.chat.side_effect = chat
+        with patch.object(api, "get_client", return_value=fake):
+            first = asyncio.create_task(self.post())
+            self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+            second = asyncio.create_task(self.post())
+            try:
+                await asyncio.sleep(.03)
+                self.assertFalse(second.done())
+                self.assertEqual(len(calls), 1)
+            finally:
+                release.set()
+            responses = await asyncio.gather(first, second)
+        self.assertEqual([response.status_code for response in responses], [200, 200])
+        self.assertEqual(len(calls), 2)
+
+    async def test_unowned_contender_cannot_pause_or_invalidate_its_owner(self):
+        owner = api.guard.begin("deepseek")
+        fake = Mock()
+        fake.session.age = 0
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user", content="offline")])
+        with patch.object(api, "_client", fake), patch.object(api, "get_client") as factory:
+            with self.assertRaises(ProviderRejected):
+                api._chat_with_retry("contender", req, "default")
+            self.assertIs(api._client, fake)
+            factory.assert_not_called()
+        owner.check()
+        owner.complete()
+        api.guard.check("deepseek")
+
+    async def test_precreated_stream_selects_fresh_client_after_resume(self):
+        old = mock_client("")
+        old._http.close()
+        calls = []
+        def muted(request):
+            calls.append(request.url.path)
+            return httpx.Response(200, json={"code": 0, "data": {"biz_code": 5, "biz_msg": "user is muted"}})
+        old._http = httpx.Client(base_url="https://offline.invalid", transport=httpx.MockTransport(muted))
+        fresh = mock_client(snapshot("fresh", "FINISHED"))
+        self.addCleanup(old.close)
+        self.addCleanup(fresh.close)
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user", content="offline")], stream=True)
+        with patch.object(api, "get_client", side_effect=[old, fresh]) as factory:
+            first = await api.chat_completions(req)
+            second = await api.chat_completions(req)
+            factory.assert_not_called()
+            first_text = "".join([frame async for frame in first.body_iterator])
+            self.assertIn("account_restricted", first_text)
+            api.guard.resume("deepseek")
+            second_text = "".join([frame async for frame in second.body_iterator])
+        self.assertIn("fresh", second_text)
+        self.assertNotIn('"error"', second_text)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(factory.call_count, 2)
+
     async def test_tool_choice_violations_never_return_executable_calls(self):
         fake = Mock()
         fake.chat.return_value = Reply(block([{"name":"bash","arguments":{"command":"echo audit"}}]),"fake:2")

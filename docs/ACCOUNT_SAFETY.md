@@ -12,7 +12,8 @@ No live requalification of the changed code used that restricted account.
 All providers are disabled by default, including DeepSeek (`DEEPSEEK_ENABLED=0`).
 Enabling a provider is an explicit decision. Existing `.env` settings cannot
 enable automatic server browser login or background session capture anymore.
-Missing or expired sessions return `401 login_required`; sign in manually with
+Missing or expired sessions return `401 login_required` before streaming starts,
+or a terminal `login_required` SSE error after headers have been sent; sign in manually with
 `python -m deepseek.auth` or `python -m qwen.auth`, then restart the server.
 Authentication does not remove a pause.
 
@@ -37,7 +38,7 @@ A paused provider returns HTTP `403` with an error `code` and `retryable: false`
 before any client, browser job or CLI completion is created. If streaming headers
 are already sent, the first failure is a terminal SSE error; subsequent attempts
 get HTTP `403` before provider access. Invalid local tool responses use HTTP
-`400`, and missing sessions use `401`, so standard SDKs cannot replay a turn on
+`400`, and missing sessions use `401` or a terminal SSE error, so standard SDKs cannot replay a turn on
 an upstream-shaped `5xx` error. No raw upstream error payload is published or
 stored in the pause file.
 
@@ -48,8 +49,10 @@ promise that automation is permitted. Use one server process: multiple workers
 or direct client instances do not share an in-flight queue. Direct DeepSeek and
 Qwen client streams also use the default guard; custom guard injection is for
 transport ownership and isolated offline tests. Default browser/CLI clients
-also share attempt ownership, and an existing browser lease checks the pause
-again before authorization to submit. Rejected cached sessions are invalidated
+also share attempt ownership. Browser leases check ownership, cancellation and
+expiry during pacing and immediately before authorization to submit. Manual
+resume revokes the previous attempt; it cannot authorize an old job or let it
+pause a new owner. Rejected cached sessions are invalidated
 so a manual sign-in plus explicit resume can load the new token.
 
 ## Manual recovery

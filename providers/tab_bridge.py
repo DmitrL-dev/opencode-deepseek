@@ -162,8 +162,21 @@ class Broker:
             job = self._owned(provider, job_id, owner, lease, document)
             if job.submitted:
                 raise ValueError("The browser prompt has already been authorized")
+            def validate():
+                if time.monotonic() >= job.deadline or job.result is not None:
+                    raise ValueError("The browser lease expired before submission")
+                try:
+                    if job.check_cancelled is not None:
+                        job.check_cancelled()
+                except asyncio.CancelledError:
+                    raise ValueError("The browser lease was cancelled") from None
             if job.access_attempt is not None:
-                job.access_attempt.dispatch()
+                try:
+                    job.access_attempt.dispatch(validate)
+                    job.access_attempt.check()
+                except (asyncio.CancelledError, ProviderRejected):
+                    raise ValueError("The browser lease was revoked before submission") from None
+            validate()
             job.submitted = True
 
     def navigate(self, provider, job_id, owner, lease, document):

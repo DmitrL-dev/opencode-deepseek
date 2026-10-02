@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.2.4
+// @version      0.2.5
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -125,6 +125,8 @@
   });
 
   async function execute(job) {
+    if (!Number.isFinite(job.expires_in) || job.expires_in <= 0) throw new BridgeFailure("Invalid browser job deadline");
+    const deadline = performance.now() + Math.min(job.expires_in, 1800) * 1000;
     let input = editor();
     if (draft(input)?.trim()) throw new BridgeFailure("The tab has an unsent draft");
     const target = job.path || site.home;
@@ -152,9 +154,7 @@
     if (draft(input)?.trim()) throw new BridgeFailure("The tab has an unsent draft");
     if (input.disabled || input.getAttribute("aria-disabled") === "true") throw new BridgeFailure("The chat input is busy");
     if (job.submitted) throw new BridgeFailure("The prompt was already submitted");
-    if (!Number.isFinite(job.expires_in) || job.expires_in <= 0) throw new BridgeFailure("Invalid browser job deadline");
-    pending = { ...job, nonce: crypto.randomUUID(),
-      deadline: performance.now() + Math.min(job.expires_in, 1800) * 1000 };
+    pending = { ...job, nonce: crypto.randomUUID(), deadline };
     // Use strings across Safari's isolated/page worlds. Do not send upstream
     // until the observer confirms that this exact job can be captured.
     await new Promise((resolve, reject) => {
@@ -181,6 +181,10 @@
       }));
     });
     await rpc("/browser/submit", "POST", identity(job));
+    if (performance.now() >= deadline || !(await rpc("/browser/check", "POST", identity(job))).active
+        || performance.now() >= deadline) {
+      throw new BridgeFailure("The browser lease ended before insertion");
+    }
     if (!enabled || pending?.id !== job.id) throw new BridgeFailure("The tab was disconnected before submission");
     if (location.pathname !== target || editor() !== input || draft(input)?.trim()) {
       throw new BridgeFailure("The editor changed before submission");
@@ -220,6 +224,7 @@
         if (draft(input) !== insertedDraft) throw new BridgeFailure("The editor draft changed after insertion");
         if (insertedMarkup !== null && input.innerHTML !== insertedMarkup) throw new BridgeFailure("The editor markup changed after insertion");
       }
+      if (performance.now() >= deadline) throw new BridgeFailure("The browser lease expired before sending");
       if (site.provider === "grok") {
         const form = input.closest('form[data-composer=true]');
         if (!form) throw new BridgeFailure("The chat submission form is unavailable");

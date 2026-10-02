@@ -113,12 +113,14 @@ class ObserverBoundaryFixtureTests(unittest.TestCase):
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
-    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False, replaced_observer=False, async_insertion=False, cached_fetch=False, two_jobs=False, edit_newlines=False):
+    def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False, replaced_observer=False, async_insertion=False, cached_fetch=False, two_jobs=False, edit_newlines=False, expire_before_insertion=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"
         job = {"id":"fixture-job", "provider":"glm", "prompt":prompt,
                "path":"/c/fixture", "lease":"fixture-lease", "submitted":False, "expires_in":180}
         if navigation:
             job["path"] = None
+        if expire_before_insertion:
+            job['expires_in'] = .05
         body = ('data: ' + json.dumps({"type":"chat:completion","data":{"phase":"answer","content":"FIXTURE_OK","done":True}}) + '\n\n').encode()
         if grok_editor:
             job["provider"] = "grok"
@@ -201,14 +203,14 @@ class UserscriptFixtureTests(unittest.TestCase):
                         current = {**job, "id":"fixture-job-2", "prompt":prompt + '\nSECOND_REQUEST'} if abandoned or cancelled or (two_jobs and results) else job
                         payload = {"job":None if len(results) >= (2 if recover_cancelled or two_jobs else 1) else current}
                     elif path == "/browser/check":
-                        if recover_cancelled and not cancelled:
+                        if recover_cancelled and not cancelled and value.get('fixtureInserted'):
                             cancelled = True
                             payload = {"active":False}
-                        elif abandon_first and not abandoned:
+                        elif abandon_first and not abandoned and value.get('fixtureSent'):
                             abandoned = True
                             payload = {"active":False}
                         else:
-                            payload = {"active":not cancel_before_editor}
+                            payload = {"active":not (cancel_before_editor and (not grok_editor or value.get('fixtureInserted')))}
                     elif path in ("/browser/submit", "/browser/navigate"):
                         payload = {"ok":True}
                     elif path == "/browser/result":
@@ -240,7 +242,10 @@ class UserscriptFixtureTests(unittest.TestCase):
                     Response.prototype.clone = function() { window.fixtureResponseClones++; return nativeClone.call(this); };
                     window.GM = {xmlHttpRequest:async value => {
                       window.fixtureRpcCalls = (window.fixtureRpcCalls || 0) + 1;
-                      const response = await window.fixtureRpc(value);
+                      const editor = document.querySelector('#chat-input');
+                      const response = await window.fixtureRpc({...value,
+                        fixtureInserted:!!(editor?.value || editor?.textContent), fixtureSent:!!window.fixtureSent});
+                      if (window.fixtureExpire && value.url.endsWith('/browser/submit')) await new Promise(resolve => setTimeout(resolve,150));
                       if (window.fixtureUserEdit && value.url.endsWith('/browser/check') && response.responseText === '{"active": false}') {
                         const editor = document.querySelector('#chat-input');
                         editor.textContent = 'user edited owned fixture';
@@ -257,6 +262,8 @@ class UserscriptFixtureTests(unittest.TestCase):
                     page.locator("#chat-input").fill(draft)
                 if user_edit_on_cancel:
                     page.evaluate("window.fixtureUserEdit = true")
+                if expire_before_insertion:
+                    page.evaluate("window.fixtureExpire = true")
                 if replaced_observer:
                     page.evaluate("const siteFetch = window.fetch; window.siteWrapper = (...args) => { window.siteFetchUsed = true; return siteFetch(...args); }; window.fetch = window.siteWrapper;")
                 if async_insertion:
@@ -405,6 +412,12 @@ class UserscriptFixtureTests(unittest.TestCase):
         result, requests, _, _ = self.fixture(delayed_editor=True, cancel_before_editor=True)
         self.assertEqual(requests,[])
         self.assertIn('error',result['result'])
+
+    def test_glm_expired_authorization_does_not_insert_or_send(self):
+        result, requests, value, _ = self.fixture(expire_before_insertion=True)
+        self.assertEqual(requests, [])
+        self.assertEqual(value, '')
+        self.assertIn('error', result['result'])
 
     def test_retired_job_without_response_releases_controller_for_next_job(self):
         result, requests, _, prompt = self.fixture(abandon_first=True)

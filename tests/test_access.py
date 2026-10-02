@@ -102,6 +102,48 @@ class AccessTests(unittest.TestCase):
         with patch.object(guard, "_save", side_effect=OSError("disk full")), self.assertRaises(ProviderRejected):
             guard.begin("deepseek")
 
+    def test_resume_revokes_old_attempt_without_poisoning_a_new_owner(self):
+        guard = AccessGuard(self.path, interval=0)
+        old = guard.begin("gemini")
+        old.dispatch()
+        other = AccessGuard(self.path, interval=0)
+        other.resume("gemini")
+        with self.assertRaises(ProviderRejected):
+            old.check()
+        new = other.begin("gemini")
+        old.abort(ProviderRejected())
+        self.assertNotIn("pause", json.loads(self.path.read_text())["gemini"])
+        new.check()
+        new.complete()
+        guard.check("gemini")
+
+    def test_revoked_undispatched_attempt_does_not_mark_a_new_owner_unavailable(self):
+        guard = AccessGuard(self.path, interval=0)
+        old = guard.begin('glm')
+        guard.resume('glm')
+        new = guard.begin('glm')
+        old.abort(asyncio.CancelledError())
+        new.check()
+        new.complete()
+        guard.check('glm')
+
+    def test_resume_during_cli_initialization_prevents_stdin_submission(self):
+        from providers import access, antigravity
+        from tests.test_providers import cli_init
+        guard = AccessGuard(self.path, interval=0)
+        script = Path(self.directory.name) / "agy-fixture"
+        sent = Path(self.directory.name) / "sent"
+        script.write_text("#!" + sys.executable + "\nimport sys,json,pathlib\nprint(" + repr(json.dumps(cli_init())) + ",flush=True)\nvalue=sys.stdin.readline()\nif value: pathlib.Path(" + repr(str(sent)) + ").write_text(value)\n")
+        script.chmod(0o700)
+        original = antigravity.validate_init
+        def revoke(value, model):
+            original(value, model)
+            AccessGuard(self.path, interval=0).resume("gemini")
+        with patch.object(access, "guard", guard), patch.dict(os.environ, {"ANTIGRAVITY_BIN": str(script)}), patch.object(antigravity, "validate_init", side_effect=revoke):
+            with self.assertRaises(ProviderRejected):
+                antigravity.AntigravityClient().chat("must not send", model="flash")
+        self.assertFalse(sent.exists())
+
     def test_cancellation_before_dispatch_and_after_verified_finish_are_harmless(self):
         guard = AccessGuard(self.path, interval=0)
         before = guard.begin("deepseek")
