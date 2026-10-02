@@ -223,6 +223,8 @@ class ProviderTests(unittest.TestCase):
                 parse_browser_result('mistral',{**result,'request_turn':invalid},result['path'],'owned prompt')
         with self.assertRaises(ProviderUnavailable):
             mistral_answer(bootstrap+body,'owned prompt','owned-chat',{**turn,'user_id':'other-user'})
+        with self.assertRaises(ProviderUnavailable):
+            parse_browser_result('mistral',{**result,'request_turn':None},None,'owned prompt')
 
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
         for value in ("nan", "inf", "0", "-1", "1801"):

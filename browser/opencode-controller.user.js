@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.2.3
+// @version      0.2.4
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -177,7 +177,7 @@
       }
       document.addEventListener("opencode-local-ready-v1", ready);
       document.dispatchEvent(new CustomEvent("opencode-local-job-v1", {
-        detail: JSON.stringify({ nonce, prompt: job.prompt }),
+        detail: JSON.stringify({ nonce, prompt: job.prompt, path: job.path ?? null }),
       }));
     });
     await rpc("/browser/submit", "POST", identity(job));

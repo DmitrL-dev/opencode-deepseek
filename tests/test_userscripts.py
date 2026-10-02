@@ -27,7 +27,7 @@ class ObserverBoundaryFixtureTests(unittest.TestCase):
                     window.receipts = [];
                     document.addEventListener('opencode-local-response-v1', event => receipts.push(JSON.parse(event.detail)));
                     window.startOwnedJob = nonce => document.dispatchEvent(new CustomEvent('opencode-local-job-v1',
-                      {detail:JSON.stringify({nonce,prompt:'owned prompt'})}));
+                      {detail:JSON.stringify({nonce,prompt:'owned prompt',path:'/work/owned-chat'})}));
                 }""")
                 page.evaluate(setup)
                 page.add_script_tag(content=(ROOT / "browser/opencode-observer.user.js").read_text())
@@ -71,6 +71,17 @@ class ObserverBoundaryFixtureTests(unittest.TestCase):
         self.assertEqual(results[0]["nonce"], "new-job")
         self.assertEqual(results[0]["request_turn"]["user_id"], "new-user")
         self.assertEqual(base64.b64decode(results[0]["body"]), b"new response")
+
+    def test_mistral_new_chat_capture_does_not_invent_request_turn_evidence(self):
+        receipts = self.observe("chat.mistral.ai", """() => {
+            window.fetch = async () => new Response('owned bootstrap stream',{headers:{'Content-Type':'text/event-stream'}});
+        }""", """async () => {
+            document.dispatchEvent(new CustomEvent('opencode-local-job-v1',
+                {detail:JSON.stringify({nonce:'new-chat',prompt:'owned prompt',path:null})}));
+            await fetch('/api/new-chat',{method:'POST',body:JSON.stringify({content:[{type:'text',text:'owned prompt'}]})});
+        }""", "receipts.some(r => r.body)")
+        result = next(r for r in receipts if "body" in r)
+        self.assertNotIn('request_turn', result)
 
     def connect_receipts(self, trailing=False):
         return self.observe("www.kimi.ai", """() => {

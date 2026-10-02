@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.2.3
+// @version      0.2.4
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -38,7 +38,7 @@
     retire();
     if (!value || typeof value.nonce !== "string" || typeof value.prompt !== "string") return;
     const restore = window.fetch;
-    active = { nonce: value.nonce, prompt: value.prompt, restore,
+    active = { nonce: value.nonce, prompt: value.prompt, path: value.path, restore,
       observed: false, fetch: restore === earlyObserver ? earlyObserver : createObserver(restore.bind(window)) };
     window.fetch = active.fetch;
     document.dispatchEvent(new CustomEvent("opencode-local-ready-v1", {
@@ -116,6 +116,10 @@
             // read. The site's own request must contain this job's exact prompt.
             candidate = request.clone().text().then(body => {
               if (location.hostname === "chat.mistral.ai") {
+                // Chat creation has no preallocated user-message identity.
+                // Its wire bootstrap must bind the exact prompt instead.
+                if (job.path === null) return body.includes(job.prompt)
+                  || body.includes(JSON.stringify(job.prompt).slice(1, -1));
                 const data = JSON.parse(body), chunks = data.messageInput;
                 if (!Array.isArray(chunks) || !chunks.length || chunks.some(c => !c || c.type !== "text" || typeof c.text !== "string")
                     || chunks.map(c => c.text).join("") !== job.prompt
@@ -138,7 +142,7 @@
         document.dispatchEvent(new CustomEvent(CHANNEL, { detail: JSON.stringify({ nonce: job.nonce, observing: true }) }));
         // Clone before returning: the frontend may immediately consume its own
         // body. Never await the clone's stream or block frontend rendering.
-        void observe(response.clone(), job, location.hostname === "chat.mistral.ai" ? matches : null).catch(() => {
+        void observe(response.clone(), job, location.hostname === "chat.mistral.ai" && typeof matches === "object" ? matches : null).catch(() => {
           document.dispatchEvent(new CustomEvent(CHANNEL, {
             detail: JSON.stringify({ nonce: job.nonce, error: "Completion observation failed" }),
           }));
