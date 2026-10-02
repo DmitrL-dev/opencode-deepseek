@@ -368,18 +368,28 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         from providers.access import AccessGuard
         from providers import antigravity
         from server import config
-        for provider, model in (('deepseek', 'deepseek-chat'), ('qwen', 'qwen3.8-omni-flash'), ('gemini', 'gemini-owned')):
-            with self.subTest(provider=provider), tempfile.TemporaryDirectory() as directory:
+        cases = [(provider, model, stage) for stage in ('write', 'read')
+                 for provider, model in (('deepseek', 'deepseek-chat'), ('qwen', 'qwen3.8-omni-flash'), ('gemini', 'gemini-owned'))]
+        for provider, model, stage in cases:
+            with self.subTest(provider=provider, stage=stage), tempfile.TemporaryDirectory() as directory:
                 guard = AccessGuard(Path(directory) / 'pauses.json', interval=0)
                 entered, release = threading.Event(), threading.Event()
                 signals, requests = [], []
+                def hold():
+                    signals.append(api._worker_cancellation.get())
+                    entered.set()
+                    if not release.wait(10):
+                        raise TimeoutError('owned test did not release journal IO')
                 def save(state):
-                    if state.get(provider, {}).get('dispatched') and not entered.is_set():
-                        signals.append(api._worker_cancellation.get())
-                        entered.set()
-                        if not release.wait(10):
-                            raise TimeoutError('owned test did not release journal write')
+                    if stage == 'write' and state.get(provider, {}).get('dispatched') and not entered.is_set():
+                        hold()
                     original_save(state)
+                @contextlib.contextmanager
+                def state():
+                    with original_state() as value:
+                        if stage == 'read' and value.get(provider, {}).get('dispatched') and not entered.is_set():
+                            hold()
+                        yield value
                 def upstream(request):
                     requests.append(request.url.path)
                     return httpx.Response(403)
@@ -392,9 +402,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     client._request_lock = threading.Lock()
                     client._http = httpx.Client(base_url='https://offline.invalid', transport=httpx.MockTransport(upstream))
                 original_save = guard._save
+                original_state = guard._state
                 wire_model = model if provider == 'qwen' else 'flash' if provider == 'gemini' else 'default'
                 req = ChatCompletionRequest(model=model, messages=[ChatMessage(role='user', content='owned cancellation fixture')])
-                with patch.object(api, 'guard', guard), patch.object(api, '_request_client', return_value=client), patch.dict(api.MODEL_MAP, {model:wire_model}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS, {model:provider}), patch.dict(api._provider_request_gates, {provider:asyncio.Lock()}), patch.object(guard, '_save', side_effect=save), patch.object(antigravity, 'cli_path', return_value='/offline-owned-cli'), patch.object(antigravity.subprocess, 'Popen', side_effect=AssertionError('cancelled attempt must not spawn')) as spawn:
+                with patch.object(api, 'guard', guard), patch.object(api, '_request_client', return_value=client), patch.dict(api.MODEL_MAP, {model:wire_model}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS, {model:provider}), patch.dict(api._provider_request_gates, {provider:asyncio.Lock()}), patch.object(guard, '_save', side_effect=save), patch.object(guard, '_state', side_effect=state), patch.object(antigravity, 'cli_path', return_value='/offline-owned-cli'), patch.object(antigravity.subprocess, 'Popen', side_effect=AssertionError('cancelled attempt must not spawn')) as spawn:
                     task = asyncio.create_task(api._run_chat_with_retry('owned cancellation fixture', req, wire_model))
                     try:
                         self.assertTrue(await asyncio.to_thread(entered.wait, 3))

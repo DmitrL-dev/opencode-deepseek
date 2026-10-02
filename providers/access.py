@@ -241,6 +241,8 @@ class Attempt:
         if self.cancelled:
             self.cancelled()
         self.guard.check(self.provider, self.id)
+        if self.cancelled:
+            self.cancelled()
 
     def dispatch(self, validate=None):
         while True:
