@@ -6,7 +6,9 @@ sessions, rendered from terminal output; they are not generated model replies.
 ## OpenCode demos
 
 Recorded on **2026-10-02** with **OpenCode 1.18.34**, against bridge code
-`c9a1edef7d971b35ffb5961c72ac69bbf89f15ea`.
+`c9a1edef7d971b35ffb5961c72ac69bbf89f15ea`. These recordings predate the
+provider pause and opt-in safety changes. They do not qualify the changed
+DeepSeek authentication/headers; no live retest used the restricted account.
 
 Each successful demo ran the native `plan` agent in a disposable workspace with
 separate OpenCode home/config/data/cache/state directories. Only a public

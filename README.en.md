@@ -26,6 +26,25 @@ separate provider API key.
 > each agent turn, including a tool result, can require another website message.
 > [Quotas and boundaries](#limits-and-boundaries).
 
+> Automating a normal website account can lead to account restrictions.
+> Our DeepSeek account is blocked until October 4, 2026, 22:17 as shown by the
+> website; the exact cause is unknown. Demo captures predate the safety changes.
+> We did not repeat live qualification on the restricted account.
+
+The server no longer refreshes sign-in in the background or replays rejected
+requests. Restrictions, quotas, security denials and uncertain outcomes persist
+a provider pause across restarts. HTTP errors use `403` and `retryable: false`.
+Once SSE headers are sent, the first failure is an error event; the next attempt
+returns `403` before accessing the account. Attempts and tool continuations are
+spaced by at least 10 seconds by default; pacing does not guarantee quota or
+terms compliance.
+
+Inspect pauses with `python -m providers.access status`. Resume a provider using
+`python -m providers.access resume qwen` only after manually checking normal
+website access. Sign-in does not clear a pause. Set OpenCode's `small_model`
+explicitly: title generation consumes messages too and must not silently use
+another account.
+
 ## Provider status
 
 As of **2026-10-02**. “Verified” means a live answer, conversation continuation
@@ -44,7 +63,7 @@ session, rather than every future task.
 
 `glm-web` and `kimi-web` use the model **selected on the website**; these names
 make no version or plan claim. Qwen and all new adapters are opt-in. A fresh
-installation exposes only DeepSeek.
+installation exposes no provider, including DeepSeek. Enable only the chosen adapter.
 
 ## Inside OpenCode
 
@@ -124,7 +143,8 @@ you want edits. [Agent and tool-plugin setup](docs/SETUP.en.md#opencode-integrat
 **4. Add the accounts you need.**
 
 - **Qwen Max:** after Qwen sign-in, choose `local-qwen/qwen3.8-max`.
-- **DeepSeek:** run `python -m deepseek.auth`, then choose
+- **DeepSeek (account restriction risk):** deliberately set `DEEPSEEK_ENABLED=1`
+  in `.env`, run `python -m deepseek.auth`, restart the API, then choose
   `local-deepseek/deepseek-chat` or `local-deepseek/deepseek-expert`. Stop on
   `user is muted`: another sign-in did not resolve it in our test.
 - **GLM / Kimi:** install Safari Userscripts and follow

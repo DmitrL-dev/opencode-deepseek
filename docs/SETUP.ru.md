@@ -8,6 +8,16 @@
 сейчас Qwen используйте [быстрый старт](../README.md#быстрый-старт). На 2 октября
 2026 наш аккаунт DeepSeek возвращает `user is muted`; повторный вход не помог.
 
+Все провайдеры теперь выключены по умолчанию. **Инструкция ниже описывает
+осознанное включение DeepSeek (`DEEPSEEK_ENABLED=1` в `.env`) с риском ограничения
+аккаунта.** Не выполняйте её на заблокированном аккаунте. Для первого запуска
+используйте Qwen из главной инструкции. Отказы сохраняют паузу в
+`session/provider-pauses.json`; сервер не обновляет сессии и не повторяет запросы.
+Проверка состояния: `python -m providers.access status`. После ручной проверки
+доступа на обычном сайте: `python -m providers.access resume qwen` (укажите
+нужного провайдера). Перелогин паузу не снимает. По умолчанию между попытками
+одного провайдера — 10 секунд, включая продолжения инструментов.
+
 ## Требования
 
 - **Python 3.9+** (рекомендуется 3.11/3.12)
@@ -47,6 +57,8 @@ python -m deepseek.auth
 
 # 5. Конфиг (значения по умолчанию подходят для локального запуска)
 cp .env.example .env
+# Explicit optional DeepSeek path; see account restriction warning above.
+python -c "from pathlib import Path; p=Path('.env'); p.write_text(p.read_text().replace('DEEPSEEK_ENABLED=0','DEEPSEEK_ENABLED=1'))"
 
 # 6. Запуск сервера (оставьте терминал открытым)
 python app.py
@@ -78,6 +90,7 @@ playwright install chromium
 
 python -m deepseek.auth
 Copy-Item .env.example .env
+(Get-Content .env) -replace 'DEEPSEEK_ENABLED=0', 'DEEPSEEK_ENABLED=1' | Set-Content .env
 python app.py
 ```
 
@@ -130,13 +143,14 @@ python -m deepseek.auth
 
 Откроется настоящий браузер — войдите в аккаунт и пройдите капчу
 (human-check). После этого токен и cookies сохранятся в `session/` и будут
-переиспользоваться. Сессия обновляется автоматически; повторный вход нужен,
-только если она полностью истекла.
+переиспользоваться. Сессия не обновляется автоматически; при истечении срока войдите вручную.
 
 ### 5. Конфигурация `.env`
 
 ```bash
 cp .env.example .env
+# Explicit optional DeepSeek path; see account restriction warning above.
+python -c "from pathlib import Path; p=Path('.env'); p.write_text(p.read_text().replace('DEEPSEEK_ENABLED=0','DEEPSEEK_ENABLED=1'))"
 ```
 
 Для локального запуска значения по умолчанию подходят. Пароли в `.env` не
@@ -360,18 +374,37 @@ opencode подключается к мосту как к **OpenAI-совмес�
 - `limit.context` — приблизительный; уменьшите, если получаете ошибки о
   переполнении контекста.
 
-### 2. (Опционально) Сделать DeepSeek моделью по умолчанию
+### 2. Основная и служебная модели
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "local-deepseek/deepseek-chat",
-  "small_model": "local-deepseek/deepseek-chat",
-  "provider": { "local-deepseek": { "npm": "@ai-sdk/openai-compatible", "name": "DeepSeek (local bridge)", "options": { "baseURL": "http://127.0.0.1:8000/v1", "apiKey": "unused" }, "models": { "deepseek-chat": { "name": "DeepSeek Chat (Instant)", "tool_call": true }, "deepseek-expert": { "name": "DeepSeek Expert", "tool_call": true } } } }
+  "model": "local-qwen/qwen3.8-omni-flash",
+  "small_model": "local-qwen/qwen3.8-omni-flash",
+  "enabled_providers": [
+    "local-qwen"
+  ],
+  "provider": {
+    "local-qwen": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Qwen (local bridge)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "unused"
+      },
+      "models": {
+        "qwen3.8-omni-flash": {
+          "name": "Qwen3.8 Omni Flash",
+          "tool_call": true
+        }
+      }
+    }
+  }
 }
 ```
 
-> `small_model` используется для служебных задач (генерация заголовков и т.п.).
+Включите `QWEN_ENABLED=1` и выполните вход Qwen. `small_model` тоже отправляет
+запросы (например, для заголовков). Не назначайте ему DeepSeek скрыто.
 
 ### 3. Агент
 
@@ -563,7 +596,8 @@ Qwen подключается к тому же `/v1` отдельным пров
 Плагин `.opencode/plugin/deepseek-tool-discipline.js` поддерживает оба провайдера;
 обновите ранее установленную копию. Вызовы инструментов проходят через тот же
 строгий парсер `tool_calls`. Проверены живые ответы, продолжение диалога,
-headless-обновление входа и выполнение `read` из opencode на обеих моделях.
+выполнение `read` из opencode на обеих моделях в версии до защитных изменений.
+Автоматическое headless-обновление теперь отключено.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -574,12 +608,10 @@ opencode run --model local-qwen/qwen3.8-max "Объясни этот проек�
 ```
 
 Вход и профиль Qwen хранятся отдельно: `session/qwen/session.json` и
-`session/qwen/profile/`. Перед запросом сервер проверяет срок действия токена
-и при необходимости захватывает новый из сохранённого профиля без окна входа.
-После отказа авторизации выполняется одно обновление и повтор запроса.
-Если восстановить вход не удалось, при `SERVER_INTERACTIVE_LOGIN=0` вернётся
-`503 login_required`: выполните `python -m qwen.auth` и перезапустите сервер.
-`SESSION_REFRESH_INTERVAL` управляет только фоновым обновлением DeepSeek.
+`session/qwen/profile/`. Сервер загружает только готовую сессию. При отсутствии
+или истечении срока вернётся `401 login_required`: войдите вручную командой
+`python -m qwen.auth`, затем перезапустите сервер. Отказ провайдера сохраняет
+паузу; автоматического обновления или повтора нет.
 
 Модели Flash и Max используют одну очередь аккаунта Qwen; очередь DeepSeek
 независима. `conversation_id` Qwen содержит префикс `qwen:` и исходную модель;
@@ -601,13 +633,10 @@ opencode run --model local-qwen/qwen3.8-max "Объясни этот проек�
 | `PORT` | `8000` | Порт |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Лимит запросов/мин на IP клиента (`/healthz` не считается) |
 | `DEEPSEEK_PROFILE_DIR` | — | Переиспользовать существующий профиль Chrome с активной сессией |
+| `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
+| `PROVIDER_MIN_INTERVAL` | `10` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Включить модели Qwen Chat на том же `/v1` |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Отдельный постоянный профиль Qwen Chat |
-| `SERVER_INTERACTIVE_LOGIN` | `1` | Открывать окно браузера при отсутствии сессии; `0` — отдавать `503` (для headless) |
-| `SESSION_REFRESH_ENABLED` | `1` | Фоновое обновление сессии DeepSeek |
-| `SESSION_REFRESH_INTERVAL` | `18000` (5 ч) | Интервал обновления, сек (меньше `SESSION_MAX_AGE` = 6 ч) |
-| `REFRESH_BROWSER_CHANNEL` | `chromium-headless-shell` | Канал Playwright для headless-обновления (меньше RAM) |
-| `REFRESH_BROWSER_CHANNEL_FALLBACK` | `chrome` | Запасной канал при отсутствии токена или ошибке headless-захвата; пусто — отключить |
 | `TOOLCALL_MAX_CONTINUATIONS` | `3` | Сколько раз допрашивать модель «продолжи», если tool call обрезан лимитом вывода |
 | `DEBUG_TOOLCALLS` | — | `1` — писать в лог сырой ответ модели, если вызов не распознан |
 
@@ -622,7 +651,7 @@ HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 ## Ограничения и важные нюансы
 
 - **Сериализация запросов.** Сервер выполняет запросы общего аккаунта
-  **по одному для каждого провайдера**, включая стриминг, retry и continuation (см. `server/api.py`).
+  **по одному для каждого провайдера**, включая стриминг и continuation (см. `server/api.py`).
   Ожидание очереди не занимает рабочие потоки. Прямой `DeepSeekClient` также
   сериализует генерации внутри одного экземпляра. Используйте один процесс
   сервера: несколько workers или отдельных клиентов не имеют общей очереди.
@@ -650,14 +679,14 @@ HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 
 ## Обслуживание и troubleshooting
 
-**Сессия истекла / `503 login_required`**
+**Сессия истекла / `401 login_required`**
 
 ```bash
 python -m deepseek.auth   # войдите заново
 ```
 
-Убедитесь, что `SERVER_INTERACTIVE_LOGIN=0` на headless-деплое, а окно входа
-выполнено заранее.
+Выполните вход заранее и перезапустите сервер. Если провайдер приостановлен,
+вход не снимает паузу; сначала проверьте доступ в обычном браузере.
 
 **`Playwright Sync API inside the asyncio loop`**
 
@@ -681,10 +710,6 @@ WASM, без Python traceback. В таком случае создайте но�
 python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
 ```
 
-**Пустая headless-сессия (macOS, Chrome-профиль)**
-
-По умолчанию фолбэк на `chrome`. Оставьте `REFRESH_BROWSER_CHANNEL_FALLBACK=chrome`
-или задайте `DEEPSEEK_PROFILE_DIR`.
 
 **`429 Too Many Requests`**
 

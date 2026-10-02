@@ -9,6 +9,16 @@ verified Qwen, use the [quick start](../README.en.md#quick-start). As of
 2026-10-02 our DeepSeek account returns `user is muted`; signing in again
 did not resolve it.
 
+All providers are now disabled by default. **The instructions below describe
+an explicit DeepSeek opt-in (`DEEPSEEK_ENABLED=1` in `.env`) with account
+restriction risk.** Do not run them on a restricted account. Use the README's
+Qwen path for first-time setup. Failures persist a pause in
+`session/provider-pauses.json`; the server never refreshes sessions or replays
+requests. Inspect: `python -m providers.access status`. After manually confirming
+normal website access: `python -m providers.access resume qwen` (choose the
+actual provider). Sign-in does not clear a pause. Provider attempts, including
+tool continuations, are spaced by 10 seconds by default.
+
 ## Requirements
 
 - **Python 3.9+** (3.11/3.12 recommended)
@@ -48,6 +58,8 @@ python -m deepseek.auth
 
 # 5. Config (defaults are fine for local use)
 cp .env.example .env
+# Explicit optional DeepSeek path; see account restriction warning above.
+python -c "from pathlib import Path; p=Path('.env'); p.write_text(p.read_text().replace('DEEPSEEK_ENABLED=0','DEEPSEEK_ENABLED=1'))"
 
 # 6. Start the server (keep the terminal open)
 python app.py
@@ -79,6 +91,7 @@ playwright install chromium
 
 python -m deepseek.auth
 Copy-Item .env.example .env
+(Get-Content .env) -replace 'DEEPSEEK_ENABLED=0', 'DEEPSEEK_ENABLED=1' | Set-Content .env
 python app.py
 ```
 
@@ -131,13 +144,14 @@ python -m deepseek.auth
 
 A real browser opens — sign in to your account and pass the captcha
 (human-check). After that the token and cookies are saved in `session/` and
-reused. The session is refreshed automatically; you only need to log in again if
-it has fully expired.
+reused. Sessions are not refreshed automatically; sign in manually after expiry.
 
 ### 5. `.env` configuration
 
 ```bash
 cp .env.example .env
+# Explicit optional DeepSeek path; see account restriction warning above.
+python -c "from pathlib import Path; p=Path('.env'); p.write_text(p.read_text().replace('DEEPSEEK_ENABLED=0','DEEPSEEK_ENABLED=1'))"
 ```
 
 Defaults are fine for local use. No passwords are stored in `.env` — login is
@@ -312,18 +326,37 @@ Create `opencode.json` in the root of your working project (or in
   `local-deepseek/deepseek-expert`.
 - `limit.context` is approximate; reduce it if you get context-overflow errors.
 
-### 2. (Optional) Make DeepSeek the default model
+### 2. Main and auxiliary models
 
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "local-deepseek/deepseek-chat",
-  "small_model": "local-deepseek/deepseek-chat",
-  "provider": { "local-deepseek": { "npm": "@ai-sdk/openai-compatible", "name": "DeepSeek (local bridge)", "options": { "baseURL": "http://127.0.0.1:8000/v1", "apiKey": "unused" }, "models": { "deepseek-chat": { "name": "DeepSeek Chat (Instant)", "tool_call": true }, "deepseek-expert": { "name": "DeepSeek Expert", "tool_call": true } } } }
+  "model": "local-qwen/qwen3.8-omni-flash",
+  "small_model": "local-qwen/qwen3.8-omni-flash",
+  "enabled_providers": [
+    "local-qwen"
+  ],
+  "provider": {
+    "local-qwen": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Qwen (local bridge)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "unused"
+      },
+      "models": {
+        "qwen3.8-omni-flash": {
+          "name": "Qwen3.8 Omni Flash",
+          "tool_call": true
+        }
+      }
+    }
+  }
 }
 ```
 
-> `small_model` is used for auxiliary tasks (title generation, etc.).
+Enable `QWEN_ENABLED=1` and sign in to Qwen. `small_model` sends requests too
+(for example titles). Do not silently assign it to DeepSeek.
 
 ### 3. Agent
 
@@ -515,8 +548,9 @@ The web service determines model access and quotas. Support is disabled by defau
 These limits are a conservative client budget, not a web-chat quota guarantee.
 The `.opencode/plugin/deepseek-tool-discipline.js` plugin supports both providers;
 update any previously installed copy. Tool calls use the same strict `tool_calls`
-parser. Live replies, conversation continuation, headless session refresh and
-opencode `read` execution have been checked on both models.
+parser. Live replies, conversation continuation and OpenCode `read` execution
+were checked on both models before the safety changes. Automatic headless
+session refresh is now disabled.
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
@@ -527,12 +561,10 @@ opencode run --model local-qwen/qwen3.8-max "Explain this project"
 ```
 
 Qwen uses separate private state: `session/qwen/session.json` and
-`session/qwen/profile/`. Before each request, the server checks token expiry
-and captures a fresh token from the saved profile headlessly when necessary.
-An authorization rejection triggers one refresh and retry. If the session cannot
-be recovered, `SERVER_INTERACTIVE_LOGIN=0` returns `503 login_required`:
-run `python -m qwen.auth` and restart the server. `SESSION_REFRESH_INTERVAL`
-controls only DeepSeek's background refresh.
+`session/qwen/profile/`. The server loads a usable cache only. Missing or expired
+sessions return `401 login_required`: run `python -m qwen.auth` manually, then
+restart the server. Upstream rejection persists a pause; no automatic refresh
+or replay occurs.
 
 Flash and Max share one Qwen account queue, independent of DeepSeek's queue.
 Qwen's `conversation_id` includes the `qwen:` prefix and original model;
@@ -554,13 +586,10 @@ variables take precedence.
 | `PORT` | `8000` | Port |
 | `RATE_LIMIT_PER_MINUTE` | `30` | Requests/min per client IP (`/healthz` not counted) |
 | `DEEPSEEK_PROFILE_DIR` | — | Reuse an existing Chrome profile with an active session |
+| `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
+| `PROVIDER_MIN_INTERVAL` | `10` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
-| `SERVER_INTERACTIVE_LOGIN` | `1` | Open a browser window when there is no session; `0` — return `503` (for headless) |
-| `SESSION_REFRESH_ENABLED` | `1` | DeepSeek background session refresh |
-| `SESSION_REFRESH_INTERVAL` | `18000` (5 h) | Refresh interval, sec (less than `SESSION_MAX_AGE` = 6 h) |
-| `REFRESH_BROWSER_CHANNEL` | `chromium-headless-shell` | Playwright channel for headless refresh (less RAM) |
-| `REFRESH_BROWSER_CHANNEL_FALLBACK` | `chrome` | Fallback after a missing token or headless capture error; empty — disable |
 | `TOOLCALL_MAX_CONTINUATIONS` | `3` | How many times to ask the model to "continue" when a tool call is cut off by the output limit |
 | `DEBUG_TOOLCALLS` | — | `1` — log the raw model reply when a call can't be parsed |
 
@@ -603,14 +632,14 @@ HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 
 ## Maintenance and troubleshooting
 
-**Session expired / `503 login_required`**
+**Session expired / `401 login_required`**
 
 ```bash
 python -m deepseek.auth   # log in again
 ```
 
-Make sure `SERVER_INTERACTIVE_LOGIN=0` on a headless deployment, and that the
-login window was completed beforehand.
+Sign in manually beforehand and restart the server. Sign-in does not clear a
+provider pause; inspect normal website access before explicitly resuming.
 
 **`Playwright Sync API inside the asyncio loop`**
 
@@ -634,10 +663,6 @@ starting the server:
 python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
 ```
 
-**Empty headless session (macOS, Chrome profile)**
-
-The fallback to `chrome` is on by default. Keep
-`REFRESH_BROWSER_CHANNEL_FALLBACK=chrome` or set `DEEPSEEK_PROFILE_DIR`.
 
 **`429 Too Many Requests`**
 
