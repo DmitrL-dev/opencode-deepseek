@@ -5,8 +5,10 @@ signed-in tab. They do not copy cookies, passwords or Google OAuth tokens into
 the bridge. Each provider has a separate queue and scoped conversation ids.
 All four integrations are opt-in, use the selected web model, and remain
 experimental until verified with the provider's current frontend and account.
-Kimi currently rejects requests with tools: its completed assistant message
-must be linked to the transport result before DOM text can become tool calls.
+Kimi's JSON Connect parser binds root answer blocks to the matching user and
+successfully completed assistant message; thinking blocks are excluded.
+Only this verified wire text can be parsed as requested OpenCode tool calls;
+unsupported snapshots and ambiguous message identities fail the request.
 
 ## Safari
 
@@ -51,6 +53,35 @@ SSE keepalives protect client timeouts. Quota, security and region rejections
 are terminal; the bridge does not rotate accounts, solve captchas, change
 fingerprints, or retry through another endpoint.
 
+## Usage limits
+
+Free access is subject to the website's account, model and feature allowances.
+The bridge does not provide an unlimited API or a separate quota. An OpenCode
+task can consume several website messages because tool results require another
+model turn. A resumed conversation consumes allowance too.
+
+- **Mistral/Vibe:** the [official Free plan](https://mistral.ai/pricing/)
+  limits messages and web searches. During the 2026-10-02 live test a new
+  completion succeeded, then the resumed request returned HTTP `429`; the user
+  also observed the free allowance warning. Further requests stopped. No fixed
+  message count or reset time was established. Website plan allowances are
+  distinct from Studio/developer API rate limits.
+- **Kimi:** the [official chat FAQ](https://www.kimi.com/en/help/others/chat-issues)
+  documents a conversation frequency limit and peak-load throttling. Selected
+  membership features/models also consume a [shared credit pool](https://www.kimi.com/en/help/membership/membership-overview).
+  Kimi Code limits apply to Kimi Code and must not be presented as this browser
+  chat adapter's quota.
+- **DeepSeek, Qwen and GLM:** no exhausted web-chat quota was observed in our
+  controlled qualification tests. This is not proof of unlimited usage. We have
+  not established a fixed current web-chat allowance; API/CLI quota tables must
+  not be substituted for website limits.
+
+On `429` or a website quota notice, stop the task and inspect the normal account
+UI for the relevant allowance and reset time. The bridge does not automatically
+switch accounts or models, create another conversation to evade the quota,
+purchase credits or retry the rejected turn. Limits can change; check the
+provider's current plan before relying on it for sustained agent work.
+
 ## Gemini
 
 Install the [official Antigravity CLI](https://antigravity.google/docs/cli/)
@@ -94,5 +125,14 @@ new completion, resumed SSE with the same conversation id, and an OpenCode
 `plan` request with a completed native `read` followed by the exact fixture
 contents. This used both 0.1.4 scripts and the matching server protocol. It
 qualifies that account/session and test, not all GLM models or arbitrary tasks.
-Grok, Mistral and Kimi still require live qualification; Kimi tool requests
-remain disabled until completed assistant-message text is bound to the response.
+
+With both 0.2.4 scripts on 2026-10-02, Kimi passed an exact new completion and
+resumed SSE with the same conversation id, `stop` and `[DONE]`, followed by an
+OpenCode `plan` request with a completed native `read` and the exact owned fixture
+contents. This qualifies that account/session and controlled test. Mistral passed a new completion, while continuation was
+blocked by HTTP `429`; native agent qualification remains pending. Grok's normal
+frontend sent the owned prompt and displayed the exact response, but the bridge
+could not capture a completed network result, so its live API qualification
+failed. Mistral and Grok's partial checks must not be advertised as working agent integrations.
+Official Antigravity login and model listing succeeded, but completion was
+rejected by Google's regional eligibility check; further attempts stopped.

@@ -14,6 +14,12 @@ tab in your normal browser. **Gemini** uses the official Antigravity CLI when
 Google allows the account and region. All new providers are disabled by
 default; see [setup and limitations](browser/README.md).
 
+**Free web chat does not mean an unlimited API.** The bridge consumes your
+regular account's allowance. Mistral/Vibe Free limits messages: a live new
+completion passed, but its continuation returned `429`. Kimi also limits chat
+frequency. Successful DeepSeek, Qwen and GLM tests do not establish that these
+services have no quotas. See [usage limits and official sources](browser/README.md#usage-limits).
+
 > **Original project:** <https://github.com/sums001/Deepseek-API>
 > This is an unofficial project, not affiliated with DeepSeek. You use your
 > regular DeepSeek account and are responsible for complying with its terms.
