@@ -46,7 +46,7 @@ from qwen.auth import get_session as get_qwen_session
 from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
-from providers.access import guard, ProviderRejected
+from providers.access import guard, ProviderRejected, rejection
 
 from .config import (
     MODEL_MAP,
@@ -241,6 +241,7 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     """One durable attempt; cancellation cannot erase an uncertain dispatch."""
     provider = model_provider(req.model)
     client = None
+    attempt = None
     try:
         with guard.attempt(provider, _cancellation_check()) as attempt:
             client = _request_client(req)
@@ -250,8 +251,11 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         _invalidate_client(provider, client)
         raise
     except Exception as exc:
-        _invalidate_client(provider, client)
-        raise guard.reject(provider, exc) from exc
+        # A contender that never owned an attempt cannot mutate its peer state.
+        if attempt is not None:
+            _invalidate_client(provider, client)
+        error = exc if isinstance(exc, ProviderRejected) else rejection(exc)
+        raise error from exc
 
 
 # A truncated tool reply is continued this many times before giving up. Each
@@ -391,6 +395,10 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
     attempt = None
     try:
         attempt = guard.begin(model_provider(req.model), _cancellation_check())
+        if client is None:
+            with attempt.bind():
+                client = _request_client(req)
+        attempt.check()
         stream = _open_stream(client, prompt, req, model_type)
         stream.access_attempt = attempt
         iterator = iter(stream)
@@ -408,8 +416,10 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
         _invalidate_client(model_provider(req.model), client)
         yield _sse_error(str(exc), "login_required")
     except Exception as exc:
-        _invalidate_client(model_provider(req.model), client)
-        error = guard.reject(model_provider(req.model), exc)
+        if attempt is not None:
+            attempt.abort(exc)
+            _invalidate_client(model_provider(req.model), client)
+        error = exc if isinstance(exc, ProviderRejected) else rejection(exc)
         yield _sse_error(str(error), error.code)
     finally:
         if iterator is not None and hasattr(iterator, "close"):
@@ -521,7 +531,9 @@ async def chat_completions(req: ChatCompletionRequest):
         )
 
     try:
-        await _run_worker(guard.check, model_provider(req.model))
+        # A live request in this process may be queued behind; abandoned or
+        # external attempts and real pauses must still fail before any factory.
+        await _run_worker(guard.check, model_provider(req.model), None, True)
     except ProviderRejected as exc:
         return _error(str(exc), status=403, err_type=exc.code)
 
@@ -580,15 +592,7 @@ async def chat_completions(req: ChatCompletionRequest):
         if model_provider(req.model) in PROVIDERS:
             return StreamingResponse(_buffered_plain_stream(req, prompt, model_type),
                                      media_type="text/event-stream")
-        try:
-            client = await _run_queued(_request_client, req, gate=_request_queue(req))
-        except LoginRequired as e:
-            return _error(str(e), status=401, err_type="login_required")
-        except Exception as e:
-            error = guard.reject(model_provider(req.model), e)
-            return _error(str(error), status=403, err_type=error.code)
-
-        return StreamingResponse(_plain_stream(client, prompt, req, model_type),
+        return StreamingResponse(_plain_stream(None, prompt, req, model_type),
                                  media_type="text/event-stream")
 
     try:

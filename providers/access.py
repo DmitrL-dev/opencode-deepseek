@@ -72,6 +72,7 @@ class AccessGuard:
         self._lock = threading.RLock()
         self._memory = {}
         self._failed = set()
+        self._live = {}
 
     @staticmethod
     def _decode(state):
@@ -139,7 +140,7 @@ class AccessGuard:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
-    def check(self, provider, owner=None):
+    def check(self, provider, owner=None, queued=False):
         if provider not in PROVIDERS:
             raise ValueError('Unknown provider')
         if provider in self._failed:
@@ -150,7 +151,10 @@ class AccessGuard:
             record = state.get(provider, {})
             if record.get('pause'):
                 raise ProviderRejected(record['pause'])
-            if record.get('pending') and record['pending'] != owner:
+            if owner is not None and record.get('pending') != owner:
+                raise ProviderRejected('upstream_failure')
+            if (record.get('pending') and record['pending'] != owner
+                    and not (queued and self._live.get(provider) == record['pending'])):
                 raise ProviderRejected('upstream_failure')
 
     def begin(self, provider, cancelled=None):
@@ -163,6 +167,7 @@ class AccessGuard:
             record.update(pending=attempt.id, dispatched=False)
             try:
                 self._save(state)  # Write-ahead: failure here prohibits all dispatch.
+                self._live[provider] = attempt.id
             except OSError as exc:
                 self._failed.add(provider)
                 raise ProviderRejected('safety_state_unavailable') from exc
@@ -184,11 +189,13 @@ class AccessGuard:
         with self.attempt(provider, cancelled) as attempt:
             attempt.dispatch()
 
-    def reject(self, provider, exc):
+    def reject(self, provider, exc, owner=None):
         error = exc if isinstance(exc, ProviderRejected) else rejection(
             exc, status=exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None)
         try:
             with self._state() as state:
+                if owner is not None and state.get(provider, {}).get('pending') != owner:
+                    return ProviderRejected('upstream_failure')
                 record = state.setdefault(provider, {})
                 record.setdefault('pause', error.code)
                 self._save(state)
@@ -235,15 +242,19 @@ class Attempt:
             self.cancelled()
         self.guard.check(self.provider, self.id)
 
-    def dispatch(self):
+    def dispatch(self, validate=None):
         while True:
             self.check()
+            if validate is not None:
+                validate()
             with self.guard._state() as state:
                 record = state[self.provider]
                 if record.get('pending') != self.id or record.get('pause'):
                     raise ProviderRejected(record.get('pause') or 'upstream_failure')
                 delay = 0 if self.dispatched else record.get('next_at', 0) - time.time()
                 if delay <= 0:
+                    if validate is not None:
+                        validate()
                     if not self.dispatched:
                         record.update(dispatched=True, next_at=time.time() + self.guard.interval)
                         self.guard._save(state)
@@ -262,19 +273,25 @@ class Attempt:
             record.pop('dispatched', None)
             self.guard._save(state)
             self.completed = True
+            self.guard._live.pop(self.provider, None)
 
     def abort(self, exc=None):
         if self.completed:
             return
+        if self.guard._live.get(self.provider) == self.id:
+            self.guard._live.pop(self.provider, None)
         # Cancellation before dispatch is harmless; afterwards an unverified
         # outcome remains durably pending even if writing the pause fails.
         if self.dispatched or isinstance(exc, Exception) and not isinstance(exc, ValueError) and not getattr(exc, 'before_dispatch', False):
-            self.guard.reject(self.provider, exc or ProviderRejected())
+            self.guard.reject(self.provider, exc or ProviderRejected(), owner=self.id)
         else:
             try:
                 self.complete()
-            except (OSError, ProviderRejected):
+            except OSError:
                 self.guard._failed.add(self.provider)
+            except ProviderRejected as error:
+                if error.code == 'safety_state_unavailable':
+                    self.guard._failed.add(self.provider)
 
 
 guard = AccessGuard()

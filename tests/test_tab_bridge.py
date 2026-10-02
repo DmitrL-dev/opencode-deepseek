@@ -193,6 +193,40 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code,403)
         self.assertEqual(client.chat.call_count,1)
 
+    async def test_expiry_or_cancellation_during_pacing_never_authorizes_submission(self):
+        from providers.access import AccessGuard
+        headers = {'Authorization':'Bearer ' + 'x' * 43}
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                guard = AccessGuard(path=None, interval=2)
+                guard.wait('glm')
+                attempt = guard.begin('glm')
+                signal = threading.Event()
+                def check():
+                    if signal.is_set():
+                        raise asyncio.CancelledError()
+                broker = tab_bridge.Broker()
+                job = tab_bridge.Job('owned-job', 'glm', 'marker', None,
+                    owner=OWNER, lease='owned-lease', document=DOCUMENT,
+                    deadline=time.monotonic() + (10 if cancelled else .1),
+                    check_cancelled=check, access_attempt=attempt)
+                broker.pending['glm'] = job
+                timer = threading.Timer(.1, signal.set)
+                if cancelled:
+                    timer.start()
+                try:
+                    with patch.dict(os.environ, {'BROWSER_BRIDGE_ENABLED':'1'}), patch.object(tab_bridge, 'bridge_token', return_value='x' * 43), patch('server.browser_routes.broker', broker):
+                        response = await self.client.post('/browser/submit', json={
+                            'provider':'glm', 'id':job.id, 'owner':OWNER,
+                            'lease':job.lease, 'document':DOCUMENT}, headers=headers)
+                    self.assertEqual(response.status_code, 409)
+                    self.assertFalse(job.submitted)
+                    self.assertFalse(attempt.dispatched)
+                finally:
+                    timer.cancel()
+                    attempt.abort()
+                guard.check('glm')
+
     async def test_browser_routes_see_cancelled_origin_before_its_worker_wakes(self):
         broker = tab_bridge.Broker()
         waiting, release = threading.Event(), threading.Event()

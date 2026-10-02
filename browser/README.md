@@ -27,6 +27,8 @@ content context and keeps its local pairing key out of page JavaScript.
    After adding or replacing files, open the Userscripts toolbar popup and wait
    until both script names appear. The extension must rescan externally edited
    files before the next page load, as described in its linked README.
+   After upgrading the bridge, export and replace the scripts again. The current
+   controller is 0.2.5; older loaded scripts do not include all lease checks.
 3. Keep the API bound to `127.0.0.1:8000`. Set `BROWSER_BRIDGE_ENABLED=1` and enable
    the provider you want, e.g. `GLM_ENABLED=1`, then restart the API.
 4. Open the provider in your normal signed-in browser and reload once to load
