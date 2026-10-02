@@ -41,7 +41,7 @@ python3 --version && opencode --version
 
 # 1. Clone the project
 mkdir -p ~/projects && cd ~/projects
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 
 # 2. Virtual environment
@@ -79,7 +79,7 @@ curl http://127.0.0.1:8000/v1/models
 python --version; opencode --version
 
 mkdir $HOME\projects; cd $HOME\projects
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 
 python -m venv venv
@@ -112,7 +112,7 @@ The contents of `opencode.json` and `.opencode/agent/*.md` are in the
 ### 1. Clone
 
 ```bash
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 ```
 

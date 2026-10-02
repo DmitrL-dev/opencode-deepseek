@@ -40,7 +40,7 @@ python3 --version && opencode --version
 
 # 1. Клон проекта
 mkdir -p ~/projects && cd ~/projects
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 
 # 2. Виртуальное окружение
@@ -78,7 +78,7 @@ curl http://127.0.0.1:8000/v1/models
 python --version; opencode --version
 
 mkdir $HOME\projects; cd $HOME\projects
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 
 python -m venv venv
@@ -111,7 +111,7 @@ python app.py
 ### 1. Клон
 
 ```bash
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 ```
 

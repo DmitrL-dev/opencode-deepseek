@@ -17,10 +17,10 @@
 работаете с файлами проекта в привычном агенте. Отдельный ключ API провайдера
 для этих подключений не нужен.
 
-**Это форк с исправлениями и новыми адаптерами. Всё опубликованное ниже уже в
-`main` [DmitrL-dev/opencode-deepseek](https://github.com/DmitrL-dev/opencode-deepseek).**
+**Экспериментальные адаптеры включаются отдельно. Перед запуском прочитайте
+ограничения аккаунтов и настройки безопасного отказа ниже.**
 
-[![Проверки main](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml)
+[![Проверки main](https://github.com/Tsuev/opencode-deepseek/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Tsuev/opencode-deepseek/actions/workflows/tests.yml)
 
 > Бесплатный веб-чат расходует **лимиты вашего аккаунта**. Это не безлимитный
 > API: каждый ход агента, включая возврат результата инструмента, может
@@ -89,10 +89,10 @@ Mistral, Grok и Gemini успешных демонстраций агента �
 [установленный OpenCode](https://opencode.ai/docs/). Сам мост не требует Node.js.
 Ниже — первая установка на macOS/Linux; [Windows и подробности](docs/SETUP.ru.md).
 
-**1. Установите мост из этого форка.**
+**1. Установите мост из репозитория.**
 
 ```bash
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 python3 -m venv venv
 source venv/bin/activate
@@ -217,7 +217,7 @@ Userscripts содержат ключ связи с вашим мостом — 
 - [Отдельный чат DeepSeek в терминале](docs/TERMINAL_CHAT.md)
 
 CI проверяет Python 3.9 и 3.12, загрузку PoW WASM, синтаксис shell/JavaScript
-и изолированные браузерные сценарии. [Запуски CI](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml).
+и изолированные браузерные сценарии. [Запуски CI](https://github.com/Tsuev/opencode-deepseek/actions/workflows/tests.yml).
 Для локальной проверки: `python -m unittest discover -s tests -t . -v`.
 
 **MIT · неофициальный проект.** Основан на

@@ -17,10 +17,10 @@ through an OpenAI-compatible API. Sign in to your account, select a model and
 work with project files using the agent. These connections do not need a
 separate provider API key.
 
-**This fork contains fixes and new adapters. Everything published below is in
-`main` at [DmitrL-dev/opencode-deepseek](https://github.com/DmitrL-dev/opencode-deepseek).**
+**Experimental adapters are explicit opt-ins. Read the account restrictions
+and terminal-refusal settings below before running the bridge.**
 
-[![main checks](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml)
+[![main checks](https://github.com/Tsuev/opencode-deepseek/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/Tsuev/opencode-deepseek/actions/workflows/tests.yml)
 
 > Free web chat uses **your account's allowance**. This is not an unlimited API:
 > each agent turn, including a tool result, can require another website message.
@@ -91,10 +91,10 @@ You need **Python 3.9+** (3.12 recommended), Git, a Qwen account and
 Node.js. These steps are for a fresh macOS/Linux install;
 [Windows and details](docs/SETUP.en.md).
 
-**1. Install this fork.**
+**1. Install the repository.**
 
 ```bash
-git clone https://github.com/DmitrL-dev/opencode-deepseek.git
+git clone https://github.com/Tsuev/opencode-deepseek.git
 cd opencode-deepseek
 python3 -m venv venv
 source venv/bin/activate
@@ -212,7 +212,7 @@ access to files and commands. [Security details](docs/SETUP.en.md#security).
 - [Standalone DeepSeek terminal chat](docs/TERMINAL_CHAT.md)
 
 CI covers Python 3.9/3.12, real PoW WASM loading, shell/JavaScript syntax and
-isolated browser fixtures. [CI runs](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml).
+isolated browser fixtures. [CI runs](https://github.com/Tsuev/opencode-deepseek/actions/workflows/tests.yml).
 Run locally with `python -m unittest discover -s tests -t . -v`.
 
 **MIT · unofficial project.** Based on
