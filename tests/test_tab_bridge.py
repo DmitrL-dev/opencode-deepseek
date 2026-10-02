@@ -1,3 +1,4 @@
+from tests.support import isolated_access
 import asyncio
 import base64
 import json
@@ -136,6 +137,7 @@ class BrokerTests(unittest.TestCase):
 
 class TabApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        isolated_access(self)
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=api.app,client=("127.0.0.1",123)),base_url="http://local.test")
 
     async def asyncTearDown(self):
@@ -188,7 +190,7 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
         client.chat.side_effect = ProviderUnavailable("region access denied")
         with patch.dict(config.MODEL_MAP,{"grok-web":"default"}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS,{"grok-web":"grok"}), patch.object(api,"build_provider_client",return_value=client):
             response = await self.client.post("/v1/chat/completions",json={"model":"grok-web","messages":[{"role":"user","content":"marker"}]})
-        self.assertEqual(response.status_code,500)
+        self.assertEqual(response.status_code,403)
         self.assertEqual(client.chat.call_count,1)
 
     async def test_browser_routes_see_cancelled_origin_before_its_worker_wakes(self):
@@ -244,6 +246,7 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
         text = '```tool_calls\n[{"name":"read","arguments":{"filePath":"fixture.txt"}}]\n```'
         for completed in (False, True):
             for stream in (False, True):
+                api.guard.resume("kimi")  # each case is a distinct owned fixture
                 def submit_result(provider, prompt, *args, **kwargs):
                     frames = fixture()
                     frames[2]['message']['blocks'][0]['text']['content'] = prompt
@@ -277,6 +280,8 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
             body = json.dumps({'result':{'response':{'modelResponse':{'partial':False,'message':text,**error}}}}).encode()
             result = {'status':200,'path':'/c/example','body':base64.b64encode(body).decode()}
             for stream in (False,True):
+                api.guard.resume("grok")
+                api.guard.resume("kimi")
                 with patch.dict(os.environ,{'BROWSER_BRIDGE_ENABLED':'1'}), patch.dict(config.MODEL_MAP,{'grok-web':'default'}), patch.dict(config.OPTIONAL_MODEL_PROVIDERS,{'grok-web':'grok'}), patch.object(api,'build_provider_client',return_value=tab_bridge.TabClient('grok')), patch.object(tab_bridge.broker,'submit',return_value=result) as submit:
                     response = await self.client.post('/v1/chat/completions',json={'model':'grok-web','tools':tools,'stream':stream,'messages':[{'role':'user','content':'marker'}]})
                 submit.assert_called_once()

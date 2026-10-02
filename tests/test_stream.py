@@ -6,6 +6,7 @@ import unittest
 import httpx
 
 from deepseek.client import DeepSeekClient, DeepSeekStreamError, _parse_sse
+from providers.access import ProviderRejected
 
 
 def event(value, name=None):
@@ -32,7 +33,7 @@ def mock_client(payload):
     client.create_chat_session = lambda: "fake-session"
     client._pow_header = lambda: "fake-pow"
     client._http = httpx.Client(base_url="https://chat.deepseek.com",
-                               transport=httpx.MockTransport(lambda request: httpx.Response(200,text=payload)))
+                               transport=httpx.MockTransport(lambda request: httpx.Response(200,text=payload,headers={"content-type":"text/event-stream"})))
     return client
 
 
@@ -56,7 +57,7 @@ class StreamProtocolTests(unittest.TestCase):
     def test_set_operation_is_not_mistaken_for_append(self):
         payload = snapshot() + event({"p":"response/fragments/0/content","o":"SET","v":"replacement"})
         payload += event({"v":"metadata"}) + "data: [DONE]\n\n"
-        with self.assertRaises(DeepSeekStreamError):
+        with self.assertRaises((DeepSeekStreamError, ProviderRejected)):
             parse(payload)
 
     def test_repeated_snapshot_does_not_duplicate_emitted_text(self):
@@ -70,13 +71,13 @@ class StreamProtocolTests(unittest.TestCase):
         for payload in (snapshot("Alpha") + other,
                         snapshot("ABC") + snapshot("XYZmore", "FINISHED"),
                         snapshot() + event({"p": "response/message_id", "o": "SET", "v": 4}) + "data: [DONE]\n\n"):
-            with self.subTest(payload=payload), self.assertRaises(DeepSeekStreamError):
+            with self.subTest(payload=payload), self.assertRaises((DeepSeekStreamError, ProviderRejected)):
                 parse(payload)
 
     def test_damaged_fragments_never_complete_a_partial_response(self):
         for bad in ('not json', [42], False, [{}], [{"type": False}], [{"type": "RESPONSE", "content": False}]):
             payload = snapshot("partial") + event({"p": "response/fragments", "o": "APPEND", "v": bad}) + "data: [DONE]\n\n"
-            with self.subTest(bad=bad), self.assertRaises(DeepSeekStreamError):
+            with self.subTest(bad=bad), self.assertRaises((DeepSeekStreamError, ProviderRejected)):
                 parse(payload)
 
     def test_earlier_fragment_cannot_grow_after_later_text_was_emitted(self):
@@ -89,7 +90,7 @@ class StreamProtocolTests(unittest.TestCase):
                 {"type": "RESPONSE", "content": " world"}], "status": "FINISHED"}}})
             patch_update = event({"p": "response/fragments/0/content", "o": "APPEND", "v": " dear"})
             for update in (snapshot_update, patch_update):
-                with self.subTest(first=first, update=update), self.assertRaises(DeepSeekStreamError):
+                with self.subTest(first=first, update=update), self.assertRaises((DeepSeekStreamError, ProviderRejected)):
                     parse(initial + update + "data: [DONE]\n\n")
 
     def test_last_response_fragment_can_grow_without_reordering(self):
@@ -110,7 +111,7 @@ class StreamProtocolTests(unittest.TestCase):
             patch = {"p": "response/fragments", "v": [{"type": "RESPONSE", "content": "replacement"}]}
             if operation is not None:
                 patch["o"] = operation
-            with self.subTest(operation=operation), self.assertRaises(DeepSeekStreamError):
+            with self.subTest(operation=operation), self.assertRaises((DeepSeekStreamError, ProviderRejected)):
                 parse(snapshot("partial") + event(patch) + "data: [DONE]\n\n")
 
     def test_eof_and_errors_fail_instead_of_successful_empty_stop(self):
@@ -120,7 +121,7 @@ class StreamProtocolTests(unittest.TestCase):
                     event({},"error"), 'data: {broken}\n\n',
                     snapshot() + event({"p":"response/status","v":"FAILED"})]
         for payload in payloads:
-            with self.subTest(payload=payload), self.assertRaises(DeepSeekStreamError):
+            with self.subTest(payload=payload), self.assertRaises((DeepSeekStreamError, ProviderRejected)):
                 parse(payload)
 
     def test_terminal_markers_and_final_event_without_blank_line(self):
@@ -171,7 +172,7 @@ class StreamProtocolTests(unittest.TestCase):
             time.sleep(0.02)
             with guard:
                 state["active"] -= 1
-            return httpx.Response(200,text=snapshot(status="FINISHED"))
+            return httpx.Response(200,text=snapshot(status="FINISHED"),headers={"content-type":"text/event-stream"})
         client._http = httpx.Client(base_url="https://chat.deepseek.com",transport=httpx.MockTransport(handle))
         self.addCleanup(client.close)
         def chat():

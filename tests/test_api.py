@@ -17,6 +17,8 @@ from server import api
 from server.schemas import ChatCompletionRequest, ChatMessage
 from tests.test_stream import event, mock_client, snapshot
 from tests.test_tools import block
+from tests.support import isolated_access
+from providers.access import ProviderRejected
 
 TOOLS = [{"type":"function","function":{"name":name,"parameters":{"type":"object","properties":{}}}}
          for name in ("write","bash")]
@@ -42,10 +44,11 @@ def sse_objects(text):
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        isolated_access(self)
         api._request_gate = asyncio.Lock()
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=api.app,client=(self.id(),123)),base_url="http://audit.local")
-        self.request = {"messages":[{"role":"user","content":"audit"}]}
+        self.request = {"model":"deepseek-chat","messages":[{"role":"user","content":"audit"}]}
 
     async def asyncTearDown(self):
         await self.client.aclose()
@@ -59,7 +62,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(api,"get_client",return_value=fake):
             for choice in ["none",{"type":"function","function":{"name":"write"}}]:
                 response = await self.post(tools=TOOLS,tool_choice=choice)
-                self.assertEqual(response.status_code,502)
+                self.assertEqual(response.status_code,400)
                 self.assertEqual(response.json()["error"]["type"],"invalid_tool_response")
                 self.assertNotIn("choices",response.json())
 
@@ -77,7 +80,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         fake.chat.return_value = Reply("I will write a file.","fake:2")
         with patch.object(api,"get_client",return_value=fake):
             response = await self.post(tools=TOOLS,tool_choice="required")
-        self.assertEqual(response.status_code,502)
+        self.assertEqual(response.status_code,400)
 
     async def test_invalid_request_policy_fails_before_upstream(self):
         with patch.object(api,"get_client") as get_client:
@@ -129,7 +132,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{}},{',"fake:2")
         with patch.object(api,"get_client",return_value=fake), patch.object(api,"_MAX_CONTINUATIONS",0):
             response = await self.post(tools=TOOLS)
-        self.assertEqual(response.status_code,502)
+        self.assertEqual(response.status_code,400)
         self.assertEqual(fake.chat.call_count,1)
         self.assertNotIn("choices",response.json())
 
@@ -139,22 +142,24 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                                  RuntimeError("network down")]
         with patch.object(api,"get_client",return_value=fake), contextlib.redirect_stdout(io.StringIO()):
             response = await self.post(tools=TOOLS)
-        self.assertEqual(response.status_code,502)
+        self.assertEqual(response.status_code,403)
 
-    async def test_auth_refresh_on_buffered_call_is_retried_once(self):
+    async def test_auth_rejection_never_refreshes_or_replays_buffered_call(self):
         old, new = Mock(),Mock()
         old.chat.side_effect = auth_error()
         new.chat.return_value = Reply("answer","fake:2")
         with patch.object(api,"get_client",side_effect=[old,new]) as get_client, contextlib.redirect_stdout(io.StringIO()):
             response = await self.post()
-        self.assertEqual(response.json()["choices"][0]["message"]["content"],"answer")
+        self.assertEqual(response.status_code,403)
+        self.assertEqual(response.json()["error"]["code"],"session_expired")
         self.assertEqual(old.chat.call_count,1)
-        self.assertEqual(new.chat.call_count,1)
-        self.assertEqual(get_client.call_args.kwargs,{"rejected_client":old})
+        self.assertEqual(new.chat.call_count,0)
+        self.assertEqual(get_client.call_count,1)
 
-    async def test_auth_retry_covers_stream_creation_and_first_iteration(self):
+    async def test_stream_auth_rejection_never_refreshes_at_creation_or_iteration(self):
         for before_iterator in [True,False]:
             with self.subTest(before_iterator=before_iterator):
+                api.guard.resume("deepseek")
                 old, new = Mock(),Mock()
                 if before_iterator:
                     old.stream.side_effect = auth_error()
@@ -168,9 +173,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(api,"get_client",side_effect=[old,new]) as get_client:
                     response = await self.post(stream=True)
                 objects = sse_objects(response.text)
-                self.assertTrue(any(obj.get("choices",[{}])[0].get("delta",{}).get("content") == "answer" for obj in objects))
-                self.assertFalse(any("error" in obj for obj in objects))
-                self.assertEqual(get_client.call_count,2)
+                self.assertEqual(objects[-1]["error"]["code"], "session_expired")
+                self.assertFalse(objects[-1]["error"]["retryable"])
+                self.assertEqual(get_client.call_count,1)
 
     async def test_midstream_error_does_not_retry_or_emit_successful_stop(self):
         class BrokenStream:
@@ -187,10 +192,10 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(obj.get("choices",[{}])[0].get("finish_reason") == "stop" for obj in objects))
         self.assertEqual(get_client.call_count,1)
 
-    async def test_login_required_remains_actionable_503(self):
+    async def test_login_required_is_non_retryable_401(self):
         with patch.object(api,"get_client",side_effect=LoginRequired()):
             response = await self.post()
-        self.assertEqual(response.status_code,503)
+        self.assertEqual(response.status_code,401)
         self.assertEqual(response.json()["error"]["type"],"login_required")
 
     async def test_upstream_eof_cannot_be_reported_as_success(self):
@@ -198,7 +203,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch.object(api,"get_client",return_value=fake):
                 response = await self.post()
-            self.assertEqual(response.status_code,500)
+            self.assertEqual(response.status_code,403)
             self.assertNotIn("choices",response.json())
         finally:
             fake.close()
@@ -211,9 +216,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch.object(api, "get_client", return_value=fake):
                 response = await self.post(tools=TOOLS)
-            self.assertEqual(response.status_code, 500)
+            self.assertEqual(response.status_code, 403)
             self.assertNotIn("choices", response.json())
-            self.assertIn("message_id", response.json()["error"]["message"])
+            self.assertEqual(response.json()["error"]["code"], "upstream_failure")
         finally:
             fake.close()
 
@@ -275,7 +280,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             return Reply("answer","fake:2")
         fake = Mock()
         fake.chat.side_effect = chat
-        req = ChatCompletionRequest(messages=[ChatMessage(role="user",content="audit")])
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user",content="audit")])
         with patch.object(api,"get_client",return_value=fake):
             first = asyncio.create_task(api._run_chat_with_retry("first",req,"default"))
             self.assertTrue(await asyncio.to_thread(entered.wait,1))
@@ -307,7 +312,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     return Reply("answer", "fake:4")
                 fake = Mock()
                 fake.chat.side_effect = chat
-                req = ChatCompletionRequest(messages=[ChatMessage(role="user", content="audit")], tools=TOOLS)
+                req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user", content="audit")], tools=TOOLS)
                 with patch.object(api, "get_client", return_value=fake) as factory:
                     task = asyncio.create_task(api._run_tool_chat("first", req, "default"))
                     self.assertTrue(await asyncio.to_thread(entered.wait, 1))
@@ -319,9 +324,14 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsInstance(result, asyncio.CancelledError)
                     self.assertEqual(calls, ["first"])
                     self.assertEqual(factory.call_count, 1)
-                    reply = await api._run_chat_with_retry("second", req, "default")
-                    self.assertEqual(reply.text, "answer")
-                    self.assertEqual(calls, ["first", "second"])
+                    if auth_failure:
+                        with self.assertRaises(ProviderRejected):
+                            await api._run_chat_with_retry("second", req, "default")
+                        self.assertEqual(calls, ["first"])
+                    else:
+                        reply = await api._run_chat_with_retry("second", req, "default")
+                        self.assertEqual(reply.text, "answer")
+                        self.assertEqual(calls, ["first", "second"])
 
     async def test_stream_initialization_waiters_do_not_exhaust_the_worker_pool(self):
         release = threading.Event()
@@ -340,7 +350,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             if not release.wait(timeout=2):
                 raise RuntimeError("fixture refresh timed out")
             return fake
-        req = ChatCompletionRequest(messages=[ChatMessage(role="user", content="audit")], stream=True)
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user", content="audit")], stream=True)
         generator = api._plain_stream(fake, "audit", req, "default")
         waiters = []
         try:
@@ -373,7 +383,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     closed.set()
         fake = Mock()
         fake.stream.return_value = Stream()
-        req = ChatCompletionRequest(messages=[ChatMessage(role="user",content="audit")])
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user",content="audit")])
         generator = api._plain_stream(fake,"first",req,"default")
         first = asyncio.create_task(generator.__anext__())
         self.assertTrue(await asyncio.to_thread(entered.wait,1))
@@ -402,7 +412,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             return Reply("answer","other:2")
         fake = Mock()
         fake.chat.side_effect = chat
-        req = ChatCompletionRequest(messages=[ChatMessage(role="user",content="audit")],tools=TOOLS)
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user",content="audit")],tools=TOOLS)
         with patch.object(api,"get_client",return_value=fake), contextlib.redirect_stdout(io.StringIO()):
             first = asyncio.create_task(api._run_tool_chat("first",req,"default"))
             self.assertTrue(await asyncio.to_thread(entered.wait,1))
@@ -427,7 +437,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             return Reply("answer","fake:2")
         fake = Mock()
         fake.chat.side_effect = chat
-        req = ChatCompletionRequest(messages=[ChatMessage(role="user",content="audit")])
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user",content="audit")])
         with patch.object(api,"get_client",return_value=fake):
             first = asyncio.create_task(api._run_chat_with_retry("first",req,"default"))
             self.assertTrue(await asyncio.to_thread(entered.wait,1))
@@ -442,47 +452,16 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 release.set()
             results = await asyncio.gather(first,second,return_exceptions=True)
         self.assertIsInstance(results[0],asyncio.CancelledError)
-        self.assertEqual(results[1].text,"answer")
+        self.assertIsInstance(results[1], ProviderRejected)
+        self.assertEqual(calls, ["first"])
 
 
 class RefreshAndStartupTests(unittest.TestCase):
-    def test_background_and_request_refresh_share_client_lock(self):
-        state = {"active":0,"maximum":0}
-        barrier = threading.Barrier(3)
-        lock = threading.Lock()
-        failures = []
-        def build(*args,**kwargs):
-            with lock:
-                state["active"] += 1
-                state["maximum"] = max(state["maximum"],state["active"])
-            time.sleep(0.02)
-            with lock:
-                state["active"] -= 1
-            return Mock()
-        class Stop:
-            waits = 0
-            def wait(self,*args):
-                self.waits += 1
-                return self.waits > 1
-        def run(callback):
-            try:
-                barrier.wait(timeout=2)
-                callback()
-            except Exception as exc:
-                failures.append(exc)
-        with patch.object(api,"_build_client",side_effect=build) as builder, patch.object(api,"_client",None):
-            with contextlib.redirect_stdout(io.StringIO()):
-                threads = [threading.Thread(target=run,args=(lambda:api._refresh_loop(Stop()),)),
-                           threading.Thread(target=run,args=(lambda:api.get_client(True),))]
-                for thread in threads:
-                    thread.start()
-                barrier.wait(timeout=2)
-                for thread in threads:
-                    thread.join(timeout=3)
-            self.assertTrue(any(call.kwargs.get("allow_interactive") is False for call in builder.call_args_list))
-        self.assertFalse(failures)
-        self.assertTrue(all(not thread.is_alive() for thread in threads))
-        self.assertEqual(state["maximum"],1)
+    def test_request_client_only_loads_cached_session(self):
+        with patch.object(api, "get_session") as load, patch.object(api, "DeepSeekClient"):
+            api._build_client(force=True, allow_interactive=True)
+        self.assertFalse(load.call_args.kwargs["allow_refresh"])
+        self.assertFalse(load.call_args.kwargs["allow_interactive"])
 
     def test_rejected_stale_client_reuses_already_refreshed_client(self):
         old, current = Mock(),Mock()

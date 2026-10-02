@@ -11,32 +11,12 @@ load_environment()
 # Requests per minute allowed per client IP (override with RATE_LIMIT_PER_MINUTE).
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
 
-# When the server has no session, should it pop a visible browser window for
-# interactive sign-in (the first request then blocks until you finish logging
-# in)? On by default for local single-user use. Set to "0"/"false" for headless
-# deployments, where it instead returns a 503 telling the caller to run
-# the provider's auth command (`python -m deepseek.auth` or `python -m qwen.auth`).
-SERVER_INTERACTIVE_LOGIN = os.getenv("SERVER_INTERACTIVE_LOGIN", "1").lower() not in (
-    "0", "false", "no", "off",
-)
-
-# DeepSeek background refresher: periodically re-captures the token from the
-# persistent browser profile so a request never hits an expired token. Runs in a
-# daemon thread and never opens a visible window (allow_interactive=False).
-SESSION_REFRESH_ENABLED = os.getenv("SESSION_REFRESH_ENABLED", "1").lower() not in (
-    "0", "false", "no", "off",
-)
-# Refresh well before SESSION_MAX_AGE (6h in deepseek.auth) so the cached token
-# stays fresh. Default 5h.
-SESSION_REFRESH_INTERVAL = int(os.getenv("SESSION_REFRESH_INTERVAL", str(5 * 60 * 60)))
-
-# Playwright browser channel for the (background) headless refresh. The light
-# bundled "chromium-headless-shell" uses far less RAM than full Chrome, but may
-# not decrypt cookies written by Chrome's Keychain-bound profile — so callers
-# fall back to "chrome" when a headless capture is empty or fails.
+# Deprecated compatibility settings. The server ignores interactive/automatic
+# browser capture, including old .env opt-ins. Use the provider auth CLI manually.
+SERVER_INTERACTIVE_LOGIN = False
+SESSION_REFRESH_ENABLED = False
+SESSION_REFRESH_INTERVAL = 18000
 REFRESH_BROWSER_CHANNEL = os.getenv("REFRESH_BROWSER_CHANNEL", "chromium-headless-shell")
-
-# Fallback channel used after a missing token or capture error. Empty disables it.
 REFRESH_BROWSER_CHANNEL_FALLBACK = os.getenv("REFRESH_BROWSER_CHANNEL_FALLBACK", "chrome")
 
 # Public model ids the server advertises (via /v1/models) and accepts, mapped to
@@ -46,10 +26,12 @@ REFRESH_BROWSER_CHANNEL_FALLBACK = os.getenv("REFRESH_BROWSER_CHANNEL_FALLBACK",
 #
 # "vision" is deferred: it only does anything with an image attached, which needs
 # ref_file_ids / file-upload plumbing we don't have yet.
-MODEL_MAP = {
+DEEPSEEK_MODEL_MAP = {
     "deepseek-chat":   "default",   # Instant — the fast default model
     "deepseek-expert": "expert",    # Expert  — the stronger, slower model
 }
+DEEPSEEK_ENABLED = os.getenv("DEEPSEEK_ENABLED", "0").lower() not in ("", "0", "false", "no", "off")
+MODEL_MAP = dict(DEEPSEEK_MODEL_MAP) if DEEPSEEK_ENABLED else {}
 
 # Qwen Chat is opt-in and uses a separate account/profile from DeepSeek.
 QWEN_MODEL_MAP = {
@@ -85,7 +67,7 @@ if os.getenv("GEMINI_ENABLED", "0").lower() not in ("", "0", "false", "no", "off
 def model_provider(name: str) -> str:
     return OPTIONAL_MODEL_PROVIDERS.get(name, "qwen" if name in QWEN_MODEL_MAP else "deepseek")
 
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "qwen3.8-omni-flash"
 
 
 def is_known_model(name: str) -> bool:

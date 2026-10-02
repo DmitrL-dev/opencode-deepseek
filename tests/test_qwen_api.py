@@ -18,6 +18,7 @@ from server.schemas import ChatCompletionRequest, ChatMessage
 from qwen.client import QwenClient
 from tests.test_qwen import CHAT, MESSAGE, answer, events, session
 from tests.test_tools import block
+from tests.support import isolated_access
 
 CID = f"qwen:qwen3.8-max:{CHAT}:{MESSAGE}"
 
@@ -27,11 +28,12 @@ def qwen_with_sse(lines):
         if request.url.path == "/api/v2/chats/new":
             return httpx.Response(200, json={"success": True, "data": {"id": CHAT}})
         return httpx.Response(200, text="\n".join(lines), headers={"content-type": "text/event-stream"})
-    return QwenClient(session(), transport=httpx.MockTransport(handler))
+    return QwenClient(session(), access_guard=None, transport=httpx.MockTransport(handler))
 
 
 class QwenApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        isolated_access(self)
         api._request_gate = asyncio.Lock()
         api._qwen_request_gate = asyncio.Lock()
         self.enabled = patch.dict(api.MODEL_MAP, QWEN_MODEL_MAP)
@@ -79,19 +81,19 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
         call = response.json()["choices"][0]["message"]["tool_calls"][0]
         self.assertEqual(call["function"]["name"], "read")
 
-    async def test_qwen_auth_retry_refreshes_only_qwen(self):
+    async def test_qwen_auth_rejection_never_refreshes_or_replays(self):
         old, new = Mock(), Mock()
         request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
         old.chat.side_effect = httpx.HTTPStatusError("token expired", request=request, response=httpx.Response(401, request=request))
         new.chat.return_value = Reply("refreshed", CID)
         with patch.object(api, "get_qwen_client", side_effect=[old, new]) as qwen, patch.object(api, "get_client") as ds, contextlib.redirect_stdout(io.StringIO()):
             response = await self.http.post("/v1/chat/completions", json=self.body)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(qwen.call_count, 2)
-        self.assertEqual(qwen.call_args.kwargs, {"rejected_client": old})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(qwen.call_count, 1)
+        self.assertEqual(new.chat.call_count, 0)
         ds.assert_not_called()
 
-    async def test_named_sse_auth_errors_refresh_in_both_response_modes(self):
+    async def test_named_sse_rejections_are_terminal_in_both_response_modes(self):
         payloads = [
             {"error": {"code": "invalid_token", "message": "Access rejected"}},
             {"error": {"code": 401, "message": "Access rejected"}},
@@ -102,26 +104,25 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
         for payload in payloads:
             for streamed in (False, True):
                 with self.subTest(payload=payload, stream=streamed):
+                    api.guard.resume("qwen")
                     old = qwen_with_sse(["event: error", "data: " + json.dumps(payload), ""])
                     new = qwen_with_sse(events(answer("refreshed", status="finished")))
                     try:
                         with patch.object(api, "get_qwen_client", side_effect=[old, new]) as qwen, patch.object(api, "get_client") as ds, contextlib.redirect_stdout(io.StringIO()):
                             response = await self.http.post("/v1/chat/completions", json={**self.body, "stream": streamed})
-                        self.assertEqual(response.status_code, 200)
                         if streamed:
+                            self.assertEqual(response.status_code, 200)
                             chunks = [json.loads(line[6:]) for line in response.text.splitlines()
                                       if line.startswith("data: ") and line != "data: [DONE]"]
-                            self.assertFalse(any("error" in chunk for chunk in chunks), chunks)
-                            text = "".join(chunk["choices"][0]["delta"].get("content") or "" for chunk in chunks)
-                            self.assertEqual(chunks[-1]["conversation_id"], CID)
+                            self.assertTrue(all("choices" not in chunk for chunk in chunks))
+                            error = chunks[-1]["error"]
                         else:
-                            body = response.json()
-                            self.assertNotIn("error", body)
-                            text = body["choices"][0]["message"]["content"]
-                            self.assertEqual(body["conversation_id"], CID)
-                        self.assertEqual(text, "refreshed")
-                        self.assertEqual(qwen.call_count, 2)
-                        self.assertEqual(qwen.call_args.kwargs, {"rejected_client": old})
+                            self.assertEqual(response.status_code, 403)
+                            error = response.json()["error"]
+                        expected = "access_denied" if str(payload.get("error", {}).get("code")) == "403" else "session_expired"
+                        self.assertEqual(error["code"], expected)
+                        self.assertFalse(error["retryable"])
+                        self.assertEqual(qwen.call_count, 1)
                         ds.assert_not_called()
                     finally:
                         old.close()
@@ -133,8 +134,8 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch.object(api, "get_qwen_client", return_value=old) as qwen:
                 response = await self.http.post("/v1/chat/completions", json=self.body)
-            self.assertEqual(response.status_code, 500)
-            self.assertIn("quota_exceeded", response.json()["error"]["message"])
+            self.assertEqual(response.status_code, 403)
+            self.assertEqual(response.json()["error"]["code"], "quota_exceeded")
             self.assertEqual(qwen.call_count, 1)
         finally:
             old.close()
@@ -168,10 +169,10 @@ class QwenClientCacheTests(unittest.TestCase):
             with self.subTest(enabled=enabled):
                 result = subprocess.run(
                     [sys.executable, "-c", "import json; from server.config import MODEL_MAP; print(json.dumps(list(MODEL_MAP)))"],
-                    env=dict(os.environ, QWEN_ENABLED=enabled), check=True, capture_output=True, text=True,
+                    env=dict(os.environ, QWEN_ENABLED=enabled, DEEPSEEK_ENABLED="0"), check=True, capture_output=True, text=True,
                 )
                 models = json.loads(result.stdout)
-                self.assertIn("deepseek-chat", models)
+                self.assertNotIn("deepseek-chat", models)
                 for model in QWEN_MODEL_MAP:
                     self.assertEqual(model in models, enabled == "1")
 

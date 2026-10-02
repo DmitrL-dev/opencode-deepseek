@@ -85,14 +85,14 @@ class SessionTests(unittest.TestCase):
             with patch.object(auth,"_headless_refresh",side_effect=[RuntimeError("browser unavailable"),session()]) as refresh:
                 with contextlib.redirect_stdout(io.StringIO()):
                     result = auth.get_session(session_file=path,channel="preferred",fallback_channel="fallback",
-                                              allow_interactive=False)
+                                              allow_interactive=False,allow_refresh=True)
             self.assertEqual([call.args[1] for call in refresh.call_args_list],["preferred","fallback"])
             self.assertEqual(auth.Session.load(path).token,result.token)
 
     def test_failed_headless_login_returns_login_required(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(auth,"_headless_refresh",side_effect=RuntimeError("unavailable")):
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(auth.LoginRequired):
-                auth.get_session(session_file=Path(directory)/"missing.json",allow_interactive=False)
+                auth.get_session(session_file=Path(directory)/"missing.json",allow_interactive=False,allow_refresh=True)
 
     def test_profile_capture_is_serialized(self):
         state = {"active":0,"maximum":0}
@@ -112,7 +112,7 @@ class SessionTests(unittest.TestCase):
                 try:
                     barrier.wait(timeout=2)
                     auth.get_session(session_file=Path(directory)/str(index)/"session.json",max_age=0,
-                                     allow_interactive=False)
+                                     allow_interactive=False,allow_refresh=True)
                 except Exception as exc:
                     errors.append(exc)
             threads = [threading.Thread(target=capture,args=(i,)) for i in range(2)]
