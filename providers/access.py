@@ -259,7 +259,13 @@ class Attempt:
                         record.update(dispatched=True, next_at=time.time() + self.guard.interval)
                         self.guard._save(state)
                         self.dispatched = True
-                    return
+            if delay <= 0:
+                # Saving/fsync and lock acquisition can block. Revoke the
+                # authorization if cancellation or resume happened meanwhile.
+                self.check()
+                if validate is not None:
+                    validate()
+                return
             time.sleep(min(delay, 0.1))
 
     def complete(self):
