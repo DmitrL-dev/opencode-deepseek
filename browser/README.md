@@ -53,6 +53,20 @@ SSE keepalives protect client timeouts. Quota, security and region rejections
 are terminal; the bridge does not rotate accounts, solve captchas, change
 fingerprints, or retry through another endpoint.
 
+## Provider pauses
+
+All adapters are opt-in. The API attempts a prompt once; quota, security,
+regional or uncertain upstream failures persist a provider pause across
+restarts. Later requests return HTTP 403 before any browser job or CLI process
+is created. A failure after SSE starts is a terminal error event. This does not
+undo account restrictions or guarantee that website automation is permitted.
+
+Inspect `python -m providers.access status`. Only after manually checking normal
+website access, use `python -m providers.access resume PROVIDER`. A new sign-in
+or a different model cannot silently clear the pause. The default 10-second
+interval between attempts and continuations is pacing, not a website allowance.
+Use one server process; multiple workers do not share an in-flight queue.
+
 ## Usage limits
 
 Free access is subject to the website's account, model and feature allowances.
@@ -71,7 +85,11 @@ model turn. A resumed conversation consumes allowance too.
   membership features/models also consume a [shared credit pool](https://www.kimi.com/en/help/membership/membership-overview).
   Kimi Code limits apply to Kimi Code and must not be presented as this browser
   chat adapter's quota.
-- **DeepSeek, Qwen and GLM:** no exhausted web-chat quota was observed in our
+- **DeepSeek:** our account received a temporary restriction (`biz_code=5`,
+  `user is muted`) on 2026-10-02. The exact trigger is unknown; no live retest
+  was attempted after the safety changes. Automated website access can restrict
+  an account even without an observed quota warning.
+- **Qwen and GLM:** no exhausted web-chat quota was observed in our
   controlled qualification tests. This is not proof of unlimited usage. We have
   not established a fixed current web-chat allowance; API/CLI quota tables must
   not be substituted for website limits.

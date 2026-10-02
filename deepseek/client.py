@@ -29,6 +29,7 @@ from typing import Iterator, Optional
 import httpx
 
 from chat_protocol import Reply, sse_events as _sse_events
+from providers.access import ProviderRejected, rejection, guard
 
 from .auth import Session, get_session
 from .pow import DeepSeekPow
@@ -63,11 +64,20 @@ def _decode_cid(conversation_id: Optional[str]) -> tuple[Optional[str], Optional
 
 def _biz(data: dict) -> dict:
     """Unwrap DeepSeek's `data.biz_data` envelope, raising on API-level errors."""
+    if not isinstance(data, dict):
+        raise ProviderRejected()
+    envelope = data.get("data")
     if data.get("code") != 0:
-        raise RuntimeError(f"DeepSeek API error: {data.get('msg') or data}")
-    biz = data.get("data", {}).get("biz_data")
-    if biz is None:
-        raise RuntimeError(f"Unexpected response shape: {data}")
+        raise rejection(data)
+    if not isinstance(envelope, dict):
+        raise ProviderRejected()
+    if envelope.get("biz_code", 0) != 0:
+        if envelope.get("biz_code") == 5:
+            raise ProviderRejected("account_restricted")
+        raise rejection(envelope)
+    biz = envelope.get("biz_data")
+    if not isinstance(biz, dict):
+        raise ProviderRejected()
     return biz
 
 
@@ -75,8 +85,12 @@ class DeepSeekClient:
     def __init__(
         self,
         session: Optional[Session] = None,
-        allow_interactive: bool = True,
+        allow_interactive: bool = False,
+        access_guard=guard,
     ):
+        self.access_guard = access_guard
+        if access_guard is not None:
+            access_guard.check("deepseek")
         # `allow_interactive=False` makes session resolution non-blocking: it
         # uses a cached/headless session and raises LoginRequired instead of
         # opening a browser window. The server passes False (see server/api.py).
@@ -101,12 +115,6 @@ class DeepSeekClient:
             "user-agent": self.session.user_agent,
             "origin": BASE,
             "referer": f"{BASE}/",
-            "x-app-version": "2.0.0",
-            "x-client-version": "2.0.0",
-            "x-client-platform": "web",
-            "x-client-locale": "en_US",
-            "x-client-bundle-id": "com.deepseek.chat",
-            "x-client-timezone-offset": "19800",
         }
 
     # --- protocol steps -----------------------------------------------------
@@ -197,7 +205,15 @@ class _Stream:
 
     def __iter__(self) -> Iterator[str]:
         with self._client._request_lock:
-            yield from self._generate()
+            access = getattr(self._client, "access_guard", None)
+            if access is not None:
+                access.wait("deepseek")
+            try:
+                yield from self._generate()
+            except Exception as exc:
+                if access is not None:
+                    raise access.reject("deepseek", exc) from exc
+                raise
 
     def _generate(self) -> Iterator[str]:
         if self._session_id is None:
@@ -222,6 +238,13 @@ class _Stream:
             "POST", COMPLETION_PATH, json=body, headers=headers
         ) as resp:
             resp.raise_for_status()
+            if "text/event-stream" not in resp.headers.get("content-type", "").lower():
+                resp.read()
+                try:
+                    _biz(resp.json())
+                except ValueError as exc:
+                    raise ProviderRejected() from exc
+                raise ProviderRejected()
             yield from _parse_sse(resp.iter_lines(), meta)
         if meta.get("message_id") is not None:
             self._message_id = meta["message_id"]
@@ -299,10 +322,11 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         envelope = obj
         if isinstance(obj.get("v"), dict) and ("error" in obj["v"] or "code" in obj["v"]):
             envelope = obj["v"]
+        if "data" in envelope and isinstance(envelope["data"], dict) and envelope["data"].get("biz_code", 0) != 0:
+            _biz(envelope)
         if event == "error" or "error" in envelope or envelope.get("code", 0) != 0:
             detail = envelope.get("error") or envelope
-            message = (detail.get("message") or detail.get("msg")) if isinstance(detail, dict) else str(detail)
-            raise DeepSeekStreamError(f"DeepSeek stream error: {message or 'unknown error'}")
+            raise rejection(detail)
         if event == "finish":
             terminal = True
             meta.setdefault("finish_reason", "stop")

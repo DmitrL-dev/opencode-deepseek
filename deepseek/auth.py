@@ -7,11 +7,11 @@ email/password form). It does not chat. We then capture the bearer token from
 `localStorage.userToken` plus the session cookies, and hand them to the
 pure-HTTP client in `deepseek.client`.
 
-A persistent Chromium profile means the human-check is a one-time thing: once
-you've signed in, later runs reuse the profile and capture the token headlessly.
+A persistent Chromium profile can retain manual sign-in. Session loading uses
+the local cache only by default; authentication cannot clear an account pause.
 
     from deepseek.auth import get_session
-    session = get_session()          # logs in (visible) the first time, else headless
+    session = get_session()          # cached only; use python -m deepseek.auth to sign in
     print(session.token[:8], "...")
 """
 
@@ -45,8 +45,8 @@ DEFAULT_SESSION_FILE = ROOT / "session" / "session.json"
 CHAT_URL = "https://chat.deepseek.com/"
 SIGNIN_URL = "https://chat.deepseek.com/sign_in"
 
-LAUNCH_ARGS = ["--disable-blink-features=AutomationControlled"]
-# Token is trusted for this long before we refresh it from the browser again.
+LAUNCH_ARGS = []
+# Maximum trusted cache age; expiry requires manual sign-in in the API.
 SESSION_MAX_AGE = 6 * 60 * 60  # 6 hours
 _PROFILE_LOCK = threading.RLock()
 
@@ -316,22 +316,25 @@ def get_session(
     profile_dir: Path = DEFAULT_PROFILE_DIR,
     session_file: Path = DEFAULT_SESSION_FILE,
     max_age: int = SESSION_MAX_AGE,
-    allow_interactive: bool = True,
+    allow_interactive: bool = False,
     channel: Optional[str] = DEFAULT_CHANNEL,
     fallback_channel: Optional[str] = None,
+    allow_refresh: bool = False,
 ) -> Session:
-    """Return a usable session: cached file if fresh, else a headless refresh
-    from the browser profile.
+    """Load a fresh cache without browser access by default.
 
-    If neither works and `allow_interactive` is True, open a visible window for
-    manual sign-in. If it's False (the server's case — we can't pop a browser
-    mid-request), raise `LoginRequired` telling the user to run the login step.
-
-    Note: this uses Playwright's *sync* API, so it must not be called from inside
-    an asyncio event loop — call it from a worker thread (e.g. run_in_threadpool)."""
+    Explicit library callers may opt into allow_refresh; the API server never
+    does. Use the auth CLI for manual sign-in. Never use sign-in to clear a
+    provider pause or retry an account/security restriction.
+    """
     cached = Session.load(session_file)
     if cached and cached.age < max_age:
         return cached
+
+    # Requests must not reopen a website, recapture a session, or fall back to
+    # interactive login. The auth CLI is the explicit manual sign-in path.
+    if not allow_refresh:
+        raise LoginRequired()
 
     # Try a headless refresh from the (presumably logged-in) persistent profile.
     channels = [channel]

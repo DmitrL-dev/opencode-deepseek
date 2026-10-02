@@ -322,7 +322,7 @@ def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
     """Yield OpenAI SSE frames for an already-computed reply.
 
     Used when the caller has a full result (e.g. it ran a non-streaming request
-    so it could retry on an auth error) but the client asked for a stream.
+    so tool calls can be validated) but the client asked for a stream.
     """
     cid = cid or _id()
     created = created if created is not None else _now()

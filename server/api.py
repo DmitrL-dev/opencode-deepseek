@@ -18,13 +18,10 @@ Endpoints:
 Requests under /v1 are rate limited per client IP (default 30/min, set via
 RATE_LIMIT_PER_MINUTE); /healthz is exempt.
 
-Sessions expire. To survive that, this module:
-  * rebuilds the provider's client once and retries if it rejects
-    the token (auth error), and
-  * refreshes DeepSeek in the background every SESSION_REFRESH_INTERVAL seconds;
-    Qwen's short-lived token is checked and refreshed before each request.
-If a refresh can't recover the session, the endpoint returns a clear 503 instead
-of blocking on an interactive login window.
+All providers are opt-in. Sessions are loaded from cache only. Requests are
+paced and attempted once; upstream failures persist a provider pause. Missing
+sessions return 401; paused providers return 403 before any account access.
+Streaming failures emit a terminal error and stop subsequent reconnects.
 """
 
 from __future__ import annotations
@@ -38,7 +35,6 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
 import anyio
-import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
@@ -50,6 +46,7 @@ from qwen.auth import get_session as get_qwen_session
 from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
+from providers.access import guard, ProviderRejected
 
 from .config import (
     MODEL_MAP,
@@ -100,22 +97,6 @@ def _check_cancellation(signal):
 def _check_cancelled():
     _check_cancellation(_worker_cancellation.get())
 
-# Substrings that mark an upstream rejection as an auth/session problem (worth a
-# session refresh + one retry). Deliberately broad: we only retry once, so a
-# false positive costs a single extra attempt.
-_AUTH_HINTS = (
-    "auth", "unauthorized", "forbidden", "login", "token",
-    "session", "credential", "expired", "not signed",
-)
-
-
-def _is_auth_error(exc: Exception) -> bool:
-    if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code in (401, 403)
-    msg = str(exc).lower()
-    return any(h in msg for h in _AUTH_HINTS)
-
-
 def _tool_names(tools) -> set:
     """Extract requested tool names from OpenAI tool objects, defensively."""
     names = set()
@@ -135,35 +116,13 @@ def _debug_toolcalls() -> bool:
 
 
 def _build_client(force: bool = False, allow_interactive=None) -> DeepSeekClient:
-    """Resolve a session (cached → headless refresh) and wrap it in a client.
-
-    `force=True` ignores the cached session file and re-captures from the browser
-    profile — used after DeepSeek rejects the current token, since the file can
-    look "fresh" (age < SESSION_MAX_AGE) while the token is already dead."""
-    session = get_session(
-        max_age=0 if force else SESSION_MAX_AGE,
-        allow_interactive=SERVER_INTERACTIVE_LOGIN if allow_interactive is None else allow_interactive,
-        channel=REFRESH_BROWSER_CHANNEL,
-        fallback_channel=REFRESH_BROWSER_CHANNEL_FALLBACK,
-    )
-    return DeepSeekClient(session=session)
+    """Load a cached session only; legacy force/login arguments cannot browse."""
+    session = get_session(max_age=SESSION_MAX_AGE, allow_interactive=False, allow_refresh=False)
+    return DeepSeekClient(session=session, access_guard=None)  # server owns pause/pacing
 
 
 def get_client(force_refresh: bool = False, rejected_client=None) -> DeepSeekClient:
-    """Build (once) the shared client and its signed-in session.
-
-    Session resolution: cached file → headless capture off the persistent
-    profile. If neither works and SERVER_INTERACTIVE_LOGIN is on, it opens a
-    visible browser window so you can sign in — the triggering request blocks
-    until you finish. If interactive login is off, it raises `LoginRequired`,
-    which the endpoint turns into an actionable 503.
-
-    `force_refresh=True` re-captures the token. If `rejected_client` was already
-    replaced by another refresh, reuse that replacement instead of capturing again.
-
-    This touches Playwright's sync API, so callers must invoke it OFF the event
-    loop (via run_in_threadpool); calling it inside the asyncio loop raises
-    "Playwright Sync API inside the asyncio loop"."""
+    """Cache a client; an explicit reset reloads the session file without browsing."""
     global _client
     with _client_lock:
         if _client is None or (force_refresh and (
@@ -185,24 +144,21 @@ def reset_client() -> None:
 
 
 def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
-    """Refresh Qwen before expiry, or once after rejection, off the event loop.
-
-    Retain a replaced pool while any in-flight request still references it,
-    matching get_client()'s ownership rule.
-    """
+    """Load a manually captured, usable Qwen session; never capture a browser."""
     global _qwen_client
     with _qwen_client_lock:
         if (_qwen_client is None or not _qwen_client.session.usable
                 or (force_refresh and (rejected_client is None or _qwen_client is rejected_client))):
-            session = get_qwen_session(force=force_refresh, allow_interactive=SERVER_INTERACTIVE_LOGIN,
+            session = get_qwen_session(force=force_refresh, allow_interactive=False, allow_refresh=False,
                                        channel=REFRESH_BROWSER_CHANNEL,
                                        fallback_channel=REFRESH_BROWSER_CHANNEL_FALLBACK)
-            _qwen_client = QwenClient(session)
+            _qwen_client = QwenClient(session, access_guard=None)  # server owns pause/pacing
         return _qwen_client
 
 
 def _request_client(req, force_refresh=False, rejected_client=None):
     provider = model_provider(req.model)
+    guard.check(provider)
     if provider in PROVIDERS:
         # Browser routes run in another worker context. Bind the originating
         # request's Event now so they see cancellation before this worker wakes.
@@ -219,12 +175,6 @@ def _request_queue(req):
     if provider in PROVIDERS:
         return _provider_request_gates[provider]
     return _qwen_request_gate if provider == "qwen" else _request_gate
-
-
-def _can_refresh(req, error):
-    # A region/security/quota rejection from a browser or official CLI is
-    # terminal. Reopening a profile cannot repair it and may repeat a prompt.
-    return model_provider(req.model) not in PROVIDERS and _is_auth_error(error)
 
 
 async def _run_worker(function, *args):
@@ -266,24 +216,22 @@ async def _run_queued(function, *args, gate=None):
 
 
 async def _run_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
-    """Run a queued completion with one retry after an auth rejection."""
+    """Run one paced completion inside the provider queue."""
     return await _run_queued(_chat_with_retry, prompt, req, model_type, gate=_request_queue(req))
 
 
 def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
-    _check_cancelled()
-    client = _request_client(req)
+    """One attempt only. An uncertain outcome must never replay a prompt."""
+    provider = model_provider(req.model)
+    guard.wait(provider, _check_cancelled)
     try:
+        client = _request_client(req)
         _check_cancelled()
         return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
-    except Exception as e:
-        _check_cancelled()
-        if not _can_refresh(req, e):
-            raise
-        print(f"[retry] {model_provider(req.model)} rejected the session ({type(e).__name__}); refreshing...", flush=True)
-        client = _request_client(req, True, rejected_client=client)
-        _check_cancelled()
-        return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
+    except LoginRequired:
+        raise
+    except Exception as exc:
+        raise guard.reject(provider, exc) from exc
 
 
 # A truncated tool reply is continued this many times before giving up. Each
@@ -351,7 +299,7 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         )
         try:
             nxt = _continue_reply(reply, req)
-        except LoginRequired:
+        except (LoginRequired, ProviderRejected):
             raise
         except Exception as e:
             raise ToolCallError("Could not finish the truncated tool reply") from e
@@ -367,7 +315,7 @@ def _open_stream(client: DeepSeekClient, prompt: str, req: ChatCompletionRequest
 
 
 def _sse_error(message: str, err_type: str = "server_error") -> str:
-    obj = {"error": {"message": message, "type": err_type}}
+    obj = {"error": {"message": message, "type": err_type, "code": err_type, "retryable": False}}
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\ndata: [DONE]\n\n"
 
 
@@ -399,8 +347,11 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
         except ToolCallError as e:
             yield _sse_error(str(e), "invalid_tool_response")
             return
-        except Exception as e:
-            yield _sse_error(f"{model_provider(req.model)} request failed: {e}")
+        except ProviderRejected as e:
+            yield _sse_error(str(e), e.code)
+            return
+        except Exception:
+            yield _sse_error("Provider request failed; automatic replay is disabled.")
             return
 
         for frame in sse_frames(req.model, content, tool_calls, reply.conversation_id,
@@ -416,47 +367,28 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
 
 def _stream_with_retry(client: DeepSeekClient, prompt: str,
                        req: ChatCompletionRequest, model_type):
-    """Stream a plain-text completion, refreshing the session once if the very
-    first chunk fails with an auth error (before any bytes were sent)."""
-    for attempt in range(2):
-        iterator = None
-        try:
-            _check_cancelled()
-            stream = _open_stream(client, prompt, req, model_type)
-            iterator = iter(stream)
-            first = next(iterator, _MISSING)
-        except Exception as exc:
-            if iterator is not None and hasattr(iterator, "close"):
-                iterator.close()
-            _check_cancelled()
-            if attempt == 0 and _can_refresh(req, exc):
-                try:
-                    client = _request_client(req, True, rejected_client=client)
-                except LoginRequired as refresh_error:
-                    yield _sse_error(str(refresh_error), "login_required")
-                    return
-                except Exception as refresh_error:
-                    yield _sse_error(f"Session refresh failed: {refresh_error}")
-                    return
-                continue
-            error_type = "login_required" if isinstance(exc, LoginRequired) else "server_error"
-            yield _sse_error(f"{model_provider(req.model)} request failed: {exc}", error_type)
-            return
+    """Expose one stream; latch every upstream failure before reporting it."""
+    iterator = None
+    try:
+        guard.wait(model_provider(req.model), _check_cancelled)
+        stream = _open_stream(client, prompt, req, model_type)
+        iterator = iter(stream)
+        first = next(iterator, _MISSING)
 
         def remaining():
             if first is not _MISSING:
                 yield first
             yield from iterator
 
-        try:
-            yield from stream_chunks(req.model, stream, iterator=remaining())
-        except Exception as exc:
-            # Once content has been emitted, retrying would duplicate it.
-            yield _sse_error(f"{model_provider(req.model)} request failed: {exc}")
-        finally:
-            if hasattr(iterator, "close"):
-                iterator.close()
-        return
+        yield from stream_chunks(req.model, stream, iterator=remaining())
+    except LoginRequired as exc:
+        yield _sse_error(str(exc), "login_required")
+    except Exception as exc:
+        error = guard.reject(model_provider(req.model), exc)
+        yield _sse_error(str(error), error.code)
+    finally:
+        if iterator is not None and hasattr(iterator, "close"):
+            iterator.close()
 
 
 async def _plain_stream(client, prompt, req, model_type):
@@ -489,8 +421,11 @@ async def _buffered_plain_stream(req, prompt, model_type):
         except LoginRequired as exc:
             yield _sse_error(str(exc), "login_required")
             return
-        except Exception as exc:
-            yield _sse_error(f"{model_provider(req.model)} request failed: {exc}")
+        except ProviderRejected as exc:
+            yield _sse_error(str(exc), exc.code)
+            return
+        except Exception:
+            yield _sse_error("Provider request failed; automatic replay is disabled.")
             return
         for frame in sse_frames(req.model, reply.text, None, reply.conversation_id,
                                 finish_reason=reply.finish_reason):
@@ -501,25 +436,6 @@ async def _buffered_plain_stream(req, prompt, model_type):
         task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
 
 
-def _refresh_loop(stop_event=None) -> None:
-    """Daemon loop: re-capture the token from the browser profile every interval.
-
-    Uses max_age=0 to force a real (headless) capture each cycle rather than
-    returning the cached file, and allow_interactive=False so it never opens a
-    window."""
-    global _client
-    stop_event = stop_event if stop_event is not None else _stop_refresh
-    while not stop_event.wait(SESSION_REFRESH_INTERVAL):
-        try:
-            with _client_lock:
-                _client = _build_client(force=True, allow_interactive=False)
-            print(f"[refresh] session refreshed at {time.strftime('%H:%M:%S')}", flush=True)
-        except LoginRequired:
-            print("[refresh] refresh failed: login required (cookies expired?)", flush=True)
-        except Exception as e:
-            print(f"[refresh] refresh error: {e}", flush=True)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _request_gate, _qwen_request_gate, _stop_refresh, _provider_request_gates
@@ -528,19 +444,11 @@ async def lifespan(app: FastAPI):
     _provider_request_gates = {name: asyncio.Lock() for name in PROVIDERS}
     _stop_refresh = threading.Event()
     stop_event = _stop_refresh
-    thread = None
-    if SESSION_REFRESH_ENABLED:
-        thread = threading.Thread(target=_refresh_loop, args=(stop_event,),
-                                  name="session-refresher", daemon=True)
-        thread.start()
-        print(f"[refresh] background refresher started (every {SESSION_REFRESH_INTERVAL}s, "
-              f"channel={REFRESH_BROWSER_CHANNEL})", flush=True)
+    # Background browser recapture is retired, including existing .env opt-ins.
     try:
         yield
     finally:
         stop_event.set()
-        if thread is not None:
-            thread.join(timeout=5)
 
 
 app = FastAPI(title="Account providers OpenAI-compatible API", version="0.2.0", lifespan=lifespan)
@@ -551,7 +459,8 @@ install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
 def _error(message: str, status: int = 500, err_type: str = "server_error"):
     return JSONResponse(
         status_code=status,
-        content={"error": {"message": message, "type": err_type}},
+        content={"error": {"message": message, "type": err_type, "code": err_type, "retryable": False}},
+        headers={"x-should-retry": "false"},
     )
 
 
@@ -584,6 +493,11 @@ async def chat_completions(req: ChatCompletionRequest):
             status=404, err_type="model_not_found",
         )
 
+    try:
+        guard.check(model_provider(req.model))
+    except ProviderRejected as exc:
+        return _error(str(exc), status=403, err_type=exc.code)
+
     if req.conversation_id:
         try:
             provider = model_provider(req.model)
@@ -611,7 +525,7 @@ async def chat_completions(req: ChatCompletionRequest):
 
     # Tool calls are emulated by buffering the reply and parsing it, so we use the
     # non-streaming call and then emit SSE frames when the client asked to stream.
-    # That also lets us retry on an auth error and still return a clean status.
+    # The provider worker latches upstream failures before exposing the result.
     if req.tools:
         if req.stream:
             return StreamingResponse(
@@ -621,18 +535,20 @@ async def chat_completions(req: ChatCompletionRequest):
         try:
             reply, content, tool_calls = await _run_tool_chat(prompt, req, model_type)
         except LoginRequired as e:
-            return _error(str(e), status=503, err_type="login_required")
+            return _error(str(e), status=401, err_type="login_required")
         except ToolCallError as e:
-            return _error(str(e), status=502, err_type="invalid_tool_response")
-        except Exception as e:
-            return _error(f"{model_provider(req.model)} request failed: {e}")
+            return _error(str(e), status=400, err_type="invalid_tool_response")
+        except ProviderRejected as e:
+            return _error(str(e), status=403, err_type=e.code)
+        except Exception:
+            return _error("Provider request failed; automatic replay is disabled.", status=400)
 
         return completion_response(
             req.model, content, prompt, reply.conversation_id, tool_calls,
             finish_reason=reply.finish_reason,
         )
 
-    # Plain chat: real incremental streaming, or a buffered retryable call.
+    # Plain chat: one incremental stream or one buffered completion.
     if req.stream:
         if model_provider(req.model) in PROVIDERS:
             return StreamingResponse(_buffered_plain_stream(req, prompt, model_type),
@@ -640,9 +556,10 @@ async def chat_completions(req: ChatCompletionRequest):
         try:
             client = await _run_queued(_request_client, req, gate=_request_queue(req))
         except LoginRequired as e:
-            return _error(str(e), status=503, err_type="login_required")
+            return _error(str(e), status=401, err_type="login_required")
         except Exception as e:
-            return _error(f"Failed to initialise {model_provider(req.model)} session: {e}")
+            error = guard.reject(model_provider(req.model), e)
+            return _error(str(error), status=403, err_type=error.code)
 
         return StreamingResponse(_plain_stream(client, prompt, req, model_type),
                                  media_type="text/event-stream")
@@ -650,9 +567,11 @@ async def chat_completions(req: ChatCompletionRequest):
     try:
         reply = await _run_chat_with_retry(prompt, req, model_type)
     except LoginRequired as e:
-        return _error(str(e), status=503, err_type="login_required")
-    except Exception as e:
-        return _error(f"{model_provider(req.model)} request failed: {e}")
+        return _error(str(e), status=401, err_type="login_required")
+    except ProviderRejected as e:
+        return _error(str(e), status=403, err_type=e.code)
+    except Exception:
+        return _error("Provider request failed; automatic replay is disabled.", status=400)
 
     return completion_response(req.model, reply.text, prompt, reply.conversation_id,
                                finish_reason=reply.finish_reason)

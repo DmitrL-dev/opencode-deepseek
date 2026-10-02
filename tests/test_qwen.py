@@ -10,6 +10,7 @@ import httpx
 from deepseek.auth import Session as DeepSeekSession
 from qwen.auth import LoginRequired, Session, _capture, get_session, login
 from qwen.client import QwenClient, QwenStreamError, _decode_cid, _parse_sse
+from providers.access import ProviderRejected
 
 CHAT = "00000000-0000-4000-8000-000000000001"
 MESSAGE = "00000000-0000-4000-8000-000000000002"
@@ -76,7 +77,7 @@ class QwenSessionTests(unittest.TestCase):
         cached.token = " \t\n"
         self.assertFalse(cached.usable)
         with patch.object(Session, "load", return_value=cached), patch("qwen.auth._capture_profile", return_value=fresh) as capture, patch.object(Session, "save"):
-            self.assertIs(get_session(allow_interactive=False), fresh)
+            self.assertIs(get_session(allow_refresh=True, allow_interactive=False), fresh)
         capture.assert_called_once()
 
     def test_unusable_capture_is_not_saved_and_does_not_block_fallback(self):
@@ -85,7 +86,7 @@ class QwenSessionTests(unittest.TestCase):
                 invalid, fresh = session(), session()
                 invalid.token = token
                 with patch.object(Session, "load", return_value=None), patch("qwen.auth._capture_profile", side_effect=[invalid, fresh]) as capture, patch.object(Session, "save", autospec=True) as save:
-                    result = get_session(allow_interactive=False, channel="preferred", fallback_channel="fallback")
+                    result = get_session(allow_refresh=True, allow_interactive=False, channel="preferred", fallback_channel="fallback")
                 self.assertIs(result, fresh)
                 self.assertEqual([call.args[2] for call in capture.call_args_list], ["preferred", "fallback"])
                 save.assert_called_once_with(fresh, unittest.mock.ANY)
@@ -113,14 +114,14 @@ class QwenSessionTests(unittest.TestCase):
         cached, fresh = session(), session()
         cached.expires_at = time.time() + 30
         with patch.object(Session, "load", return_value=cached), patch("qwen.auth._capture_profile", return_value=fresh) as capture, patch.object(Session, "save") as save:
-            self.assertIs(get_session(allow_interactive=False), fresh)
+            self.assertIs(get_session(allow_refresh=True, allow_interactive=False), fresh)
         self.assertTrue(capture.call_args.args[1])
         save.assert_called_once()
 
     def test_disabled_fallback_and_headless_mode_never_open_login(self):
         with patch.object(Session, "load", return_value=None), patch("qwen.auth._capture_profile", return_value=None) as capture, patch("qwen.auth.login") as login:
             with self.assertRaises(LoginRequired):
-                get_session(allow_interactive=False, fallback_channel="")
+                get_session(allow_refresh=True, allow_interactive=False, fallback_channel="")
         self.assertEqual(capture.call_count, 1)
         self.assertTrue(capture.call_args.args[1])
         login.assert_not_called()
@@ -150,7 +151,7 @@ class QwenStreamTests(unittest.TestCase):
             {"response.created": {"response_id": MESSAGE}, "response_id": SECONDARY},
         ]
         for frame in invalid_frames:
-            with self.subTest(frame=frame), self.assertRaises(QwenStreamError):
+            with self.subTest(frame=frame), self.assertRaises((QwenStreamError, ProviderRejected)):
                 list(_parse_sse(events(frame, answer("must not escape")), {}))
 
     def test_malformed_choices_and_deltas_never_become_a_successful_prefix(self):
@@ -165,7 +166,7 @@ class QwenStreamTests(unittest.TestCase):
                         {"response.created": {"response_id": SECONDARY, "response_index": "1"}},
                         answer("prefix"), {"response_id": response_id, "choices": choices},
                     )
-                    with self.assertRaises(QwenStreamError):
+                    with self.assertRaises((QwenStreamError, ProviderRejected)):
                         list(_parse_sse(frames, {}))
 
     def test_missing_or_empty_delta_remains_valid_for_a_finish_frame(self):
@@ -194,7 +195,7 @@ class QwenStreamTests(unittest.TestCase):
                     meta = {}
                     self.assertEqual("".join(_parse_sse(events(*frames, done=False), meta)), "complete primary")
                     self.assertEqual(meta, {"message_id": MESSAGE, "finish_reason": "stop"})
-        with self.assertRaises(QwenStreamError):
+        with self.assertRaises((QwenStreamError, ProviderRejected)):
             list(_parse_sse(events(
                 {"response.created": {"response_id": MESSAGE, "response_index": "0"}},
                 {"response.created": {"response_id": SECONDARY, "response_index": "1"}},
@@ -212,18 +213,18 @@ class QwenStreamTests(unittest.TestCase):
             {"response.created": {"response_id": MESSAGE}, "response.stopped": {"response_id": SECONDARY}},
         ]
         for stop in stops:
-            with self.subTest(stop=stop), self.assertRaises(QwenStreamError):
+            with self.subTest(stop=stop), self.assertRaises((QwenStreamError, ProviderRejected)):
                 list(_parse_sse(events(
                     {"response.created": {"response_id": MESSAGE, "response_index": "0"}},
                     {"response.created": {"response_id": SECONDARY, "response_index": "1"}},
                     answer("complete primary", status="finished"), stop), {}))
 
-    def test_named_error_payload_is_preserved_and_never_treated_as_done(self):
+    def test_named_error_is_sanitized_and_never_treated_as_done(self):
         payload = json.dumps({"error": {"code": "invalid_token", "message": "Access rejected"}})
-        with self.assertRaisesRegex(QwenStreamError, "invalid_token.*Access rejected"):
+        with self.assertRaisesRegex(ProviderRejected, "Sign in manually"):
             list(_parse_sse(["event: error", "data: " + payload, ""], {}))
         for payload in ("", "[DONE]", "{broken", "{}"):
-            with self.subTest(payload=payload), self.assertRaises(QwenStreamError):
+            with self.subTest(payload=payload), self.assertRaises((QwenStreamError, ProviderRejected)):
                 list(_parse_sse(["event: error", "data: " + payload, ""], {}))
 
     def test_only_answer_text_is_exposed(self):
@@ -240,13 +241,13 @@ class QwenStreamTests(unittest.TestCase):
     def test_eof_and_reasoning_completion_do_not_count_as_success(self):
         for stream in (events(answer("partial"), done=False),
                        events({"choices": [{"delta": {"phase": "think", "status": "finished"}}]}, done=False)):
-            with self.assertRaises(QwenStreamError):
+            with self.assertRaises((QwenStreamError, ProviderRejected)):
                 list(_parse_sse(stream, {}))
 
     def test_errors_and_stopped_responses_are_not_successful(self):
         for error in ({"error": {"message": "failed"}}, {"success": False, "data": {"code": "invalid_token"}},
                       {"response.stopped": {"response_id": MESSAGE}}):
-            with self.assertRaises(QwenStreamError):
+            with self.assertRaises((QwenStreamError, ProviderRejected)):
                 list(_parse_sse(events(answer("partial"), error), {}))
 
     def test_output_limit_is_reported(self):
@@ -260,7 +261,7 @@ class QwenStreamTests(unittest.TestCase):
                 _decode_cid(cid)
 
     def test_different_chat_ids_are_rejected(self):
-        with self.assertRaises(QwenStreamError):
+        with self.assertRaises((QwenStreamError, ProviderRejected)):
             list(_parse_sse(events({"response.created": {"chat_id": MESSAGE}}), {"chat_id": CHAT}))
 
     def test_parallel_responses_are_not_interleaved_or_used_as_the_resume_parent(self):
@@ -309,7 +310,7 @@ class QwenStreamTests(unittest.TestCase):
             self.assertEqual(request.url.path, "/api/v2/chat/completions")
             text = "\n".join(events({"response.created": {"response_id": MESSAGE, "chat_id": CHAT}}, answer("OK")))
             return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
-        client = QwenClient(session(), transport=httpx.MockTransport(handler))
+        client = QwenClient(session(), access_guard=None, transport=httpx.MockTransport(handler))
         try:
             reply = client.chat("hello", model="qwen3.8-max")
             self.assertEqual(reply.text, "OK")
@@ -329,9 +330,9 @@ class QwenStreamTests(unittest.TestCase):
                 return httpx.Response(200, json={"success": True, "data": {"id": CHAT}})
             payload = json.dumps({"success": False, "data": {"code": "invalid_token", "message": "Sign in again"}}).encode()
             return httpx.Response(200, stream=httpx.ByteStream(payload), headers={"content-type": "application/json"})
-        client = QwenClient(session(), transport=httpx.MockTransport(handler))
+        client = QwenClient(session(), access_guard=None, transport=httpx.MockTransport(handler))
         try:
-            with self.assertRaisesRegex(QwenStreamError, "invalid_token"):
+            with self.assertRaisesRegex(ProviderRejected, "Sign in manually"):
                 client.chat("hello")
         finally:
             client.close()

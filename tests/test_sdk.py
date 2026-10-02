@@ -3,17 +3,19 @@ import unittest
 from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
-from openai import APIError, InternalServerError, OpenAI
+from openai import APIError, BadRequestError, OpenAI
 
 from deepseek.client import Reply
 from server import api
 from tests.test_api import TOOLS
 from tests.test_stream import mock_client, snapshot
 from tests.test_tools import block
+from tests.support import isolated_access
 
 
 class OpenAISdkTests(unittest.TestCase):
     def setUp(self):
+        isolated_access(self)
         self.addCleanup(patch.stopall)
         patch.object(api, "SESSION_REFRESH_ENABLED", False).start()
         self.transport = TestClient(api.app)
@@ -79,8 +81,8 @@ class OpenAISdkTests(unittest.TestCase):
     def test_invalid_tool_policy_is_an_sdk_http_error(self):
         fake = Mock()
         fake.chat.return_value = Reply(block([{"name": "bash", "arguments": {}}]), "fake:2")
-        with patch.object(api, "get_client", return_value=fake), self.assertRaises(InternalServerError) as error:
+        with patch.object(api, "get_client", return_value=fake), self.assertRaises(BadRequestError) as error:
             self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages,
                                              tools=TOOLS, tool_choice="none")
-        self.assertEqual(error.exception.status_code, 502)
+        self.assertEqual(error.exception.status_code, 400)
         self.assertEqual(error.exception.body["type"], "invalid_tool_response")

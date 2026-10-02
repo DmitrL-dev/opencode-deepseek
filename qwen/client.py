@@ -11,6 +11,7 @@ from typing import Iterator, Optional
 import httpx
 
 from chat_protocol import Reply, sse_events
+from providers.access import rejection, guard
 from .auth import Session, get_session
 
 BASE = "https://chat.qwen.ai"
@@ -23,15 +24,9 @@ class QwenStreamError(RuntimeError):
 
 
 def _upstream_error(detail):
-    if isinstance(detail, dict):
-        code = detail.get("code", "unknown_error")
-        message = detail.get("details") or detail.get("message") or "Request rejected"
-    else:
-        code, message = "unknown_error", str(detail) if detail else "Request rejected"
-    # The server recognises auth failures by their message, including web API
-    # errors delivered inside HTTP 200 SSE responses rather than HTTP 401/403.
-    kind = "authorization error" if code in (401, 403, "401", "403") else "error"
-    return QwenStreamError(f"Qwen {kind} ({code}): {message}")
+    code = detail.get("code") if isinstance(detail, dict) else None
+    status = int(code) if str(code) in ("401", "403", "429") else None
+    return rejection(detail, status=status)
 
 
 def _business(data):
@@ -190,7 +185,10 @@ def _parse_sse(lines, meta: dict) -> Iterator[str]:
 
 
 class QwenClient:
-    def __init__(self, session: Optional[Session] = None, *, transport=None):
+    def __init__(self, session: Optional[Session] = None, *, transport=None, access_guard=guard):
+        self.access_guard = access_guard
+        if access_guard is not None:
+            access_guard.check("qwen")
         self.session = session or get_session()
         self._request_lock = threading.Lock()
         self._http = httpx.Client(
@@ -250,7 +248,15 @@ class _Stream:
 
     def __iter__(self):
         with self.client._request_lock:
-            yield from self._generate()
+            access = self.client.access_guard
+            if access is not None:
+                access.wait("qwen")
+            try:
+                yield from self._generate()
+            except Exception as exc:
+                if access is not None:
+                    raise access.reject("qwen", exc) from exc
+                raise
 
     def _generate(self):
         if self.chat_id is None:

@@ -132,11 +132,13 @@ def login(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DEFAULT_
 def get_session(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DEFAULT_SESSION_FILE,
                 allow_interactive: bool = False, force: bool = False,
                 channel: Optional[str] = "chromium-headless-shell",
-                fallback_channel: Optional[str] = "chrome") -> Session:
+                fallback_channel: Optional[str] = "chrome", allow_refresh: bool = False) -> Session:
     with _PROFILE_LOCK:
         cached = Session.load(session_file)
         if not force and cached and cached.usable:
             return cached
+        if not allow_refresh:
+            raise LoginRequired()
         channels = list(dict.fromkeys([channel] + ([fallback_channel] if fallback_channel else [])))
         for browser_channel in channels:
             try:
