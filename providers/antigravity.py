@@ -55,6 +55,10 @@ def stop_process_group(process):
                 except ProcessLookupError:
                     process.wait()
                     return
+                except PermissionError:
+                    # A denied probe does not prove retirement. Escalate to
+                    # SIGKILL; permission failures of actual signals still fail.
+                    break
                 time.sleep(.05)
     process.wait()
 

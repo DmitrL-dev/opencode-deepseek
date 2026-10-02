@@ -301,6 +301,36 @@ class ProviderTests(unittest.TestCase):
                 os.kill(pid, 0)
 
     @unittest.skipUnless(os.name == 'posix', 'Owned process-group fixture')
+    def test_cli_denied_group_probe_still_escalates_and_reaps_owned_process(self):
+        import signal
+        import subprocess
+        from providers.antigravity import stop_process_group
+        real_killpg = os.killpg
+        process = subprocess.Popen([sys.executable,'-c',
+            "import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);print('ready',flush=True);time.sleep(30)"],
+            start_new_session=True,stdout=subprocess.PIPE,text=True)
+        signals = []
+        def denied_probe(pgid, sig):
+            self.assertEqual(pgid, process.pid)
+            signals.append(sig)
+            if sig == 0:
+                raise PermissionError('Owned group liveness probe denied')
+            return real_killpg(pgid, sig)
+        try:
+            self.assertEqual(process.stdout.readline().strip(),'ready')
+            with patch('providers.antigravity.os.killpg',side_effect=denied_probe):
+                stop_process_group(process)
+            self.assertIn(signal.SIGKILL,signals)
+            self.assertIsNotNone(process.returncode)
+        finally:
+            try:
+                real_killpg(process.pid,signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            process.stdout.close()
+
+    @unittest.skipUnless(os.name == 'posix', 'Owned process-group fixture')
     def test_cli_descendant_ignoring_term_does_not_survive_success_cancel_or_timeout(self):
         import signal
         import subprocess
