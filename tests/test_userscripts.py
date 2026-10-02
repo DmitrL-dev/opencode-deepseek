@@ -14,6 +14,93 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 @unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
+class ObserverBoundaryFixtureTests(unittest.TestCase):
+    def observe(self, host, setup, exercise, wait):
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            try:
+                context = browser.new_context()
+                context.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body="<html></html>"))
+                page = context.new_page()
+                page.goto("https://" + host + "/")
+                page.evaluate("""() => {
+                    window.receipts = [];
+                    document.addEventListener('opencode-local-response-v1', event => receipts.push(JSON.parse(event.detail)));
+                    window.startOwnedJob = nonce => document.dispatchEvent(new CustomEvent('opencode-local-job-v1',
+                      {detail:JSON.stringify({nonce,prompt:'owned prompt'})}));
+                }""")
+                page.evaluate(setup)
+                page.add_script_tag(content=(ROOT / "browser/opencode-observer.user.js").read_text())
+                page.evaluate(exercise)
+                page.wait_for_function(wait)
+                return page.evaluate("receipts")
+            finally:
+                browser.close()
+
+    def test_mistral_only_exact_structured_prompt_exports_its_request_turn(self):
+        receipts = self.observe("chat.mistral.ai", """() => {
+            window.fetch = async () => new Response('owned response', {headers:{'Content-Type':'text/event-stream'}});
+        }""", """async () => {
+            startOwnedJob('current-job');
+            for (const [messageId,text] of [['neighbor','prefix owned prompt'],['owned-user','owned prompt']]) {
+                await fetch('/api/reply', {method:'POST',body:JSON.stringify({chatId:'owned-chat',messageId,
+                    messageInput:[{type:'text',text}],credentials:'must never be exported'})});
+            }
+        }""", "receipts.some(r => r.body)")
+        results = [r for r in receipts if "body" in r]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["request_turn"], {"chat_id":"owned-chat","user_id":"owned-user","version":0})
+        self.assertNotIn("credentials", json.dumps(receipts))
+
+    def test_late_previous_job_cannot_export_neighbor_request_evidence(self):
+        receipts = self.observe("chat.mistral.ai", """() => {
+            window.replies = [];
+            window.fetch = () => new Promise(resolve => replies.push(resolve));
+        }""", """async () => {
+            const send = messageId => fetch('/api/reply', {method:'POST',body:JSON.stringify({
+                chatId:'owned-chat',messageId,messageInput:[{type:'text',text:'owned prompt'}]})});
+            startOwnedJob('old-job'); void send('old-user');
+            while (replies.length < 1) await new Promise(resolve => setTimeout(resolve,0));
+            startOwnedJob('new-job'); void send('new-user');
+            while (replies.length < 2) await new Promise(resolve => setTimeout(resolve,0));
+            replies[0](new Response('old response',{headers:{'Content-Type':'text/event-stream'}}));
+            replies[1](new Response('new response',{headers:{'Content-Type':'text/event-stream'}}));
+        }""", "receipts.some(r => r.body)")
+        results = [r for r in receipts if "body" in r]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["nonce"], "new-job")
+        self.assertEqual(results[0]["request_turn"]["user_id"], "new-user")
+        self.assertEqual(base64.b64decode(results[0]["body"]), b"new response")
+
+    def connect_receipts(self, trailing=False):
+        return self.observe("www.kimi.ai", """() => {
+            const envelope = (flags,text) => {const bytes=new TextEncoder().encode(text), result=new Uint8Array(5+bytes.length);
+                result[0]=flags;new DataView(result.buffer).setUint32(1,bytes.length);result.set(bytes,5);return result;};
+            const first=envelope(0,'{"heartbeat":{}}'), end=envelope(2,'{}');
+            window.fetch=async () => new Response(new ReadableStream({start(controller){
+                controller.enqueue(first.slice(0,3));controller.enqueue(first.slice(3));
+                controller.enqueue(end.slice(0,4));
+                const last=new Uint8Array(end.length-4+TRAILING);last.set(end.slice(4));controller.enqueue(last);
+                // Intentionally leave the frontend's stream open after end.
+            }}));
+        }""".replace("TRAILING", "1" if trailing else "0"), """async () => {
+            startOwnedJob('owned-connect');
+            await fetch('/apiv2/kimi.gateway.chat.v1.ChatService/Chat',{method:'POST',body:'owned prompt'});
+        }""", "receipts.some(r => r.body || r.error)")
+
+    def test_kimi_end_envelope_finishes_capture_without_waiting_for_wrapper_eof(self):
+        receipts = self.connect_receipts()
+        result = next(r for r in receipts if "body" in r)
+        from providers.browser_protocol import connect_completed
+        connect_completed(base64.b64decode(result["body"]))
+
+    def test_kimi_bytes_after_end_envelope_are_rejected(self):
+        receipts = self.connect_receipts(trailing=True)
+        self.assertFalse(any("body" in r for r in receipts))
+        self.assertTrue(any("error" in r for r in receipts))
+
+
+@unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
 class UserscriptFixtureTests(unittest.TestCase):
     def fixture(self, draft="", unrelated=False, idle_recovery=False, observer=True, navigation=False, completion_path="/api/chat/completions", delayed_editor=False, request_object=False, cancel_before_editor=False, abandon_first=False, grok_editor=False, recover_cancelled=False, user_edit_on_cancel=False, replaced_observer=False, async_insertion=False, cached_fetch=False, two_jobs=False, edit_newlines=False):
         prompt = "User:\nReply ONLY with FIXTURE_OK"

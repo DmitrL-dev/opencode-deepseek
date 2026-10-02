@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.2.2
+// @version      0.2.3
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -46,11 +46,13 @@
     }));
   });
 
-  async function observe(response, job) {
+  async function observe(response, job, requestTurn) {
     const reader = response.body?.getReader();
     if (!reader) throw new Error("No completion response body");
     const parts = [];
     let size = 0;
+    let envelope = new Uint8Array(0);
+    const connect = ["www.kimi.com", "www.kimi.ai"].includes(location.hostname);
     while (true) {
       if (active?.nonce !== job.nonce) {
         void reader.cancel().catch(() => {});
@@ -64,6 +66,28 @@
         throw new Error("Completion response exceeded the size limit");
       }
       parts.push(value);
+      if (connect) {
+        const joined = new Uint8Array(envelope.length + value.length);
+        joined.set(envelope); joined.set(value, envelope.length);
+        envelope = joined;
+        let offset = 0, ended = false;
+        while (envelope.length - offset >= 5) {
+          const flags = envelope[offset];
+          const length = new DataView(envelope.buffer, envelope.byteOffset + offset + 1, 4).getUint32(0);
+          if (length > LIMIT || (flags !== 0 && flags !== 2)) throw new Error("Unsupported Connect envelope");
+          if (envelope.length - offset < length + 5) break;
+          offset += length + 5;
+          if (flags === 2) { ended = true; break; }
+        }
+        if (ended) {
+          if (offset !== envelope.length) throw new Error("Data after Connect completion");
+          // Connect's end envelope is the transport boundary. A frontend
+          // wrapper may leave its cloned ReadableStream open afterward.
+          void reader.cancel().catch(() => {});
+          break;
+        }
+        envelope = envelope.slice(offset);
+      }
     }
     if (active?.nonce !== job.nonce) return;
     const bytes = new Uint8Array(size);
@@ -75,6 +99,7 @@
     }
     document.dispatchEvent(new CustomEvent(CHANNEL, { detail: JSON.stringify({
       nonce: job.nonce, status: response.status, body: btoa(binary),
+      ...(requestTurn ? { request_turn: requestTurn } : {}),
     }) }));
   }
 
@@ -89,8 +114,17 @@
           if (request.method === "POST" && url.origin === location.origin && completionPath(url.pathname)) {
             // No request headers, cookies, tokens or unrelated responses are
             // read. The site's own request must contain this job's exact prompt.
-            candidate = request.clone().text().then(body =>
-              body.includes(job.prompt) || body.includes(JSON.stringify(job.prompt).slice(1, -1)));
+            candidate = request.clone().text().then(body => {
+              if (location.hostname === "chat.mistral.ai") {
+                const data = JSON.parse(body), chunks = data.messageInput;
+                if (!Array.isArray(chunks) || !chunks.length || chunks.some(c => !c || c.type !== "text" || typeof c.text !== "string")
+                    || chunks.map(c => c.text).join("") !== job.prompt
+                    || typeof data.messageId !== "string" || !data.messageId
+                    || (data.chatId !== undefined && (typeof data.chatId !== "string" || !data.chatId))) return null;
+                return { user_id: data.messageId, version: 0, chat_id: data.chatId ?? null };
+              }
+              return body.includes(job.prompt) || body.includes(JSON.stringify(job.prompt).slice(1, -1));
+            });
           }
         } catch (_) { /* Nonstandard requests are left untouched. */ }
       }
@@ -104,7 +138,7 @@
         document.dispatchEvent(new CustomEvent(CHANNEL, { detail: JSON.stringify({ nonce: job.nonce, observing: true }) }));
         // Clone before returning: the frontend may immediately consume its own
         // body. Never await the clone's stream or block frontend rendering.
-        void observe(response.clone(), job).catch(() => {
+        void observe(response.clone(), job, location.hostname === "chat.mistral.ai" ? matches : null).catch(() => {
           document.dispatchEvent(new CustomEvent(CHANNEL, {
             detail: JSON.stringify({ nonce: job.nonce, error: "Completion observation failed" }),
           }));

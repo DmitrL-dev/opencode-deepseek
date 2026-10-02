@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.2.2
+// @version      0.2.3
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -119,7 +119,9 @@
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     if (pending !== job) return;
-    await finish({ status: value.status, body: value.body, path: location.pathname }).catch(() => label("OpenCode: ответ не принят"));
+    await finish({ status: value.status, body: value.body, path: location.pathname,
+      ...(site.provider === "mistral" ? { request_turn: value.request_turn } : {}),
+    }).catch(() => label("OpenCode: ответ не принят"));
   });
 
   async function execute(job) {

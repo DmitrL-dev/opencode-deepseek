@@ -201,7 +201,11 @@ def parse_browser_result(provider, result, path=None, prompt=None):
     elif provider == "grok":
         text = grok_answer(body)
     elif provider == "mistral":
-        text = mistral_answer(body, prompt, reference.rsplit("/", 1)[-1])
+        request_turn = result.get("request_turn")
+        if path is not None and (not isinstance(request_turn, dict)
+                                 or request_turn.get("chat_id") != reference.rsplit("/", 1)[-1]):
+            raise ProviderUnavailable("Mistral resumed request does not match its conversation")
+        text = mistral_answer(body, prompt, reference.rsplit("/", 1)[-1], request_turn)
     else:
         text = kimi_answer(body, prompt, reference.rsplit("/", 1)[-1])
     return Reply(text, token)

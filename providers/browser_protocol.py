@@ -121,12 +121,21 @@ def _mistral_text_chunk(value):
     return {"text": value["text"], "reasoning": "_context" in value}
 
 
-def _mistral_patch_answer(body, prompt, expected_chat):
+def _mistral_patch_answer(body, prompt, expected_chat, request_turn):
     """Vibe's data stream: bind text patches to its completed assistant turn."""
     user = None
+    chat_id = expected_chat
+    if request_turn is not None:
+        if (not isinstance(request_turn, dict) or not isinstance(request_turn.get("user_id"), str)
+                or not request_turn["user_id"] or type(request_turn.get("version")) is not int
+                or request_turn["version"] != 0
+                or request_turn.get("chat_id") not in (None, expected_chat)):
+            raise ProviderUnavailable("Invalid Mistral request turn binding")
+        user = {"id": request_turn["user_id"], "version": request_turn["version"]}
     assistant = None
     chunks, content = None, ""
     done, ended = False, False
+    bootstrap_seen = False
     for line in body.decode("utf-8").splitlines():
         if not line.strip():
             continue
@@ -155,20 +164,22 @@ def _mistral_patch_answer(body, prompt, expected_chat):
                 raise ProviderUnavailable("Unsupported Mistral chat update")
             continue
         if kind == "bootstrap":
-            if user is not None or done or ended:
+            if bootstrap_seen or assistant is not None or done or ended:
                 raise ProviderUnavailable("Duplicate Mistral bootstrap")
             messages, chat = frame.get("messages"), frame.get("chat")
             if not isinstance(messages, list) or not isinstance(chat, dict) or not isinstance(chat.get("id"), str):
                 raise ProviderUnavailable("Invalid Mistral conversation bootstrap")
             users = [m for m in messages if isinstance(m, dict) and m.get("role") == "user"]
-            user = users[-1] if users else None
-            if (not user or not isinstance(user.get("id"), str)
-                    or type(user.get("version")) is not int
-                    or (prompt is not None and user.get("content") != prompt)):
+            current = users[-1] if users else None
+            if (not current or not isinstance(current.get("id"), str)
+                    or type(current.get("version")) is not int
+                    or (prompt is not None and current.get("content") != prompt)
+                    or (user is not None and (current["id"], current["version"]) != (user["id"], user["version"]))):
                 raise ProviderUnavailable("Mistral bootstrap does not identify this user turn")
             chat_id = chat["id"]
             if expected_chat is not None and chat_id != expected_chat:
                 raise ProviderUnavailable("Mistral response belongs to a different conversation")
+            user, bootstrap_seen = current, True
             continue
         if kind != "message" or user is None or ended:
             raise ProviderUnavailable("Unsupported Mistral message event")
@@ -235,9 +246,9 @@ def _mistral_patch_answer(body, prompt, expected_chat):
     return text
 
 
-def mistral_answer(body, prompt=None, expected_chat=None):
+def mistral_answer(body, prompt=None, expected_chat=None, request_turn=None):
     if body.lstrip().startswith(b"15:"):
-        return _mistral_patch_answer(body, prompt, expected_chat)
+        return _mistral_patch_answer(body, prompt, expected_chat, request_turn)
     text, done, ended = "", False, False
     for event, payload in sse_events(body.decode("utf-8").splitlines()):
         if payload == "[DONE]":

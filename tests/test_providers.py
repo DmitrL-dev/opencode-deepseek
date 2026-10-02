@@ -175,7 +175,8 @@ class ProviderTests(unittest.TestCase):
         body = base64.b64encode(bootstrap + root + chunks + append + success + b'8:null\n').decode()
         for prefix in ('/work/','/chat/'):
             path = prefix + 'owned-chat'
-            result = {'status':200,'path':path,'body':body}
+            result = {'status':200,'path':path,'body':body,
+                      'request_turn':{'user_id':'owned-user','version':0,'chat_id':'owned-chat'}}
             self.assertEqual(parse_browser_result('mistral',result,path,'owned prompt').text,'answer')
             other = prefix + 'other-chat'
             with self.assertRaises(ProviderUnavailable):
@@ -209,6 +210,19 @@ class ProviderTests(unittest.TestCase):
             bad = message([{'op':'replace','path':'/contentChunks','value':[{'type':'text','text':'answer','_context':context}]}])
             with self.assertRaises(ProviderUnavailable):
                 mistral_answer(bootstrap+root+bad+success+b'8:null\n','owned prompt','owned-chat')
+
+    def test_mistral_resume_requires_matched_request_turn(self):
+        bootstrap, root, chunks, append, success, _, _ = self.mistral_patch_fixture()
+        body = root + chunks + append + success + b'8:null\n'
+        turn = {'user_id':'owned-user','version':0,'chat_id':'owned-chat'}
+        result = {'status':200,'path':'/work/owned-chat','body':base64.b64encode(body).decode(),'request_turn':turn}
+        self.assertEqual(parse_browser_result('mistral',result,result['path'],'owned prompt').text,'answer')
+        for invalid in (None, {**turn,'user_id':'other-user'}, {**turn,'version':1},
+                        {**turn,'chat_id':'other-chat'}, {**turn,'chat_id':None}):
+            with self.subTest(turn=invalid), self.assertRaises(ProviderUnavailable):
+                parse_browser_result('mistral',{**result,'request_turn':invalid},result['path'],'owned prompt')
+        with self.assertRaises(ProviderUnavailable):
+            mistral_answer(bootstrap+body,'owned prompt','owned-chat',{**turn,'user_id':'other-user'})
 
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
         for value in ("nan", "inf", "0", "-1", "1801"):
