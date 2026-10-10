@@ -169,6 +169,11 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertIn("including all required fields", prompt)
         literal = prompt.split("A valid JSON string example is: ", 1)[1].splitlines()[0]
         self.assertEqual(json.loads(literal), 'first line\n"quoted text" and a \\backslash')
+        for choice in ('required', {"type": "function", "function": {"name": "write"}}):
+            forced = messages_to_prompt([ChatMessage(role="user", content="write")],
+                                        tools=[{"name": "write", "parameters": {}}], tool_choice=choice)
+            self.assertTrue(forced.rsplit('Assistant:', 1)[0].rstrip().endswith(
+                'Reply with ONLY the fenced tool_calls block.'))
 
     def test_json_diagnostics_report_only_category_and_position(self):
         bodies = [

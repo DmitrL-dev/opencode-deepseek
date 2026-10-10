@@ -160,6 +160,17 @@ Create the goal in the repository's own workspace: Workspace Write permissions
 apply to that directory. A successful text response alone does not establish
 that tools ran or the goal completed.
 
+On October 10, 2026, live DeepSeek Expert goals were tested in Harness 0.2.0-rc.2
+with this option enabled. A regression-test coding goal finished in 4 minutes
+5 seconds and 23 steps: the model fixed its failing assertion and completed the
+goal itself. An intermediate task exposed two further response-handling defects:
+a missing outer `]` and a false positive on a protocol mention in the final text.
+Both were reproduced offline and fixed. The final fresh control goal on the
+fixed bridge finished in 64 seconds and 7 steps: 67 tests, diff validation,
+goal completion and a final answer. Neither successful run received manual
+steering after its initial task; no subagents or runtime browser were used.
+This qualifies bounded tasks, not error-free execution of every possible goal.
+
 ## Offline verification
 
 The current suite was verified with installed Harness **0.2.0-rc.2**: 13 real CLI scenarios and setup
