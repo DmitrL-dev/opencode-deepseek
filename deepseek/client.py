@@ -311,8 +311,11 @@ class _Stream:
                 raise ProviderRejected()
             self._client._diagnostic_phase = "parse_stream"
             yield from _parse_sse(resp.iter_lines(), meta)
-        if meta.get("message_id") is not None:
-            self._message_id = meta["message_id"]
+        identity = meta.get("message_id")
+        if (isinstance(identity, bool) or not isinstance(identity, int)
+                or identity <= 0 or identity == self._parent_id):
+            raise DeepSeekStreamError("Missing or stale DeepSeek response message_id")
+        self._message_id = identity
         self.finish_reason = meta["finish_reason"]
 
     @property

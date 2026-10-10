@@ -36,7 +36,7 @@ class ConversationTests(unittest.TestCase):
         restarted = ConversationCache(self.cache.path)
         continuation, steps = restarted.prepare(req)
         self.assertEqual(continuation.conversation_id, 'owned:2')
-        self.assertEqual([m.role for m in continuation.messages], ['tool'])
+        self.assertEqual([m.role for m in continuation.messages], ['assistant', 'tool'])
         self.assertEqual(steps, 1)
         with self.assertRaises(ConversationStateError):
             restarted.prepare(req)
@@ -101,7 +101,7 @@ class ConversationTests(unittest.TestCase):
                 return httpx.Response(200, json={'code': 0, 'data': {'biz_code': 0, 'biz_data': {'challenge': {}}}})
             bodies.append(json.loads(request.content))
             answer = block([{'name': 'read', 'arguments': {'file_path': 'fixture'}}]) if len(bodies) == 1 else 'Done'
-            return httpx.Response(200, text=snapshot(answer, 'FINISHED'), headers={'content-type':'text/event-stream'})
+            return httpx.Response(200, text=snapshot(answer, 'FINISHED').replace('\"message_id\": 2', '\"message_id\": ' + str(len(bodies) * 2)), headers={'content-type':'text/event-stream'})
         client = DeepSeekClient.__new__(DeepSeekClient)
         client.access_guard = None
         client._request_lock, client._pow_lock = threading.Lock(), threading.Lock()

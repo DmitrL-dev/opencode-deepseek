@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 import httpx
 import anyio
 
-from deepseek.auth import LoginRequired
+from deepseek.auth import LoginRequired, Session
 from deepseek.client import Reply
 from server import api
 from server.openai_format import messages_to_prompt
@@ -852,8 +852,8 @@ class RefreshAndStartupTests(unittest.TestCase):
 
     def test_rejected_stale_client_reuses_already_refreshed_client(self):
         old, current = Mock(),Mock()
-        current.session.age = 0
-        with patch.object(api.conversation_cache, "account_identity", return_value="isolated"), patch.object(api,"_client",current), patch.object(api,"_client_identity", "isolated"), patch.object(api,"_build_client") as build:
+        current.session = Session("synthetic", [], "fixture", time.time())
+        with patch.object(api, "get_session", return_value=current.session), patch.object(api,"_client",current), patch.object(api,"_client_identity", api._session_identity(current.session)), patch.object(api,"_build_client") as build:
             self.assertIs(api.get_client(True,rejected_client=old),current)
             build.assert_not_called()
 

@@ -32,6 +32,8 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
+from dataclasses import asdict
+import hashlib
 from contextvars import ContextVar
 
 import anyio
@@ -83,6 +85,7 @@ from .schemas import ChatCompletionRequest
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
 _client_identity = None
+_bound_deepseek = ContextVar("bound_deepseek", default=None)
 _client_lock = threading.Lock()
 _stop_refresh = threading.Event()
 _request_gate = asyncio.Lock()
@@ -127,23 +130,32 @@ def _debug_toolcalls() -> bool:
     )
 
 
-def _build_client(force: bool = False, allow_interactive=None) -> DeepSeekClient:
+def _build_client(force: bool = False, allow_interactive=None, session=None) -> DeepSeekClient:
     """Load a cached session only; legacy force/login arguments cannot browse."""
-    session = get_session(max_age=SESSION_MAX_AGE, allow_interactive=False, allow_refresh=False)
+    if session is None:
+        session = get_session(max_age=SESSION_MAX_AGE, allow_interactive=False, allow_refresh=False)
     return DeepSeekClient(session=session, access_guard=None)  # server owns pause/pacing
 
 
 def get_client(force_refresh: bool = False, rejected_client=None) -> DeepSeekClient:
     """Cache a client; an explicit reset reloads the session file without browsing."""
     global _client, _client_identity
-    identity = conversation_cache.account_identity()
+    # One parsed snapshot supplies both credentials and identity. Never hash
+    # the current file separately from the Session used to build the client.
+    session = get_session(max_age=SESSION_MAX_AGE, allow_interactive=False, allow_refresh=False)
+    identity = _session_identity(session)
     with _client_lock:
-        if _client_identity != identity or _client is None or _client.session.age >= SESSION_MAX_AGE or (force_refresh and (
+        if _client_identity != identity or _client is None or (force_refresh and (
             rejected_client is None or _client is rejected_client
         )):
-            _client = _build_client(force=force_refresh)
+            _client = _build_client(force=force_refresh, session=session)
             _client_identity = identity
         return _client
+
+
+def _session_identity(session):
+    return hashlib.sha256(json.dumps(asdict(session), sort_keys=True,
+                                    separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
 
 def reset_client() -> None:
@@ -263,7 +275,10 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     attempt = None
     try:
         with guard.attempt(provider, _cancellation_check()) as attempt:
-            client = _request_client(req)
+            binding = _bound_deepseek.get() if provider == 'deepseek' else None
+            if binding is not None:
+                binding['attempts'].append(attempt)
+            client = binding['client'] if binding is not None else _request_client(req)
             attempt.check()  # Recheck a pause that happened while building a client.
             return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
     except LoginRequired:
@@ -331,20 +346,38 @@ def _conversation_tool_chat(prompt, req, model_type):
     if model_provider(req.model) != "deepseek":
         return _tool_chat_with_retry(prompt, req, model_type)
     original = req
+    claim = {}
+    binding = {'attempts': []}
+    token = None
+    succeeded = False
     try:
-        identity = conversation_cache.account_identity()
-        req, steps = conversation_cache.prepare(req)
+        guard.check('deepseek')
+        _check_cancelled()
+        client = get_client()
+        # Test caches deliberately have no account file. Production scopes
+        # derive only from this pinned client's Session, never a later file.
+        scope = ('isolated' if conversation_cache.account_file is None else
+                 'session-v2:' + _session_identity(client.session))
+        binding['client'] = client
+        token = _bound_deepseek.set(binding)
+        req, steps = conversation_cache.prepare(req, scope=scope, claim=claim)
         if req is not original:
             prompt = messages_to_prompt(req.messages, req.tools, req.tool_choice)
             model_type = None
         result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
                   _plain_conversation_reply(prompt, req, model_type))
-        if conversation_cache.account_identity() != identity:
-            raise ConversationStateError("Account changed during request; continuation stopped.")
-        conversation_cache.remember(original, *result, steps)
+        conversation_cache.remember(original, *result, steps, scope=scope)
+        succeeded = True
         return result
     except ConversationStateError as exc:
         raise ToolCallError(str(exc)) from exc
+    finally:
+        if token is not None:
+            _bound_deepseek.reset(token)
+        # Only a positively pre-dispatch failure may release our reservation.
+        # Any HTTP dispatch, even a failed challenge, leaves it consumed.
+        if not succeeded and not any(a.dispatched for a in binding['attempts']):
+            conversation_cache.release(claim)
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):

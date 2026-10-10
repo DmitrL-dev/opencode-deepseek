@@ -124,11 +124,24 @@ Stateless OpenAI clients now continue a saved DeepSeek conversation when their
 history exactly matches a delivered reply. Only new tool results/user messages
 and current tool instructions are sent. A private SQLite file in `session/`
 stores history hashes and provider conversation IDs, never message bodies.
-Links are one-use and committed before dispatch. Unknown, edited, compacted,
+Links are reserved atomically before dispatch. A reservation is released only
+when the current request fails with a proven absence of HTTP dispatch. Once any
+HTTP request was dispatched, or after a process crash, the link stays consumed. Unknown, edited, compacted,
 already-consumed or ambiguous histories stop locally; they never silently
 create another chat. Identical histories from separate chats are considered
 ambiguous. Explicit `conversation_id` clients still manage their own history.
-Local session replacement invalidates links to the previous account. Plain
+One loaded Session snapshot supplies both the HTTP client and the cache scope.
+A running request and its stored result remain attached to that snapshot even
+if the session file changes; subsequent requests with another snapshot cannot
+use its links. Bridge-generated tool IDs are sent with their original arguments
+to associate out-of-order results correctly. Text history hashing uses the same
+text-part separators as prompt rendering. Successful responses must include a
+positive new message ID different from the parent; missing/stale IDs stop the
+request without replay or cache advancement.
+
+The snapshot-based cache namespace deliberately does not resume links from the
+older file-hash implementation. Such histories stop locally; the migration
+does not create a new chat, reset usage, or clear provider pauses. Plain
 DeepSeek SSE is buffered so incomplete replies cannot become resumable history.
 A stateless conversation stops after 20 accepted replies. This is a safety cap,
 not unlimited autonomous operation; continuing a capped/compacted task needs a

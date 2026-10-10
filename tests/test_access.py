@@ -14,7 +14,7 @@ import httpx
 from fastapi.testclient import TestClient
 from openai import OpenAI, PermissionDeniedError, APIError
 
-from deepseek.auth import get_session, LoginRequired
+from deepseek.auth import get_session, LoginRequired, Session
 from deepseek.client import DeepSeekClient, _biz, _parse_sse
 from providers.access import AccessGuard, ProviderRejected
 from providers.common import ProviderUnavailable
@@ -351,13 +351,17 @@ class SafetySdkTests(unittest.TestCase):
         from chat_protocol import Reply
         for provider, model in (("deepseek", "deepseek-chat"), ("qwen", "qwen3.8-max")):
             old, fresh = Mock(), Mock()
-            old.session.age = 0
-            old.session.usable = True
+            if provider == "deepseek":
+                old.session = Session("synthetic-old", [], "fixture", time.time())
+                fresh.session = Session("synthetic-fresh", [], "fixture", time.time())
+            else:
+                old.session.age = 0
+                old.session.usable = True
             old.chat.side_effect = ProviderRejected("session_expired")
             fresh.chat.return_value = Reply("verified", None)
             cache = "_client" if provider == "deepseek" else "_qwen_client"
             builder = "_build_client" if provider == "deepseek" else "QwenClient"
-            with patch.object(api, "_client_identity", "isolated"), patch.object(api, cache, old), patch.object(api, builder, return_value=fresh) as build, patch.object(api, "get_qwen_session", side_effect=[old.session, fresh.session]):
+            with patch.object(api, "get_session", side_effect=[old.session, fresh.session]), patch.object(api, "_client_identity", api._session_identity(old.session) if provider == "deepseek" else "isolated"), patch.object(api, cache, old), patch.object(api, builder, return_value=fresh) as build, patch.object(api, "get_qwen_session", side_effect=[old.session, fresh.session]):
                 with self.assertRaises(PermissionDeniedError):
                     self.sdk.chat.completions.create(model=model, messages=self.messages)
                 AccessGuard(self.guard.path, interval=0).resume(provider)
