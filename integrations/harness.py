@@ -21,6 +21,7 @@ from ruamel.yaml.error import YAMLError
 
 ROUTE = "local-browser-bridge"
 PROVIDERS = {"deepseek", "qwen", "glm", "kimi", "grok", "mistral", "gemini"}
+BROWSERLESS_PROVIDERS = {"deepseek", "qwen", "gemini"}
 LABELS = {
     "deepseek-chat": "DeepSeek Chat · web",
     "deepseek-expert": "DeepSeek Expert · web",
@@ -48,17 +49,17 @@ def local_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def discover(base_url: str) -> list:
+def discover(base_url: str, without_browser=False) -> list:
     """Read the bridge catalog only; this does not probe account availability."""
     with httpx.Client(trust_env=False, follow_redirects=False, timeout=5) as client:
         response = client.get(local_url(base_url) + "/models")
         response.raise_for_status()
         if len(response.content) > 128 * 1024:
             raise ValueError("Bridge model catalog is too large")
-        return catalog_models(response.json())
+        return catalog_models(response.json(), without_browser=without_browser)
 
 
-def catalog_models(catalog: dict) -> list:
+def catalog_models(catalog: dict, without_browser=False) -> list:
     rows = catalog.get("data") if isinstance(catalog, dict) else None
     if not isinstance(rows, list) or not rows or len(rows) > 100:
         raise ValueError("Bridge advertises no models or an invalid catalog; enable a provider first")
@@ -67,13 +68,20 @@ def catalog_models(catalog: dict) -> list:
         if not isinstance(row, dict):
             raise ValueError("Invalid bridge model entry")
         model = row.get("id")
+        owner = row.get("owned_by")
         if (not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", model)
-                or model in seen or row.get("owned_by") not in PROVIDERS):
+                or model in seen or not isinstance(owner, str) or owner not in PROVIDERS):
             raise ValueError("Invalid or duplicate bridge model identity")
         seen.add(model)
         models.append({"id": model, "name": LABELS.get(model, model + " · bridge"),
                        "input": ["text"], "reasoningEfforts": False,
                        "contextWindow": 32768, "maxTokens": 4096})
+    # Validate the entire advertised catalog before excluding any provider.
+    if without_browser:
+        models = [model for row, model in zip(rows, models)
+                  if row["owned_by"] in BROWSERLESS_PROVIDERS]
+        if not models:
+            raise ValueError("Bridge advertises no browserless models for --without-browser")
     return models
 
 
@@ -117,15 +125,20 @@ def detached_config(value):
     return result
 
 
-def patch_document(document: list, base_url: str, models: list, default_model=None) -> list:
+def patch_document(document: list, base_url: str, models: list, default_model=None,
+                   without_browser=False) -> list:
     """Merge one owned route; refuse ambiguous patch operations on edited rows."""
     if not isinstance(document, list):
         raise ValueError("Harness profile patch must be a YAML list")
+    if without_browser and not models:
+        raise ValueError("No browserless models selected for --without-browser")
     result = copy.deepcopy(document)
     target_ids = {"llm-pi-ai", "session-title-llm"}
+    selected_ids = {model["id"] for model in models}
     if default_model is not None:
-        if default_model not in {model["id"] for model in models}:
+        if default_model not in selected_ids:
             raise ValueError("Default model must be advertised by the bridge")
+    if default_model is not None or without_browser:
         target_ids.add("agent-default-model")
     existing = {}
     for row in result:
@@ -143,6 +156,21 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
         if "config" in row and not isinstance(row["config"], dict):
             raise ValueError("Dynamic Harness config needs manual editing: " + key)
         existing[key] = row
+
+    if without_browser and default_model is None and "agent-default-model" in existing:
+        default = existing["agent-default-model"].get("config", {})
+        provider = default.get("provider")
+        if not isinstance(provider, str):
+            raise ValueError("Dynamic or non-string default provider cannot be checked for --without-browser; "
+                             "select an advertised --default-model explicitly")
+        if provider == ROUTE:
+            model = default.get("model")
+            if not isinstance(model, str):
+                raise ValueError("Dynamic or non-string owned default model cannot be checked for --without-browser; "
+                                 "select an advertised --default-model explicitly")
+            if model not in selected_ids:
+                raise ValueError("Existing default model is excluded by --without-browser; "
+                                 "select an advertised --default-model explicitly")
 
     def entry(key):
         if key not in existing:
@@ -215,7 +243,8 @@ def write_private(path: Path, data: bytes, before=None) -> Path | None:
     return backup
 
 
-def install(home: Path, profile: str, base_url: str, models: list, default_model=None):
+def install(home: Path, profile: str, base_url: str, models: list, default_model=None,
+            without_browser=False):
     """Edit a standard initialized profile, retaining other provider settings."""
     directory = home / "profiles" / profile
     manifest = json.loads((directory / "package.json").read_text())
@@ -230,7 +259,8 @@ def install(home: Path, profile: str, base_url: str, models: list, default_model
     path = directory / "cordis.patch.yml"
     before = path.read_bytes()
     document = yaml_codec().load(before.decode("utf-8"))
-    after = patch_document([] if document is None else document, base_url, models, default_model)
+    after = patch_document([] if document is None else document, base_url, models, default_model,
+                           without_browser=without_browser)
     return path, write_private(path, render(after), before)
 
 
@@ -238,20 +268,24 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--default-model", help="Explicitly select the default for new Harness sessions")
+    parser.add_argument("--without-browser", action="store_true",
+                        help="Select only advertised DeepSeek, Qwen and Gemini adapters")
     parser.add_argument("--home", type=Path, default=Path(os.getenv("DSH_HOME", "").strip() or "~/.dsh").expanduser())
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--install", choices=("desktop", "web", "headless"), metavar="PROFILE")
     mode.add_argument("--output", type=Path, help="Export a standalone YAML patch to a new file")
     args = parser.parse_args(argv)
     try:
-        models = discover(args.base_url)
+        models = discover(args.base_url, without_browser=args.without_browser)
         if args.install:
-            path, backup = install(args.home.expanduser(), args.install, args.base_url, models, args.default_model)
+            path, backup = install(args.home.expanduser(), args.install, args.base_url, models, args.default_model,
+                                   without_browser=args.without_browser)
         else:
             path, backup = args.output, None
             if path.exists() or path.is_symlink():
                 raise ValueError("Output exists; choose a new path")
-            write_private(path, render(patch_document([], args.base_url, models, args.default_model)))
+            write_private(path, render(patch_document([], args.base_url, models, args.default_model,
+                                                      without_browser=args.without_browser)))
         print("Harness configuration: " + str(path))
         if backup is not None:
             print("Previous configuration: " + str(backup))

@@ -18,9 +18,12 @@ work with project files using the agent. These connections do not need a
 separate provider API key.
 
 **Already using DeepSeek Harness?** [Connect the bridge](docs/HARNESS.en.md):
-`python -m integrations.harness --install desktop --default-model qwen3.8-omni-flash`.
+`python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash`.
 Setup reads the model catalog, disables retries and model-generated titles, and
 sends no prompts to your accounts.
+This mode needs no tabs while serving requests: Qwen passed with its browser
+closed; GLM, Kimi, Grok, and Mistral are excluded from the bridge group. Initial
+Qwen sign-in still uses a browser. [Browser requirements](docs/HARNESS.en.md#run-without-an-open-browser).
 
 **Experimental adapters are explicit opt-ins. Read the account restrictions
 and terminal-refusal settings below before running the bridge.**
