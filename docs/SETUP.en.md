@@ -442,7 +442,7 @@ but cannot guarantee that every model response follows the protocol.
 
 For unattended DeepSeek tool use, `TOOLCALL_FORMAT_REPAIR=1` permits one additional
 paced request in the same conversation after a normally completed invalid reply
-(including commentary mixed with a tool block). The model must generate a fresh,
+(including commentary mixed with a tool block or native DSML call markup). The model must generate a fresh,
 fully validated response; the bridge never guesses or edits argument values.
 The first batch is not executed. A second invalid reply is terminal. Account or
 quota refusals, cancellation, missing conversation IDs and output-limit responses
