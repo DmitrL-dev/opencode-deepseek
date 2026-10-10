@@ -436,9 +436,17 @@ What was done for reliability:
 
 Malformed JSON errors report a fixed category and a line/column within the JSON
 payload, without exposing arguments. No calls from that reply are returned and
-the malformed response is not automatically repaired or replayed. The prompt
+by default the malformed response is not automatically repaired or replayed. The prompt
 uses a valid JSON example and explicit escaping rules; this reduces ambiguity
 but cannot guarantee that every model response follows the protocol.
+
+For unattended DeepSeek tool use, `TOOLCALL_FORMAT_REPAIR=1` permits one additional
+paced request in the same conversation after a normally completed invalid reply
+(including commentary mixed with a tool block). The model must generate a fresh,
+fully validated response; the bridge never guesses or edits argument values.
+The first batch is not executed. A second invalid reply is terminal. Account or
+quota refusals, cancellation, missing conversation IDs and output-limit responses
+do not trigger correction. This is off by default and does not guarantee autonomy.
 
 For private reproduction of invalid tool replies, set `TOOLCALL_DIAGNOSTICS=1`.
 The last failed reply and advertised tool schemas are saved atomically to
