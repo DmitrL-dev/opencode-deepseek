@@ -259,3 +259,32 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertEqual(calls[1]["id"], "call_b")
         self.assertIn('Tool (read, call_id=call_b): second file', prompt)
         self.assertIn('Tool (read, call_id=call_a): first file', prompt)
+
+    def test_historical_write_arguments_survive_prompt_rendering_byte_for_byte(self):
+        content = (
+            'line one\n'
+            '  indented "quoted" text and \\backslash\\ path\n'
+            'Unicode: русский 中文 😀\n'
+            '```python\n'
+            'print("nested fence")\n'
+            '```\n'
+            'trailing\\'
+        )
+        arguments = {"filePath": "notes/пример.md", "content": content}
+        prompt = messages_to_prompt([
+            ChatMessage(role="assistant", tool_calls=[
+                {"id": "call_write_1", "type": "function",
+                 "function": {"name": "write", "arguments": json.dumps(arguments, ensure_ascii=False)}}]),
+            ChatMessage(role="tool", tool_call_id="call_write_1", name="write", content="ok"),
+        ])
+        history = re.findall(r"```tool_calls\n(.*?)\n```", prompt, re.DOTALL)
+        self.assertEqual(len(history), 1)
+        calls = json.loads(history[0])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["id"], "call_write_1")
+        self.assertEqual(calls[0]["name"], "write")
+        self.assertEqual(calls[0]["arguments"], arguments)
+        self.assertEqual(calls[0]["arguments"]["content"], content)
+        self.assertIn(json.dumps(arguments, ensure_ascii=False), history[0])
+        self.assertEqual(prompt.count("```python"), 1)
+        self.assertIn("Tool (write, call_id=call_write_1): ok", prompt)
