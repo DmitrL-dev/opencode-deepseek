@@ -48,6 +48,8 @@ from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
 from providers.access import guard, ProviderRejected, rejection
+from .diagnostics import save_tool_failure
+from .conversation_cache import conversation_cache, ConversationStateError
 
 from .config import (
     MODEL_MAP,
@@ -65,6 +67,7 @@ from .config import (
 )
 from .openai_format import (
     completion_response,
+    has_tool_call_markup,
     looks_truncated,
     messages_to_prompt,
     parse_tool_calls,
@@ -80,6 +83,7 @@ from .schemas import ChatCompletionRequest
 
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
+_client_identity = None
 _client_lock = threading.Lock()
 _stop_refresh = threading.Event()
 _request_gate = asyncio.Lock()
@@ -132,12 +136,14 @@ def _build_client(force: bool = False, allow_interactive=None) -> DeepSeekClient
 
 def get_client(force_refresh: bool = False, rejected_client=None) -> DeepSeekClient:
     """Cache a client; an explicit reset reloads the session file without browsing."""
-    global _client
+    global _client, _client_identity
+    identity = conversation_cache.account_identity()
     with _client_lock:
-        if _client is None or _client.session.age >= SESSION_MAX_AGE or (force_refresh and (
+        if _client_identity != identity or _client is None or _client.session.age >= SESSION_MAX_AGE or (force_refresh and (
             rejected_client is None or _client is rejected_client
         )):
             _client = _build_client(force=force_refresh)
+            _client_identity = identity
         return _client
 
 
@@ -252,6 +258,8 @@ def _invalidate_client(provider, client=None):
 def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     """One durable attempt; cancellation cannot erase an uncertain dispatch."""
     provider = model_provider(req.model)
+    if provider == 'deepseek' and len(prompt.encode('utf-8')) > 131072:
+        raise ProviderRejected('local_budget_exceeded')
     client = None
     attempt = None
     try:
@@ -276,6 +284,21 @@ _MAX_CONTINUATIONS = int(os.getenv("TOOLCALL_MAX_CONTINUATIONS", "0"))
 if _MAX_CONTINUATIONS < 0:
     raise ValueError("TOOLCALL_MAX_CONTINUATIONS must be non-negative")
 
+# One opt-in format correction in the same DeepSeek conversation. This is
+# separate from transport retries and output-limit continuation; neither a
+# rejection nor an uncertain/truncated generation qualifies.
+_FORMAT_REPAIR = os.getenv("TOOLCALL_FORMAT_REPAIR", "0") == "1"
+_FORMAT_REPAIR_PROMPT = (
+    "No tools were executed from your previous reply: its tool-call format was invalid. "
+    "Choose the next response using the task and tool schemas already provided. "
+    "If a tool is necessary, return ONLY one fenced tool_calls block containing a "
+    "complete valid JSON array. Each entry must have name and arguments; ALL input "
+    "fields belong inside the arguments object. Escape string values correctly. "
+    "No commentary before or after the block, and no XML/DSML tags. "
+    "If you intended only an explanation or the work is complete, give plain text "
+    "without a tool_calls block. Do not claim an unexecuted action succeeded."
+)
+
 # Sent to make the model finish an answer its output limit cut off.
 _CONTINUE_PROMPT = (
     "Your previous message was cut off by the output limit before it finished. "
@@ -297,18 +320,62 @@ def _continue_reply(prev: Reply, req: ChatCompletionRequest):
 
 
 async def _run_tool_chat(prompt: str, req: ChatCompletionRequest, model_type):
-    return await _run_queued(_tool_chat_with_retry, prompt, req, model_type, gate=_request_queue(req))
+    return await _run_queued(_conversation_tool_chat, prompt, req, model_type, gate=_request_queue(req))
+
+
+def _plain_conversation_reply(prompt, req, model_type):
+    reply = _chat_with_retry(prompt, req, model_type)
+    return reply, reply.text, None
+
+
+def _conversation_tool_chat(prompt, req, model_type):
+    if model_provider(req.model) != "deepseek":
+        return _tool_chat_with_retry(prompt, req, model_type)
+    original = req
+    try:
+        identity = conversation_cache.account_identity()
+        req, steps = conversation_cache.prepare(req)
+        if req is not original:
+            prompt = messages_to_prompt(req.messages, req.tools, req.tool_choice)
+            model_type = None
+        result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
+                  _plain_conversation_reply(prompt, req, model_type))
+        if conversation_cache.account_identity() != identity:
+            raise ConversationStateError("Account changed during request; continuation stopped.")
+        conversation_cache.remember(original, *result, steps)
+        return result
+    except ConversationStateError as exc:
+        raise ToolCallError(str(exc)) from exc
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
+    reply = _chat_with_retry(prompt, req, model_type)
+    try:
+        return _validate_tool_reply(reply, req)
+    except ToolCallError:
+        if not (_FORMAT_REPAIR and model_provider(req.model) == "deepseek"
+                and req.tool_choice != "none" and reply.finish_reason == "stop"
+                and reply.conversation_id):
+            raise
+        _check_cancelled()
+        correction = req.model_copy(update={"conversation_id": reply.conversation_id})
+        corrected = _chat_with_retry(_FORMAT_REPAIR_PROMPT, correction, None)
+        if corrected.finish_reason != "stop":
+            save_tool_failure(corrected, req)
+            raise ToolCallError("The format correction did not finish normally; no calls were returned")
+        # No recursion: a second invalid answer is terminal. The original
+        # batch never escaped validation and cannot be executed twice.
+        return _validate_tool_reply(corrected, req)
+
+
+def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
     """Validate the whole reply; continuation requires opt-in and an output limit.
 
     A missing Markdown fence alone is not evidence of an output limit. A
-    normally completed response can omit that wrapper only if its entire JSON
-    payload validates, without adding or repairing any JSON characters.
+    normally completed response may omit the fence or exactly the outer array
+    closer only when all call objects and their arguments validate in full.
     """
     names = _tool_names(req.tools)
-    reply = _chat_with_retry(prompt, req, model_type)
 
     for attempt in range(_MAX_CONTINUATIONS + 1):
         _check_cancelled()
@@ -318,11 +385,18 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
             try:
                 content, tool_calls = parse_tool_calls(
                     reply.text, allowed_names=names,
-                    allow_unclosed_fence=reply.finish_reason == "stop")
+                    allow_unclosed_fence=reply.finish_reason == "stop",
+                    allow_closing_artifacts=reply.finish_reason == "stop",
+                    allow_missing_array_closer=reply.finish_reason == "stop",
+                    flat_argument_tools=req.tools if reply.finish_reason == "stop" else None)
+                if (_FORMAT_REPAIR and req.tool_choice != "none" and tool_calls is None
+                        and has_tool_call_markup(reply.text)):
+                    raise ToolCallError("Unsupported tool-call markup; no calls were returned")
                 enforce_tool_choice(req.tool_choice, tool_calls)
                 if tool_calls and reply.finish_reason != "stop":
                     raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")
             except ToolCallError:
+                save_tool_failure(reply, req)
                 if _debug_toolcalls():
                     print(f"[toolcalls] invalid explicit reply:\n{reply.text}\n", flush=True)
                 raise
@@ -583,7 +657,7 @@ async def chat_completions(req: ChatCompletionRequest):
     # Tool calls are emulated by buffering the reply and parsing it, so we use the
     # non-streaming call and then emit SSE frames when the client asked to stream.
     # The provider worker latches upstream failures before exposing the result.
-    if req.tools:
+    if req.tools or model_provider(req.model) == "deepseek":
         if req.stream:
             return StreamingResponse(
                 _tool_stream(req, prompt, model_type),

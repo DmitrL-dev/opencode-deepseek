@@ -26,10 +26,27 @@ _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
 _TOOL_BLOCK_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n(.*?)\r?\n```[ \t]*\Z", re.DOTALL)
 _TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
+_TOOL_MARKUP_RE = re.compile(
+    r"(?m)^[ \t]*```tool_calls[ \t]*\r?$"
+    r"|^[ \t]*<｜｜DSML｜｜ calls>(?=\s*<｜｜DSML｜｜ invoke\b)"
+)
+# Observed web-model terminators after an otherwise complete JSON array. Only
+# closing syntax is allowed; no opening tag, content, or second call can match.
+_DSML_CLOSERS = r"</｜｜DSML｜｜ parameter>\s*</｜｜DSML｜｜ invoke>\s*</｜｜DSML｜｜ calls>"
+_CLOSING_ARTIFACTS_RE = re.compile(r"\A(?:\}|</｜｜DSML｜｜tool_calls>|(?:\}\s*)?" + _DSML_CLOSERS + r")\Z")
 
 
 class ToolCallError(RuntimeError):
     """The model emitted an invalid or disallowed explicit tool reply."""
+
+
+def has_tool_call_markup(text: str) -> bool:
+    """Recognize call framing, not inline protocol names in a final report.
+
+    Detection alone never authorizes execution: callers may request one fresh
+    formatted response, which must pass the full parser and tool-choice policy.
+    """
+    return bool(_TOOL_MARKUP_RE.search(text))
 
 
 def _text_of(content) -> str:
@@ -96,13 +113,18 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "This is a structural example, not a call to copy. Replace the tool name "
         "and the ENTIRE arguments object using the advertised schema, including "
         "all required fields. Never emit the angle-bracket placeholders.\n\n"
-        "Hard rules:\n"
+        "Choose the next step from the latest tool results, not from earlier plans. "
+        "A tool call is a request, not evidence that its action succeeded. "
+        "Only tool results establish what actually happened. Do not repeat a "
+        "successful action unless new evidence makes it necessary.\n\n"
+        "When calling tools, follow these rules:\n"
         "- The fenced `tool_calls` block must be the WHOLE reply. Never write any "
         "text, plan, explanation, or reasoning before or after it.\n"
         "- Never describe the action you are about to take — perform it by emitting "
         "the block.\n"
         "- Use the exact tool name and an `arguments` object matching that tool's "
-        "schema. To call several tools, put multiple objects in the array.\n"
+        "schema. Keep all input fields inside `arguments`, never beside `name`. "
+        "To call several tools, put multiple objects in the array.\n"
         "- Emit strict JSON: double-quoted keys and strings, no comments, "
         "trailing commas, Python literals, or string concatenation.\n"
         "- Shell commands, patches, and file contents are JSON string values: "
@@ -112,8 +134,10 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "- Keep tool batches small and split large file changes into separate "
         "complete calls. Check that the JSON array closes before the final fence.\n"
         "- Never use XML/DSML tags such as <tool_call> or <|tool_calls|>.\n"
-        "- Only if no tool is needed, answer normally in plain text and do NOT emit "
-        "a tool_calls block."
+        "- When the requested work and its verification are complete, finish with "
+        "a plain-text answer and no tool_calls block. If you created a goal, mark "
+        "it complete once the objective is achieved, then give the final answer; "
+        "do not keep checking a completed goal."
     )
     if _forced_tool_name(tool_choice) is not None:
         instructions += f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
@@ -123,10 +147,11 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
     elif tool_choice == "none":
         instructions += "\n\nDo NOT call any tools; answer in plain text."
     # Keep the protocol reminder next to the model's turn.
-    if tool_choice != "none":
+    if tool_choice is None or tool_choice == "auto":
         instructions += (
-            "\n\nREMINDER: if you are about to perform any action, respond with the "
-            "fenced ```tool_calls block now, as your entire reply — no other text."
+            "\n\nNext reply: either a single fenced tool_calls block to perform a "
+            "necessary action, or plain text to answer the user when no action "
+            "remains. Never combine commentary with a tool_calls block."
         )
     return instructions
 
@@ -139,10 +164,17 @@ def _render_message(m: ChatMessage, call_names: dict) -> str:
             fn = (tc or {}).get("function") or {}
             name = fn.get("name", "")
             args = fn.get("arguments")
-            args_s = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
-            calls.append(f"{name}({args_s}) [call_id={tc.get('id', 'unknown')}]")
-        call_txt = "[called tools: " + ", ".join(calls) + "]"
-        content = f"{content} {call_txt}".strip() if content else call_txt
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    pass  # Preserve invalid historical arguments; never repair them.
+            calls.append({"id": tc.get("id", "unknown"), "name": name,
+                          "arguments": args if args is not None else {}})
+        # Show the same protocol we request next, including exact call IDs for
+        # out-of-order results. Historical calls are data, never executed here.
+        call_txt = "```tool_calls\n" + json.dumps(calls, ensure_ascii=False) + "\n```"
+        content = f"{content}\n{call_txt}" if content else call_txt
         return f"Assistant: {content}"
     if m.role == "tool":
         label = m.name or call_names.get(m.tool_call_id, "tool")
@@ -219,15 +251,50 @@ def enforce_tool_choice(tool_choice, tool_calls: Optional[List[dict]]) -> None:
         raise ToolCallError(f"The model called a tool other than the required '{forced}'")
 
 
+def _flat_tool_arguments(item: dict, tools: Optional[List[dict]]) -> Optional[dict]:
+    """Move explicitly declared input fields into a missing arguments wrapper.
+
+    This changes only the envelope, never values or field names. The executor
+    remains responsible for validating values against its full input schema.
+    Ambiguous schemas and undeclared fields cannot authorize normalization.
+    """
+    if any(key in item for key in ("arguments", "function", "type", "id")):
+        return None
+    specs = [spec for spec in _tool_specs(tools) if spec["name"] == item.get("name")]
+    if len(specs) != 1:
+        return None
+    schema = specs[0]["parameters"]
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    properties, required = schema.get("properties"), schema.get("required", [])
+    if (not isinstance(properties, dict) or not isinstance(required, list)
+            or not all(isinstance(key, str) for key in required)
+            or set(properties) & {"name", "arguments", "function", "type", "id"}):
+        return None
+    arguments = {key: value for key, value in item.items() if key != "name"}
+    if not arguments or not set(arguments) <= properties.keys() or not set(required) <= arguments.keys():
+        return None
+    return arguments
+
+
 def parse_tool_calls(
     text: str, allowed_names: Optional[Iterable[str]] = None, *,
     allow_unclosed_fence: bool = False,
+    allow_closing_artifacts: bool = False,
+    allow_missing_array_closer: bool = False,
+    flat_argument_tools: Optional[List[dict]] = None,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, never examples embedded in prose.
 
     All calls and their arguments must validate before any call is returned.
     Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text.
-    Malformed explicit protocol blocks fail closed instead of executing a prefix.
+    Optional normal-stop tolerances cover an absent final Markdown fence and
+    known closing-only artifacts after a complete array, independently.
+    A caller may permit a missing outer array closer only after all objects
+    have closed; no nested delimiter or argument is repaired.
+    Invalid JSON values and partial batches fail closed.
+    Normal-stop callers may also supply schemas for an unambiguous flat input
+    envelope. No input values or missing fields are inferred.
     """
     stripped = (text or "").strip()
     if not stripped.startswith("```tool_calls"):
@@ -246,7 +313,26 @@ def parse_tool_calls(
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
-        raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
+        if (allow_missing_array_closer and exc.msg == "Expecting ',' delimiter"
+                and exc.pos == len(payload) and payload.lstrip().startswith("[")
+                and payload.rstrip().endswith("}")):
+            # A normal-stop reply can omit exactly the outer array closer.
+            # JSON must then parse in full: never close a string, argument
+            # object, nested array, trailing comma, or partial batch member.
+            try:
+                data = json.loads(payload.rstrip() + "]")
+            except (ValueError, TypeError):
+                raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
+        elif (allow_closing_artifacts
+                and exc.msg == "Extra data"
+                and _CLOSING_ARTIFACTS_RE.fullmatch(payload[exc.pos:].strip())):
+            # Observed FINISHED replies: a complete array followed by a stray
+            # object closer or closing-only DSML. JSON was fully consumed.
+            # Never repair strings, add missing delimiters, drop array members,
+            # or tolerate any other suffix. Markdown framing is independent.
+            data = json.loads(payload[:exc.pos])
+        else:
+            raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
     except ValueError as exc:
         raise ToolCallError("The tool_calls block contains invalid JSON") from exc
     if not isinstance(data, list) or not data:
@@ -257,10 +343,17 @@ def parse_tool_calls(
         if not isinstance(item, dict):
             raise ToolCallError("Each tool call must be an object")
         fn = item.get("function") if isinstance(item.get("function"), dict) else item
+        if fn is not item:
+            if set(item) - {"id", "type", "function"} or set(fn) - {"name", "arguments"}:
+                raise ToolCallError("Tool call contains ambiguous envelope fields")
+        elif "arguments" in item and set(item) - {"id", "type", "name", "arguments"}:
+            raise ToolCallError("Tool call contains ambiguous envelope fields")
         name = fn.get("name")
         if not isinstance(name, str) or not name or (names is not None and name not in names):
             raise ToolCallError("The model called an unadvertised tool")
         args = fn.get("arguments")
+        if "arguments" not in fn and fn is item:
+            args = _flat_tool_arguments(item, flat_argument_tools)
         if isinstance(args, str):
             try:
                 args = json.loads(args)

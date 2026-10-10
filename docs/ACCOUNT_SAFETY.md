@@ -67,7 +67,7 @@ get HTTP `403` before provider access. Invalid local tool responses use HTTP
 an upstream-shaped `5xx` error. No raw upstream error payload is published or
 stored in the pause file.
 
-Attempts, including valid tool continuations, are spaced by 10 seconds by
+Attempts, including valid tool continuations, are spaced by 30 seconds by
 default (`PROVIDER_MIN_INTERVAL`); the reservation is shared between processes
 using the same checkout. This is pacing, not an account quota or a
 promise that automation is permitted. Use one server process: multiple workers
@@ -110,3 +110,50 @@ OpenCode 1.18.34 run against a loopback-only mocked muted response produced one
 API request, one upstream fixture call, one terminal error, and a persisted
 pause. Owned browser fixtures never contact providers. These checks prove the
 local refusal behavior, not that live website automation is permitted or safe.
+
+
+## DeepSeek load containment and conversation reuse
+
+The October 10 account restriction showed that bounded task success did not
+establish account safety. Keep `TOOLCALL_FORMAT_REPAIR=0` and
+`TOOLCALL_MAX_CONTINUATIONS=0`: format errors stop locally, with no additional
+model generation. The following changes are qualified using offline transports
+and an isolated Harness CLI, not by further requests to the restricted account.
+
+Stateless OpenAI clients now continue a saved DeepSeek conversation when their
+history exactly matches a delivered reply. Only new tool results/user messages
+and current tool instructions are sent. A private SQLite file in `session/`
+stores history hashes and provider conversation IDs, never message bodies.
+Links are one-use and committed before dispatch. Unknown, edited, compacted,
+already-consumed or ambiguous histories stop locally; they never silently
+create another chat. Identical histories from separate chats are considered
+ambiguous. Explicit `conversation_id` clients still manage their own history.
+Local session replacement invalidates links to the previous account. Plain
+DeepSeek SSE is buffered so incomplete replies cannot become resumable history.
+A stateless conversation stops after 20 accepted replies. This is a safety cap,
+not unlimited autonomous operation; continuing a capped/compacted task needs a
+separate deliberate workflow, not an automatic new-chat fallback.
+
+Default pacing is 30 seconds between operation starts; DeepSeek HTTP dispatches
+within an operation are additionally separated by 3 seconds (or the configured
+interval when lower). Requests are serialised. Hard rolling limits per local
+DeepSeek safety ledger are:
+
+| Charged event | Per hour | Per 24 hours |
+| --- | ---: | ---: |
+| Generations, including explicitly enabled corrections | 12 | 60 |
+| New chats | 3 | 6 |
+| All HTTP dispatches, including challenges | 40 | 200 |
+
+Each dispatch is charged before sending, including failures. A request prompt
+larger than 128 KiB UTF-8 is rejected locally. A local budget exhaustion is a
+non-retryable error, not a waiting/retry loop. Restart and manual provider resume
+do not refund counters. Provider restrictions remain independent and persistent;
+expiry of a local rolling window does not clear an account pause. Counters are
+shared only by processes using the same safety file; separate clones/devices
+are not an account-wide quota service. Do not delete or reset safety files to
+circumvent these limits.
+
+These ceilings are engineering limits, **not DeepSeek-approved quotas**. They do
+not guarantee that website automation is permitted or will avoid restrictions.
+Do not rotate to another account to test around an existing restriction.

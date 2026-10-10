@@ -13,7 +13,151 @@ def block(calls):
     return "```tool_calls\n" + json.dumps(calls) + "\n```"
 
 
+FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
+    "type": "object", "properties": properties, "required": required}}}
+    for name, properties, required in (
+        ("read", {"file_path": {"type": "string"}, "offset": {"type": "number"},
+                  "limit": {"type": "number"}}, ["file_path"]),
+        ("bash", {"command": {"type": "string"}, "description": {"type": "string"}},
+         ["command", "description"]))]
+
+
 class ToolProtocolTests(unittest.TestCase):
+    def test_missing_outer_array_closer_preserves_complete_objects_only(self):
+        items = [{"name": "todo_write", "arguments": {"todos": [
+            {"content": 'quoted "todo" and \\slash }]}', "status": "pending"}]}}]
+        for batch in (items, items * 2):
+            text = '```tool_calls\n' + json.dumps(batch)[:-1] + '\n```'
+            with self.assertRaises(ToolCallError):
+                parse_tool_calls(text, {'todo_write'})
+            _, calls = parse_tool_calls(text, {'todo_write'}, allow_missing_array_closer=True)
+            self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                             [item['arguments'] for item in batch])
+        for payload in ('[{"name":"todo_write","arguments":{}},',
+                        '[{"name":"todo_write","arguments":{}},{',
+                        '[{"name":"todo_write","arguments":{"todos":[{}}',
+                        '[{"name":"todo_write","arguments":{"content":"unfinished}',
+                        '[{"name":"todo_write","arguments":{}} trailing',
+                        '[{"name":"unknown","arguments":{}}'):
+            with self.subTest(payload=payload), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + payload + '\n```', {'todo_write'},
+                                 allow_missing_array_closer=True)
+
+    def test_observed_dsml_closers_after_json_never_authorize_other_markup(self):
+        arguments = {"command": 'printf "%s\\n" "fixture"', "description": "Print fixture"}
+        payload = json.dumps([{"name": "bash", **arguments}])
+        suffix = '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
+        for closer in ('', '}'):
+            for fence in ('', '\n```'):
+                with self.subTest(closer=closer, fence=fence):
+                    text = '```tool_calls\n' + payload + closer + suffix + fence
+                    with self.assertRaises(ToolCallError):
+                        parse_tool_calls(text, {'bash'}, allow_unclosed_fence=True, flat_argument_tools=FLAT_TOOLS)
+                    _, calls = parse_tool_calls(text, {'bash'}, allow_unclosed_fence=True,
+                                                allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
+                    self.assertEqual(json.loads(calls[0]['function']['arguments']), arguments)
+        for bad in (suffix + ' text', suffix + payload, '<invoke>' + suffix,
+                    suffix.replace('parameter>', 'parameter>private'), suffix.splitlines()[0]):
+            with self.subTest(bad=bad), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + payload + bad, {'bash'}, allow_unclosed_fence=True,
+                                 allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
+
+    def test_dsml_tool_calls_closer_preserves_complete_batch_only(self):
+        items = [{"name": "bash", "command": "pwd && ls -la", "description": "List files"},
+                 {"name": "bash", "command": "git status --short", "description": "Status"}]
+        payload = json.dumps(items)
+        suffix = "</｜｜DSML｜｜tool_calls>"
+        for fence in ("", "\n```"):
+            _, calls = parse_tool_calls("```tool_calls\n" + payload + suffix + fence,
+                                       {"bash"}, allow_unclosed_fence=True,
+                                       allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
+            self.assertEqual([json.loads(c["function"]["arguments"]) for c in calls],
+                             [{k: v for k, v in item.items() if k != "name"} for item in items])
+        for body in (payload[:-1] + suffix, payload + suffix + " prose",
+                     payload + suffix + payload, payload + suffix * 2,
+                     payload + "<｜｜DSML｜｜tool_calls>" + suffix):
+            with self.subTest(body=body), self.assertRaises(ToolCallError):
+                parse_tool_calls("```tool_calls\n" + body, {"bash"},
+                                 allow_unclosed_fence=True, allow_closing_artifacts=True,
+                                 flat_argument_tools=FLAT_TOOLS)
+
+    def test_flat_inputs_preserve_values_and_batch_order_with_advertised_schemas(self):
+        original = [{"name": "read", "file_path": 'a/"quoted"\\path', "offset": 1, "limit": 60},
+                    {"name": "bash", "command": 'printf "%s\\n" "quoted"\n# literal }]}',
+                     "description": "Read the owned fixture"}]
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block(original), {"read", "bash"})
+        _, calls = parse_tool_calls(block(original), {"read", "bash"}, flat_argument_tools=FLAT_TOOLS)
+        self.assertEqual([c['function']['name'] for c in calls], ['read', 'bash'])
+        self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                         [{k: v for k, v in item.items() if k != 'name'} for item in original])
+
+    def test_flat_inputs_never_infer_missing_fields_or_drop_ambiguous_fields(self):
+        good = {"name": "read", "file_path": "fixture"}
+        bad = [{"name": "read"}, {"name": "read", "offset": 1},
+               {**good, "unexpected": "private"}, {**good, "arguments": None},
+               {**good, "arguments": {}}, {**good, "function": {}},
+               {**good, "id": "private"}, {"name": "unknown", "file_path": "fixture"},
+               {"name": "read", "arguments": [], "file_path": "fixture"},
+               {"function": {"name": "read", "file_path": "fixture"}},
+               {"name": "read", "function": {"name": "read", "arguments": {}}}]
+        for item in bad:
+            with self.subTest(item=item), self.assertRaises(ToolCallError):
+                parse_tool_calls(block([good, item]), {"read", "bash"}, flat_argument_tools=FLAT_TOOLS)
+        for schema in ({}, {"type": "object"}, {"type": "array"},
+                       {"type": "object", "properties": {"name": {}, "file_path": {}}},
+                       {"type": "object", "properties": {"file_path": {}}, "required": "file_path"}):
+            with self.subTest(schema=schema), self.assertRaises(ToolCallError):
+                parse_tool_calls(block([good]), {"read"},
+                                 flat_argument_tools=[{"name": "read", "parameters": schema}])
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block([good]), {"read"}, flat_argument_tools=FLAT_TOOLS * 2)
+
+    def test_normal_stop_envelope_tolerances_compose_without_changing_arguments(self):
+        arguments = {"command": 'printf "%s\\n" "quoted"\n# literal }]}',
+                     "description": "Print fixture"}
+        for flat in (False, True):
+            item = {"name": "bash", **arguments} if flat else {"name": "bash", "arguments": arguments}
+            for fence in (False, True):
+                for closer in (False, True):
+                    text = '```tool_calls\n' + json.dumps([item]) + ('}' if closer else '') + ('\n```' if fence else '')
+                    with self.subTest(flat=flat, fence=fence, closer=closer):
+                        _, calls = parse_tool_calls(text, {'bash'}, allow_unclosed_fence=True,
+                                                    allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
+                        self.assertEqual(len(calls), 1)
+                        self.assertEqual(json.loads(calls[0]['function']['arguments']), arguments)
+        for tail in ('}}', '} trailing', ']'):
+            with self.subTest(tail=tail), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + json.dumps([{"name": "bash", **arguments}]) + tail,
+                                 {'bash'}, allow_unclosed_fence=True, allow_closing_artifacts=True,
+                                 flat_argument_tools=FLAT_TOOLS)
+
+    def test_observed_redundant_closer_preserves_every_call_and_argument(self):
+        commands = [
+            'printf "%s\\n" "quoted"',
+            'echo "literal }]}"\nprintf "second line"',
+            'python -m unittest tests.test_tools',
+        ]
+        original = [{"name": "bash", "arguments": {"command": command, "description": "fixture"}}
+                    for command in commands]
+        text = '```tool_calls\n' + json.dumps(original) + '}\n```'
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(text, {"bash"})
+        _, calls = parse_tool_calls(text, {"bash"}, allow_closing_artifacts=True)
+        self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                         [item['arguments'] for item in original])
+
+    def test_redundant_closer_does_not_enable_general_json_repair(self):
+        good = '[{"name":"bash","arguments":{"command":"echo fixture"}}]'
+        payloads = [good + tail for tail in (']', '}}', '} prose', '}{}', ',{}', '{}', '\n' + good)]
+        payloads += [good[:-1] + ',{"name":"bash","arguments":{}}',
+                     '[{"name":"unknown","arguments":{}}]}',
+                     '[{"name":"bash","arguments":{"command":"raw\nnewline"}}]}',
+                     '[{"name":"bash","arguments":{}},{"name":"bash","arguments":[]}]}']
+        for body in payloads:
+            with self.subTest(body=body), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + body + '\n```', {'bash'}, allow_closing_artifacts=True)
+
     def test_confirmed_stop_can_omit_only_the_markdown_closing_fence(self):
         arguments = {"command": 'printf "%s\\n" "quoted"\n# ``` stays data'}
         text = block([{"name": "bash", "arguments": arguments}])[:-4]
@@ -44,6 +188,11 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertIn("including all required fields", prompt)
         literal = prompt.split("A valid JSON string example is: ", 1)[1].splitlines()[0]
         self.assertEqual(json.loads(literal), 'first line\n"quoted text" and a \\backslash')
+        for choice in ('required', {"type": "function", "function": {"name": "write"}}):
+            forced = messages_to_prompt([ChatMessage(role="user", content="write")],
+                                        tools=[{"name": "write", "parameters": {}}], tool_choice=choice)
+            self.assertTrue(forced.rsplit('Assistant:', 1)[0].rstrip().endswith(
+                'Reply with ONLY the fenced tool_calls block.'))
 
     def test_json_diagnostics_report_only_category_and_position(self):
         bodies = [
@@ -148,6 +297,38 @@ class ToolProtocolTests(unittest.TestCase):
             ChatMessage(role="tool",tool_call_id="call_b",content="second file"),
             ChatMessage(role="tool",tool_call_id="call_a",content="first file"),
         ])
-        self.assertIn('read({"filePath":"a"}) [call_id=call_a]', prompt)
+        history = re.findall(r"```tool_calls\n(.*?)\n```", prompt, re.DOTALL)
+        calls = json.loads(history[0])
+        self.assertEqual(calls[0], {"id": "call_a", "name": "read", "arguments": {"filePath": "a"}})
+        self.assertEqual(calls[1]["id"], "call_b")
         self.assertIn('Tool (read, call_id=call_b): second file', prompt)
         self.assertIn('Tool (read, call_id=call_a): first file', prompt)
+
+    def test_historical_write_arguments_survive_prompt_rendering_byte_for_byte(self):
+        content = (
+            'line one\n'
+            '  indented "quoted" text and \\backslash\\ path\n'
+            'Unicode: русский 中文 😀\n'
+            '```python\n'
+            'print("nested fence")\n'
+            '```\n'
+            'trailing\\'
+        )
+        arguments = {"filePath": "notes/пример.md", "content": content}
+        prompt = messages_to_prompt([
+            ChatMessage(role="assistant", tool_calls=[
+                {"id": "call_write_1", "type": "function",
+                 "function": {"name": "write", "arguments": json.dumps(arguments, ensure_ascii=False)}}]),
+            ChatMessage(role="tool", tool_call_id="call_write_1", name="write", content="ok"),
+        ])
+        history = re.findall(r"```tool_calls\n(.*?)\n```", prompt, re.DOTALL)
+        self.assertEqual(len(history), 1)
+        calls = json.loads(history[0])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["id"], "call_write_1")
+        self.assertEqual(calls[0]["name"], "write")
+        self.assertEqual(calls[0]["arguments"], arguments)
+        self.assertEqual(calls[0]["arguments"]["content"], content)
+        self.assertIn(json.dumps(arguments, ensure_ascii=False), history[0])
+        self.assertEqual(prompt.count("```python"), 1)
+        self.assertIn("Tool (write, call_id=call_write_1): ok", prompt)

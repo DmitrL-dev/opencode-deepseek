@@ -18,7 +18,7 @@ request in response to refusal. The separate Qwen renewal option is described
 under Qwen Chat. Inspect: `python -m providers.access status`. After manually confirming
 normal website access: `python -m providers.access resume qwen` (choose the
 actual provider). Sign-in does not clear a pause. Provider attempts, including
-tool continuations, are spaced by 10 seconds by default.
+tool continuations, are spaced by 30 seconds by default.
 
 ## Requirements
 
@@ -415,20 +415,52 @@ What was done for reliability:
   calls; JSON in prose, XML/DSML, and pseudo-calls remain ordinary text;
 - after a confirmed normal stop, a missing closing Markdown fence is accepted
   only if the entire JSON array validates unchanged, with no trailing text;
+- a closed block may instead contain one redundant `}` after its complete JSON
+  array (an observed DeepSeek response). This requires a normal stop; arguments
+  remain unchanged and all calls must validate. Other suffixes and incomplete
+  arrays are rejected. An observed closing-only DSML sequence (`parameter`,
+  `invoke`, `calls`) is also accepted after the full array, with no tag content
+  or further calls. This does not parse native DSML actions. An absent final
+  Markdown fence is handled independently;
+- if a normally completed block puts input fields beside `name` instead
+  of inside `arguments`, the bridge wraps them only when one advertised object
+  schema declares every supplied field and every required field is present.
+  Values stay unchanged; the executor validates their full schema. Missing,
+  unknown, conflicting or ambiguous fields still fail the entire batch;
 - the entire array is validated before any call is returned: unknown tools,
   invalid arguments, or a violated `tool_choice` produce `502 invalid_tool_response`;
 - continuations default to off. Explicit opt-in applies only to a provider-confirmed
   output limit, never a missing wrapper alone; partial calls are never returned;
+- after a normal stop, exactly one absent outer array `]` can be restored only
+  if every call object and all nested arguments are already closed and the
+  resulting entire JSON validates. Trailing commas, partial members, strings
+  and nested delimiters are never repaired. This needs no additional generation;
 - the instruction was hardened (no prose + an example + a reminder at the end);
 - a discipline plugin adds a late system instruction.
 
 Malformed JSON errors report a fixed category and a line/column within the JSON
 payload, without exposing arguments. No calls from that reply are returned and
-the malformed response is not automatically repaired or replayed. The prompt
+by default the malformed response is not automatically repaired or replayed. The prompt
 uses a valid JSON example and explicit escaping rules; this reduces ambiguity
 but cannot guarantee that every model response follows the protocol.
 
-Optional diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
+For unattended DeepSeek tool use, `TOOLCALL_FORMAT_REPAIR=1` permits one additional
+paced request in the same conversation after a normally completed invalid reply
+(including commentary mixed with a tool block or native DSML call markup). The model must generate a fresh,
+fully validated response; the bridge never guesses or edits argument values.
+The first batch is not executed. A second invalid reply is terminal. Account or
+quota refusals, cancellation, missing conversation IDs and output-limit responses
+do not trigger correction. This is off by default and does not guarantee autonomy.
+
+For private reproduction of invalid tool replies, set `TOOLCALL_DIAGNOSTICS=1`.
+The last failed reply and advertised tool schemas are saved atomically to
+`session/last-toolcall-error.json` (directory 0700, file 0600, maximum 4 MiB).
+No additional provider request is made. Prompts, conversation IDs and account
+credentials are not added, but the response itself may contain private code or
+secrets. Capture is off by default; the last file remains until replaced or
+manually removed. Do not publish it. Capture failures do not mask the tool error.
+
+Legacy diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
 the raw model reply is written to the log (`logs/server.log` or stdout).
 This can include file contents and secrets; leave it disabled for normal use.
 
@@ -605,7 +637,7 @@ variables take precedence.
 | `RATE_LIMIT_PER_MINUTE` | `30` | Requests/min per client IP (`/healthz` not counted) |
 | `DEEPSEEK_PROFILE_DIR` | — | Reuse an existing Chrome profile with an active session |
 | `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
-| `PROVIDER_MIN_INTERVAL` | `10` | Seconds between provider attempts/continuations; not a quota guarantee |
+| `PROVIDER_MIN_INTERVAL` | `30` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
 | `TOOLCALL_MAX_CONTINUATIONS` | `0` | Explicit opt-in continuation budget for provider-confirmed output limits; normal stops never trigger continuation |
@@ -746,6 +778,12 @@ python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
 bash -n ds bin/ds-chat
 node --check .opencode/plugin/deepseek-tool-discipline.js
 ```
+
+In sandboxes where launching `ps` is denied by the OS, the test
+`ProviderTests.test_cli_descendant_ignoring_term_does_not_survive_success_cancel_or_timeout`
+is skipped after a `ps` preflight. This test needs `ps` to distinguish a live
+descendant from a terminated or zombie process. On machines
+where `ps` is available, the process-leak check runs as before.
 
 GitHub Actions runs these checks on Python 3.9 and 3.12.
 

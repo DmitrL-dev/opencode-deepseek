@@ -338,6 +338,12 @@ class ProviderTests(unittest.TestCase):
     def test_cli_descendant_ignoring_term_does_not_survive_success_cancel_or_timeout(self):
         import signal
         import subprocess
+        try:
+            probe = subprocess.run(['ps','-p',str(os.getpid()),'-o','stat='],capture_output=True,text=True)
+        except (FileNotFoundError, PermissionError) as error:
+            self.skipTest('ps unavailable, cannot verify descendant liveness: ' + str(error))
+        if probe.returncode != 0 or not probe.stdout.strip():
+            self.skipTest('ps unavailable, cannot verify descendant liveness')
         for mode in ('success','cancel','timeout'):
             from server import api
             api.guard.resume("gemini")
