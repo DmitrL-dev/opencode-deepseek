@@ -5,7 +5,11 @@ provider API. Website automation can restrict an account, even without an
 observed quota warning. Our DeepSeek account returned HTTP 200 JSON containing
 `data.biz_code=5` / `user is muted`; the website showed a restriction until
 2026-10-04 22:17, with no timezone established. The exact trigger is unknown.
-No live requalification of the changed code used that restricted account.
+On October 10, normal website access was checked manually. DeepSeek Chat then
+passed a bounded native Harness task with its browser closed: one file read
+and an exact answer in two model steps. An earlier local parsing failure was
+fixed before that run. The historical restriction's cause remains unknown;
+this control does not guarantee continued access or qualify the Expert model.
 
 ## Defaults and migration
 
@@ -17,6 +21,17 @@ or a terminal `login_required` SSE error after headers have been sent; sign in m
 `python -m deepseek.auth` or `python -m qwen.auth`. Qwen reloads the local snapshot
 on the next request without a server restart.
 Authentication does not remove a pause.
+
+For an explicit normal-site check,
+`python -m deepseek.auth --keep-open --channel chromium`
+keeps the dedicated sign-in window open until it is closed
+or interrupted. It captures changed credentials only from the exact DeepSeek
+HTTPS origin, never switches browser channels on failure, and does not clear
+pauses or verify account eligibility. The API still loads the local cache only;
+DeepSeek's six-hour cache limit requires a manual capture afterward.
+
+DeepSeek failures log a fixed protocol phase, HTTP status and failure category.
+No exception text, upstream body, token or prompt is included in these diagnostics.
 
 `QWEN_RENEW_SESSION=1` is a separate, default-off opt-in for one normal cookie
 renewal before a new request, only when the local Qwen access token has expired

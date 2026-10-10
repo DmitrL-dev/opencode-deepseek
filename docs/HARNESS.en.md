@@ -49,9 +49,11 @@ are preserved. If the previous default is excluded, supply a new
 `--default-model`; setup refuses to write until you choose one.
 
 Qwen passed live Harness verification with the browser closed. Initial sign-in
-and sign-in after the refresh cookie expires still need a browser. DeepSeek
-also uses a saved session, but restored access to the restricted account has
-not been confirmed. Gemini uses the official CLI, which rejected our test by
+and sign-in after the refresh cookie expires still need a browser. On October 10,
+2026, DeepSeek Chat completed a `read` and answer task in Harness 0.2.0-rc.2 in
+12 seconds with its browser closed. Normal website access was checked first;
+the client was fixed to accept both create-chat response shapes. Expert was
+not requalified. Gemini uses the official CLI, which rejected our test by
 region. Not needing a tab does not establish account availability.
 
 Mistral hit its quota during continuation, and Grok's response capture did not
@@ -62,6 +64,20 @@ for Qwen or GLM proves unlimited access. The official Z.ai API is a separate,
 key-based access method: its [pricing](https://docs.z.ai/guides/overview/pricing)
 distinguishes free GLM-4.7-Flash / GLM-4.5-Flash from paid GLM-5.3-Flash.
 Setup never substitutes another model or paid API for the selected web model.
+
+### DeepSeek session
+
+`python -m deepseek.auth --keep-open --channel chromium` leaves the manual
+sign-in window open until it is closed or interrupted with Ctrl+C. Use it to
+inspect restrictions on the normal website. Changed credentials are saved
+privately; token capture does not confirm access or clear a pause. Use
+`--channel chrome` for installed Chrome. This inspection mode never falls
+back to another browser channel.
+
+Harness requests use the saved cache only. After six hours it is considered
+stale and requires manual sign-in; DeepSeek has no automatic renewal. Failure
+logs contain only the protocol phase, HTTP status and fixed error category,
+without credentials, response bodies or prompts.
 
 ### Qwen session
 

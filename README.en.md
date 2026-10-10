@@ -36,9 +36,10 @@ Qwen sign-in still uses a browser. [Browser requirements](docs/HARNESS.en.md#run
 
 > Automating a normal website account can lead to account restrictions.
 > The website reported our DeepSeek account blocked until October 4, 2026, 22:17.
-> Restored access has not been verified; the pause remains and the cause is unknown.
-> Demo captures predate the safety changes.
-> We did not repeat live qualification on the restricted account.
+> The cause is unknown. On October 10, after checking normal website access,
+> DeepSeek Chat passed one bounded Harness task with its browser closed:
+> reading a fixture file and answering. This does not guarantee future access.
+> The OpenCode demo captures below come from an earlier version.
 
 The server no longer refreshes sign-in in the background or replays rejected
 requests. Restrictions, quotas, security denials and uncertain outcomes persist
@@ -62,7 +63,7 @@ session, rather than every future task.
 
 | Provider | Local API model ids | Status | Connection |
 | --- | --- | --- | --- |
-| **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Previously verified; current account returned `user is muted` | [Login and saved session](docs/SETUP.en.md#4-log-in-to-deepseek-once) |
+| **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Chat: Harness + `read` without a browser, October 10; Expert not requalified | [Login and saved session](docs/SETUP.en.md#4-log-in-to-deepseek-once) |
 | **Qwen** | `qwen3.8-omni-flash` / `qwen3.8-max` | Flash and Max verified | [Separate Qwen session](docs/SETUP.en.md#qwen-chat) |
 | **GLM / Z.ai** | `glm-web` | Verified; GLM-5.3-Flash selected in the test | [Your Safari tab](browser/README.md#safari) |
 | **Kimi** | `kimi-web` | Verified, including tools | [Your Safari tab](browser/README.md#safari) |
@@ -93,7 +94,7 @@ no personal files or account data.
 | ![OpenCode with GLM](docs/media/glm-opencode.png) | ![OpenCode with Kimi](docs/media/kimi-opencode.png) |
 
 Click an image for the full frame. [Capture provenance](docs/media/README.md).
-The fresh DeepSeek capture stopped on `user is muted`; an older successful
+The earlier DeepSeek capture stopped on `user is muted`; an older successful
 frame is not substituted. No successful agent demos are claimed for Mistral,
 Grok or Gemini.
 
@@ -201,7 +202,7 @@ prepared; token-by-token delivery is not promised for every provider.
 - **DeepSeek, Qwen and GLM did not exhaust their allowance in our tests.** We
   have not established a fixed current web-chat quota. Paid API/CLI quotas do
   not describe these connections.
-- **DeepSeek rejected the current test account:** `biz_code=5`,
+- **DeepSeek previously rejected the test account:** `biz_code=5`,
   `user is muted`. The response gives no cause; this does not establish a
   service-wide restriction for every user.
 - **Text only.** Images, audio and video are not uploaded, even for Omni models.
