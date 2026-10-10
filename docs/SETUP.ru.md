@@ -814,6 +814,12 @@ bash -n ds bin/ds-chat
 node --check .opencode/plugin/deepseek-tool-discipline.js
 ```
 
+В песочницах, где запуск `ps` запрещён ОС, тест
+`ProviderTests.test_cli_descendant_ignoring_term_does_not_survive_success_cancel_or_timeout`
+пропускается после предварительной проверки `ps`. В этом тесте `ps` нужна,
+чтобы отличить работающего потомка от завершённого процесса или зомби. На машинах,
+где `ps` доступна, проверка утечки процессов выполняется как обычно.
+
 GitHub Actions запускает эти проверки на Python 3.9 и 3.12.
 
 ---
