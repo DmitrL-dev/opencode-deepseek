@@ -67,6 +67,10 @@ session, rather than every future task.
 | **Grok** | `grok-web` | Frontend replies; bridge capture does not complete | Experimental, off by default |
 | **Gemini** | Configured from `agy models` | Login passed; completion rejected by region | [Official Antigravity CLI](browser/README.md#gemini), off |
 
+On **2026-10-10**, Qwen also passed live checks in Harness **0.2.0-rc.2**:
+a Max answer and a Flash `read` tool round trip after the safety changes.
+[Sign-in and short session limits](docs/HARNESS.en.md#qwen-session).
+
 `glm-web` and `kimi-web` use the model **selected on the website**; these names
 make no version or plan claim. Qwen and all new adapters are opt-in. A fresh
 installation exposes no provider, including DeepSeek. Enable only the chosen adapter.
@@ -112,16 +116,15 @@ cp .env.example .env
 **2. Sign in to Qwen and enable it.**
 
 ```bash
-python -m qwen.auth --keep-open
+python -m qwen.auth
 ```
 
-Keep the Qwen window and this terminal open: its short-lived token can expire
-after about 15 minutes. The command saves session changes made by the website;
-it sends no refresh requests or messages. Complete any website sign-in manually.
-Closing the window stops the handoff.
-
-Change `QWEN_ENABLED=0` to `QWEN_ENABLED=1` in `.env`, then in another terminal
-with the virtualenv activated:
+Change `QWEN_ENABLED=0` to `QWEN_ENABLED=1` in `.env`.
+Qwen access tokens can expire after about 15 minutes. For longer sessions,
+separately enable `QWEN_RENEW_SESSION=1`: before a new request, the bridge may
+renew a locally expired session once using the existing sign-in cookie.
+Refusals persist a pause; there are no retries, background renewals, or message
+replays. [Details](docs/HARNESS.en.md#qwen-session). Then start:
 
 ```bash
 python app.py

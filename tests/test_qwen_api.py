@@ -87,12 +87,13 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
         request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
         old.chat.side_effect = httpx.HTTPStatusError("token expired", request=request, response=httpx.Response(401, request=request))
         new.chat.return_value = Reply("refreshed", CID)
-        with patch.object(api, "get_qwen_client", side_effect=[old, new]) as qwen, patch.object(api, "get_client") as ds, contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(api, "QWEN_RENEW_SESSION", True), patch.object(api, "renew_qwen_session") as renew, patch.object(api, "get_qwen_client", side_effect=[old, new]) as qwen, patch.object(api, "get_client") as ds, contextlib.redirect_stdout(io.StringIO()):
             response = await self.http.post("/v1/chat/completions", json=self.body)
         self.assertEqual(response.status_code, 403)
         self.assertEqual(qwen.call_count, 1)
         self.assertEqual(new.chat.call_count, 0)
         ds.assert_not_called()
+        renew.assert_not_called()
 
     async def test_named_sse_rejections_are_terminal_in_both_response_modes(self):
         payloads = [
@@ -165,6 +166,20 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
 
 
 class QwenClientCacheTests(unittest.TestCase):
+    def test_cookie_renewal_requires_separate_opt_in(self):
+        with patch.object(api, "QWEN_RENEW_SESSION", False), patch.object(api, "get_qwen_session", side_effect=LoginRequired), patch.object(api, "renew_qwen_session") as renew:
+            with self.assertRaises(LoginRequired):
+                api.get_qwen_client()
+        renew.assert_not_called()
+
+    def test_opted_in_renewal_only_runs_when_local_session_is_unusable(self):
+        fresh = session()
+        with patch.object(api, "_qwen_client", None), patch.object(api, "QWEN_RENEW_SESSION", True), patch.object(api, "get_qwen_session", side_effect=[LoginRequired(), fresh]), patch.object(api, "renew_qwen_session", return_value=fresh) as renew, patch.object(api, "QwenClient", return_value=Mock(session=fresh)) as build:
+            first = api.get_qwen_client()
+            self.assertIs(api.get_qwen_client(), first)
+        renew.assert_called_once_with()
+        build.assert_called_once_with(fresh, access_guard=None)
+
     def test_qwen_model_registration_is_opt_in(self):
         for enabled in ("0", "1"):
             with self.subTest(enabled=enabled):

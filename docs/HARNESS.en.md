@@ -34,13 +34,29 @@ availability and qualification differ: see [provider status](../README.en.md).
 
 ### Qwen session
 
-Before use, run `python -m qwen.auth --keep-open` in a separate bridge terminal
-and leave the Qwen window open. Website tokens are short-lived (about 15 minutes
-in the observed session). The command saves changes made by the website; the
-server reads the updated session before the next request. It does not call a
-refresh API or replay rejected messages. Complete any new sign-in manually.
-Closing the window stops the handoff. `login_required` means no usable session
-is available; selecting a model in the menu does not verify authentication.
+Sign in with `python -m qwen.auth`. Website tokens are short-lived (about 15
+minutes in the observed session). For longer use, separately set
+`QWEN_RENEW_SESSION=1` in `.env` and restart the bridge. It is off by default.
+
+Only before a new user request and before creating a chat, the bridge may call
+Qwen's normal renewal endpoint once with the existing sign-in cookie. It checks
+account continuity, advanced expiry, and an unchanged local session. Renewal
+belongs to the same guarded attempt: cancellation, refusal, uncertain outcome,
+or persistence failure stops the request. Rejected messages are never replayed,
+pauses are never cleared, and no browser starts. There are no background timers.
+When the sign-in cookie expires too, manual sign-in is required. For a persistent
+pause, inspect the normal website and follow ACCOUNT_SAFETY.md first.
+
+Without this option, the server reads cached sessions only and `login_required`
+requires manual sign-in. The optional `python -m qwen.auth --keep-open` observes
+an open website window but does not guarantee renewal while idle. Use it as a
+manual mode, separately from server renewal. Selecting a model in the menu does
+not verify authentication.
+
+On October 10, 2026, live requests in Harness **0.2.0-rc.2** passed after the
+safety changes: Max returned a control answer; Flash executed `read` on a small
+owned fixture and returned its contents. This qualifies that session. An open
+window alone does not guarantee token renewal while idle.
 
 ## Behavior and limits
 

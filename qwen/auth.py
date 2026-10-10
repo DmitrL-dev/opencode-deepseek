@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -25,8 +26,46 @@ DEFAULT_SESSION_FILE = ROOT / "session" / "qwen" / "session.json"
 _PROFILE_LOCK = threading.RLock()
 
 
+def _sync_session_directory(path: Path) -> None:
+    """Persist the atomic rename before a rotated cookie can be used."""
+    if os.name != "nt":
+        directory = os.open(Path(path).parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
+@contextmanager
+def _session_write_lock(path: Path):
+    """Serialize auth CLI and request-time writers around atomic replacement."""
+    path = Path(path)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    with path.with_suffix(".lock").open("a+b") as lock:
+        os.chmod(lock.name, 0o600)
+        if os.name == "nt":
+            import msvcrt
+            if lock.seek(0, 2) == 0:
+                lock.write(b"\0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 class LoginRequired(DeepSeekLoginRequired):
-    def __init__(self, message: str = "No valid Qwen Chat session (missing or expired). Run python -m qwen.auth --keep-open to sign in and keep the website window open; sessions expire."):
+    def __init__(self, message: str = "No valid Qwen Chat session (missing or expired). Run python -m qwen.auth to sign in. QWEN_RENEW_SESSION enables optional pre-request renewal."):
         super().__init__(message)
 
 
@@ -42,7 +81,21 @@ class Session(BrowserSession):
                 and self.expires_at > time.time() + 60)
 
     def save(self, path: Path = DEFAULT_SESSION_FILE) -> None:
-        super().save(path)
+        with _session_write_lock(path):
+            super().save(path)
+            _sync_session_directory(path)
+
+    def save_if_current(self, expected: "Session", path: Path = DEFAULT_SESSION_FILE,
+                        check=None) -> bool:
+        """Do not replace a manual sign-in that changed during HTTP renewal."""
+        with _session_write_lock(path):
+            if check is not None:
+                check()  # Waiting for a writer can outlive request ownership.
+            if self.load(path) != expected:
+                return False
+            super().save(path)
+            _sync_session_directory(path)
+            return True
 
     @classmethod
     def load(cls, path: Path = DEFAULT_SESSION_FILE) -> Optional["Session"]:

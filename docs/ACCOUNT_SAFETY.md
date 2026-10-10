@@ -12,10 +12,20 @@ No live requalification of the changed code used that restricted account.
 All providers are disabled by default, including DeepSeek (`DEEPSEEK_ENABLED=0`).
 Enabling a provider is an explicit decision. Existing `.env` settings cannot
 enable automatic server browser login or background session capture anymore.
-Missing or expired sessions return `401 login_required` before streaming starts,
+By default, missing or expired sessions return `401 login_required` before streaming starts,
 or a terminal `login_required` SSE error after headers have been sent; sign in manually with
-`python -m deepseek.auth` or `python -m qwen.auth`, then restart the server.
+`python -m deepseek.auth` or `python -m qwen.auth`. Qwen reloads the local snapshot
+on the next request without a server restart.
 Authentication does not remove a pause.
+
+`QWEN_RENEW_SESSION=1` is a separate, default-off opt-in for one normal cookie
+renewal before a new request, only when the local Qwen access token has expired
+or is within its 60-second usability margin. It requires an existing refresh
+cookie and the same account identity. The renewal is journaled as an upstream
+dispatch, with no redirects or retries; cancellation or an uncertain result
+persists a pause. A concurrent manual sign-in cannot be overwritten. The server
+never renews in response to an upstream rejection, starts a browser, or runs a
+background renewal timer. A missing/corrupt cache still requires manual login.
 
 Set both OpenCode `model` and `small_model` deliberately. Titles and other
 auxiliary calls consume website messages. Do not assign DeepSeek as an implicit
