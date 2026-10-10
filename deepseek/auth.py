@@ -12,11 +12,11 @@ the local cache only by default; authentication cannot clear an account pause.
 
     from deepseek.auth import get_session
     session = get_session()          # cached only; use python -m deepseek.auth to sign in
-    print(session.token[:8], "...")
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import tempfile
@@ -27,6 +27,7 @@ from functools import wraps
 from http.cookiejar import Cookie, CookieJar
 from pathlib import Path
 from typing import ClassVar, Optional
+from urllib.parse import urlsplit
 
 from settings import ROOT
 
@@ -165,11 +166,12 @@ class Session:
 #   localStorage.userToken = {"value":"<TOKEN>","__version":"0"}
 _READ_TOKEN_JS = """
 () => {
+  if (window.location.origin !== 'https://chat.deepseek.com') return null;
   try {
     const raw = window.localStorage.getItem('userToken');
     if (!raw) return null;
     const o = JSON.parse(raw);
-    return (o && o.value) ? o.value : null;
+    return (o && typeof o.value === 'string' && o.value.trim()) ? o.value : null;
   } catch (e) { return null; }
 }
 """
@@ -191,8 +193,15 @@ def _safe_evaluate(page, js: str):
 
 def _capture_from_context(context, page) -> Optional[Session]:
     """Read token + cookies + UA off a logged-in page, or None if not signed in."""
+    try:
+        url = urlsplit(page.url)
+        if (url.scheme != 'https' or url.hostname != 'chat.deepseek.com'
+                or url.port not in (None, 443) or url.username is not None or url.password is not None):
+            return None
+    except (ValueError, TypeError):
+        return None
     token = _safe_evaluate(page, _READ_TOKEN_JS)
-    if not token:
+    if not isinstance(token, str) or not token.strip():
         return None
     cookies = [c for c in context.cookies([CHAT_URL]) if _deepseek_cookie(c)]
     ua = _safe_evaluate(page, "() => navigator.userAgent") or ""
@@ -213,7 +222,8 @@ def _wait_for_token(page, timeout: float) -> Optional[str]:
     return None
 
 
-def _launch_context(p, profile_dir: Path, headless: bool, channel: Optional[str]):
+def _launch_context(p, profile_dir: Path, headless: bool, channel: Optional[str],
+                    allow_fallback: bool = True):
     """Launch a persistent context for `profile_dir`, preferring `channel`.
 
     `channel="chrome"` reuses the installed Google Chrome so it can read the
@@ -229,7 +239,7 @@ def _launch_context(p, profile_dir: Path, headless: bool, channel: Optional[str]
     try:
         return p.chromium.launch_persistent_context(str(profile_dir), **kwargs)
     except PlaywrightError:
-        if not channel:
+        if not channel or not allow_fallback:
             raise
         kwargs.pop("channel", None)
         return p.chromium.launch_persistent_context(str(profile_dir), **kwargs)
@@ -259,12 +269,12 @@ def login(
 ) -> Session:
     """Interactive login. Opens a visible window and waits for you to sign in by
     hand (and clear the AWS WAF human-check); once a token appears it captures
-    and saves the session. The persistent profile means later `get_session()`
-    calls capture the token headlessly without a window.
+    and saves the session. Later `get_session()` calls read this private cache;
+    they do not open a browser or refresh it by default.
 
     `assume_logged_out=True` skips the initial "are we already signed in?" hop to
     CHAT_URL and goes straight to the sign-in page. Callers that have just
-    confirmed there's no token (e.g. get_session after a failed headless refresh)
+    confirmed there's no token (e.g. an explicit library refresh)
     pass this so the window doesn't visibly bounce CHAT_URL -> SIGNIN_URL."""
     profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
@@ -359,14 +369,76 @@ def get_session(
         raise LoginRequired() from last_error
 
     # Not logged in yet — open a visible window so the user can sign in (and
-    # clear the human-check) by hand. The persistent profile means this only
-    # happens once — later calls capture the token headlessly. We just confirmed
+    # clear the human-check) by hand. Explicit refresh callers only. We confirmed
     # (above) there's no token, so go straight to the sign-in page.
     print("[auth] No valid session found — opening a browser window to log in...")
     return login(profile_dir=profile_dir, assume_logged_out=True, channel=channel,
                  session_file=session_file)
 
 
+@_serialize_profile
+def keep_open(profile_dir: Path = DEFAULT_PROFILE_DIR,
+              session_file: Path = DEFAULT_SESSION_FILE,
+              channel: Optional[str] = DEFAULT_CHANNEL) -> None:
+    """Explicit foreground inspection/capture; never used by the API server."""
+    with sync_playwright() as p:
+        context = _launch_context(p, profile_dir, False, channel, allow_fallback=False)
+        page = None
+        closed = False
+
+        def on_close(*_):
+            nonlocal closed
+            closed = True
+
+        context.on('close', on_close)
+        try:
+            page = context.pages[0] if context.pages else context.new_page()
+            print('[auth] Inspect this account in the website window. Ctrl+C or window close stops capture. '
+                  'A captured session does not confirm account access or clear a pause.', flush=True)
+            _safe_goto(page, CHAT_URL)
+            previous = None
+            while not closed and not page.is_closed():
+                session = _capture_from_context(context, page)
+                if session is not None:
+                    state = (session.token, session.user_agent,
+                             tuple(sorted(json.dumps(cookie, sort_keys=True) for cookie in session.cookies)))
+                    if state != previous:
+                        session.save(session_file)
+                        previous = state
+                        print('[auth] Session captured. Provider pauses are unchanged.', flush=True)
+                page.wait_for_timeout(1000)
+        except KeyboardInterrupt:
+            print('[auth] Capture stopped.', flush=True)
+        except PlaywrightError:
+            if not closed and (page is None or not page.is_closed()):
+                raise RuntimeError('Browser capture failed; stopped without retry.') from None
+        finally:
+            try:
+                context.close()
+            except PlaywrightError:
+                pass
+
+
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description='Capture a DeepSeek session in a visible website window.')
+    parser.add_argument('--keep-open', action='store_true',
+                        help='Inspect the website and capture changed sessions until Ctrl+C or window close.')
+    parser.add_argument('--channel', choices=('chrome', 'chromium'), default='chrome',
+                        help='Browser for manual sign-in; chromium uses the bundled browser.')
+    args = parser.parse_args(argv)
+    channel = None if args.channel == 'chromium' else args.channel
+    try:
+        if args.keep_open:
+            keep_open(channel=channel)
+        else:
+            session = login(channel=channel)
+            print(f'[auth] Session saved ({len(session.cookies)} cookies). Provider pauses are unchanged.', flush=True)
+    except KeyboardInterrupt:
+        print('[auth] Capture stopped.', flush=True)
+    except (PlaywrightError, OSError, RuntimeError):
+        print('[auth] Sign-in capture failed; stopped without retry.', flush=True)
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    s = login()
-    print(f"[auth] session saved to {DEFAULT_SESSION_FILE} ({len(s.cookies)} cookies)")
+    main()
