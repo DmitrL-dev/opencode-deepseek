@@ -33,7 +33,7 @@ _TOOL_MARKUP_RE = re.compile(
 # Observed web-model terminators after an otherwise complete JSON array. Only
 # closing syntax is allowed; no opening tag, content, or second call can match.
 _DSML_CLOSERS = r"</｜｜DSML｜｜ parameter>\s*</｜｜DSML｜｜ invoke>\s*</｜｜DSML｜｜ calls>"
-_CLOSING_ARTIFACTS_RE = re.compile(r"\A(?:\}|(?:\}\s*)?" + _DSML_CLOSERS + r")\Z")
+_CLOSING_ARTIFACTS_RE = re.compile(r"\A(?:\}|</｜｜DSML｜｜tool_calls>|(?:\}\s*)?" + _DSML_CLOSERS + r")\Z")
 
 
 class ToolCallError(RuntimeError):
