@@ -21,6 +21,7 @@ from settings import ROOT
 
 CHAT_URL = "https://chat.qwen.ai/"
 AUTH_URL = "https://auth.qwen.ai/"
+AUTH_REFRESH_URL = AUTH_URL + "api/v2/auths/refresh"
 DEFAULT_PROFILE_DIR = Path(os.getenv("QWEN_PROFILE_DIR", ROOT / "session" / "qwen" / "profile"))
 DEFAULT_SESSION_FILE = ROOT / "session" / "qwen" / "session.json"
 _PROFILE_LOCK = threading.RLock()
@@ -126,7 +127,7 @@ def _capture(context, page) -> Optional[Session]:
         expires = data.get("expires_at")
         if not isinstance(expires, (int, float)) or not math.isfinite(expires) or expires <= time.time() + 60:
             return None
-        cookies = [c for c in context.cookies([CHAT_URL, AUTH_URL])
+        cookies = [c for c in context.cookies([CHAT_URL, AUTH_URL, AUTH_REFRESH_URL])
                    if c.get("domain", "").lower().lstrip(".") in Session.COOKIE_DOMAINS]
         return Session(data["token"], cookies, page.evaluate("() => navigator.userAgent"),
                        time.time(), expires)

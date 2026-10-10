@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime
 import json
 import logging
 import math
@@ -14,13 +15,21 @@ import uuid
 import httpx
 
 from providers.access import ProviderRejected, current_attempt, rejection
-from .auth import DEFAULT_SESSION_FILE, LoginRequired, Session
+from .auth import AUTH_REFRESH_URL, DEFAULT_SESSION_FILE, LoginRequired, Session
 
-AUTH_REFRESH_URL = "https://auth.qwen.ai/api/v2/auths/refresh"
 _AUTH_PATH = "/api/v2/auths/refresh"
 _MAX_TOKEN = 32 * 1024
 _MAX_JSON = 64 * 1024
 _LOG = logging.getLogger(__name__)
+# Public frontend business codes, plus Bad_Request observed without credentials.
+_KNOWN_BUSINESS_CODES = {code.lower(): code for code in (
+    "unauthorized", "invalid token", "forbidden", "access_prohibited",
+    "ACCOUNT_PENDING", "data_inspection_failed", "Bad_Request")}
+
+
+def _timezone_header():
+    """Match the website's date string using the host's actual local offset."""
+    return datetime.now().astimezone().strftime("%a %b %d %Y %H:%M:%S GMT%z")
 
 
 def _number(value):
@@ -78,6 +87,28 @@ def _cookie_snapshot(jar):
             for c in jar if c.domain.lower().lstrip(".") in Session.COOKIE_DOMAINS]
 
 
+def _log_response_shape(value, reason):
+    """Log a fixed schema, never response keys, text, credentials or headers."""
+    def json_type(item):
+        return {dict: "object", list: "array", str: "string", bool: "boolean",
+                int: "number", float: "number", type(None): "null"}[type(item)]
+
+    obj = value if isinstance(value, dict) else {}
+    data = obj.get("data")
+    code = data.get("code") if isinstance(data, dict) else None
+    if isinstance(code, str) and re.fullmatch(r"[0-9]{1,6}", code):
+        code = int(code)
+    business_code = code if type(code) is int and 0 <= code <= 999999 else None
+    if isinstance(code, str):
+        business_code = _KNOWN_BUSINESS_CODES.get(code.lower())
+    _LOG.warning(
+        "Qwen renewal response rejected: reason=%s response_type=%s "
+        "success_present=%s success_type=%s success_true=%s "
+        "data_present=%s data_type=%s business_code=%s",
+        reason, json_type(value), "success" in obj, json_type(obj.get("success")),
+        obj.get("success") is True, "data" in obj, json_type(data), business_code)
+
+
 def _response_data(response, check):
     check()
     if not 200 <= response.status_code < 300:
@@ -91,12 +122,16 @@ def _response_data(response, check):
     check()
     value = json.loads(body, object_pairs_hook=_unique_object)
     if not isinstance(value, dict) or value.get("success") is not True:
+        reason = ("missing_success" if not isinstance(value, dict) or "success" not in value
+                  else "success_false" if value["success"] is False else "invalid_success")
+        _log_response_shape(value, reason)
         detail = value.get("data") if isinstance(value, dict) else None
         code = detail.get("code") if isinstance(detail, dict) else None
         status = int(code) if str(code) in ("401", "403", "429") else None
         raise rejection(detail, status=status)
     data = value.get("data")
     if not isinstance(data, dict):
+        _log_response_shape(value, "invalid_data")
         raise ProviderRejected()
     return data
 
@@ -130,7 +165,9 @@ def renew_session(session_file: Path = DEFAULT_SESSION_FILE, transport=None) -> 
                                        "Origin": "https://chat.qwen.ai",
                                        "Referer": "https://chat.qwen.ai/",
                                        "Accept": "application/json",
+                                       "Accept-Language": "en-US,en;q=0.9",
                                        "Content-Type": "application/json",
+                                       "Timezone": _timezone_header(),
                                        "x-request-origin": "https://chat.qwen.ai",
                                        "X-Request-Id": str(uuid.uuid4()),
                                        "Version": "0.3.14", "source": "web"})

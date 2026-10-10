@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 import tempfile
 import time
 import unittest
@@ -14,6 +15,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from qwen.auth import LoginRequired, Session, _capture, _launch, get_session, keep_open, login, main
 from qwen.client import QwenClient, QwenStreamError, _decode_cid, _parse_sse
+from qwen.renewal import AUTH_REFRESH_URL
 from providers.access import ProviderRejected
 
 CHAT = "00000000-0000-4000-8000-000000000001"
@@ -60,6 +62,29 @@ class QwenSessionTests(unittest.TestCase):
         page = Mock(url="https://accounts.google.com/")
         self.assertIsNone(_capture(Mock(), page))
         page.evaluate.assert_not_called()
+
+    def test_capture_includes_refresh_path_cookies_without_unrelated_paths(self):
+        cookies = [
+            {"name": "refresh_token", "value": "synthetic", "domain": "auth.qwen.ai",
+             "path": "/api/v2/auths", "secure": True},
+            {"name": "unrelated", "value": "synthetic", "domain": "auth.qwen.ai",
+             "path": "/unrelated", "secure": True},
+        ]
+        def site_cookies(urls):
+            return [cookie for cookie in cookies if any(
+                urlparse(url).hostname == cookie["domain"]
+                and urlparse(url).path.startswith(cookie["path"]) for url in urls)]
+        context = Mock()
+        context.cookies.side_effect = site_cookies
+        page = Mock(url="https://chat.qwen.ai/")
+        page.evaluate.side_effect = [{"token": "synthetic", "expires_at": time.time() + 900},
+                                     "synthetic-user-agent"]
+        captured = _capture(context, page)
+        self.assertEqual(captured.cookies, cookies[:1])
+        self.assertIn(AUTH_REFRESH_URL, context.cookies.call_args.args[0])
+        with httpx.Client(cookies=captured.cookie_jar()) as client:
+            self.assertEqual(client.build_request("GET", AUTH_REFRESH_URL).headers["cookie"],
+                             "refresh_token=synthetic")
 
     def test_capture_rejects_expired_or_invalid_expiry(self):
         page = Mock(url="https://chat.qwen.ai/")
