@@ -10,12 +10,17 @@
   <a href="docs/SETUP.en.md">Full guide</a>
 </p>
 
-# Your AI accounts, inside OpenCode
+# Your AI accounts, inside OpenCode and DeepSeek Harness
 
-A local bridge connects **DeepSeek, Qwen, GLM and Kimi** web chats to OpenCode
+A local bridge connects **DeepSeek, Qwen, GLM and Kimi** web chats to OpenCode and Harness
 through an OpenAI-compatible API. Sign in to your account, select a model and
 work with project files using the agent. These connections do not need a
 separate provider API key.
+
+**Already using DeepSeek Harness?** [Connect the bridge](docs/HARNESS.en.md):
+`python -m integrations.harness --install desktop --default-model qwen3.8-omni-flash`.
+Setup reads the model catalog, disables retries and model-generated titles, and
+sends no prompts to your accounts.
 
 **Experimental adapters are explicit opt-ins. Read the account restrictions
 and terminal-refusal settings below before running the bridge.**
@@ -27,8 +32,9 @@ and terminal-refusal settings below before running the bridge.**
 > [Quotas and boundaries](#limits-and-boundaries).
 
 > Automating a normal website account can lead to account restrictions.
-> Our DeepSeek account is blocked until October 4, 2026, 22:17 as shown by the
-> website; the exact cause is unknown. Demo captures predate the safety changes.
+> The website reported our DeepSeek account blocked until October 4, 2026, 22:17.
+> Restored access has not been verified; the pause remains and the cause is unknown.
+> Demo captures predate the safety changes.
 > We did not repeat live qualification on the restricted account.
 
 The server no longer refreshes sign-in in the background or replays rejected
