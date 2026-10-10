@@ -767,6 +767,12 @@ bash -n ds bin/ds-chat
 node --check .opencode/plugin/deepseek-tool-discipline.js
 ```
 
+In sandboxes where launching `ps` is denied by the OS, the test
+`ProviderTests.test_cli_descendant_ignoring_term_does_not_survive_success_cancel_or_timeout`
+is skipped after a `ps` preflight. This test needs `ps` to distinguish a live
+descendant from a terminated or zombie process. On machines
+where `ps` is available, the process-leak check runs as before.
+
 GitHub Actions runs these checks on Python 3.9 and 3.12.
 
 ---
