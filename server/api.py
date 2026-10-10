@@ -356,8 +356,8 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
                     allow_closing_artifacts=reply.finish_reason == "stop",
                     flat_argument_tools=req.tools if reply.finish_reason == "stop" else None)
                 if (_FORMAT_REPAIR and req.tool_choice != "none" and tool_calls is None
-                        and "```tool_calls" in reply.text):
-                    raise ToolCallError("Tool-call markup was mixed with ordinary text; no calls were returned")
+                        and any(marker in reply.text for marker in ("```tool_calls", "<｜｜DSML｜｜ calls>"))):
+                    raise ToolCallError("Unsupported tool-call markup; no calls were returned")
                 enforce_tool_choice(req.tool_choice, tool_calls)
                 if tool_calls and reply.finish_reason != "stop":
                     raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")

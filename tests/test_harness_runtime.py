@@ -100,10 +100,12 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.prompts.append(prompt)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior == "format_correction":
+        if self.behavior in ("format_correction", "dsml_correction"):
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if len(self.prompts) == 1:
                 answer = "I will read the file.\n" + answer
+                if self.behavior == "dsml_correction":
+                    answer = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="read">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'
             elif len(self.prompts) == 2:
                 self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
                 self.assertEqual(args[:2], ("owned-fixture:2", None))
@@ -180,15 +182,17 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertTrue(any(message["role"] == "tool" for message in self.calls[1]["messages"]))
 
     def test_opt_in_format_correction_executes_native_tool_once(self):
-        self.behavior = "format_correction"
-        with patch.object(api, "_FORMAT_REPAIR", True):
-            result = self.run_harness()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("HARNESS_BRIDGE_OK", result.stdout)
-        self.assertEqual(len(self.calls), 2)
-        self.assertEqual(len(self.prompts), 3)
-        results = [m for m in self.calls[1]["messages"] if m["role"] == "tool"]
-        self.assertEqual(len(results), 1)
+        for self.behavior in ("format_correction", "dsml_correction"):
+            with self.subTest(behavior=self.behavior), patch.object(api, "_FORMAT_REPAIR", True):
+                self.calls.clear()
+                self.prompts.clear()
+                result = self.run_harness()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("HARNESS_BRIDGE_OK", result.stdout)
+                self.assertEqual(len(self.calls), 2)
+                self.assertEqual(len(self.prompts), 3)
+                results = [m for m in self.calls[1]["messages"] if m["role"] == "tool"]
+                self.assertEqual(len(results), 1)
 
     def test_complete_json_without_closing_wrapper_executes_without_continuations(self):
         self.behavior = "tools_without_fence"

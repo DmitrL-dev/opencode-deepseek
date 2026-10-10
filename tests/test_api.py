@@ -59,7 +59,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_opt_in_format_correction_is_bounded_and_preserves_validated_calls(self):
         good = block([{"name": "bash", "arguments": {"command": "printf verified"}}])
         broken = '```tool_calls\n[{"name":"write","arguments":{}},'
-        for first in (broken, 'I will run it.\n' + good):
+        for first in (broken, 'I will run it.\n' + good,
+                      '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="bash">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'):
             for stream in (False, True):
                 for corrected in (good, broken, 'Finished without tools.'):
                     with self.subTest(first=first, stream=stream, corrected=corrected):
