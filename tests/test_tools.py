@@ -23,6 +23,26 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_missing_outer_array_closer_preserves_complete_objects_only(self):
+        items = [{"name": "todo_write", "arguments": {"todos": [
+            {"content": 'quoted "todo" and \\slash }]}', "status": "pending"}]}}]
+        for batch in (items, items * 2):
+            text = '```tool_calls\n' + json.dumps(batch)[:-1] + '\n```'
+            with self.assertRaises(ToolCallError):
+                parse_tool_calls(text, {'todo_write'})
+            _, calls = parse_tool_calls(text, {'todo_write'}, allow_missing_array_closer=True)
+            self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                             [item['arguments'] for item in batch])
+        for payload in ('[{"name":"todo_write","arguments":{}},',
+                        '[{"name":"todo_write","arguments":{}},{',
+                        '[{"name":"todo_write","arguments":{"todos":[{}}',
+                        '[{"name":"todo_write","arguments":{"content":"unfinished}',
+                        '[{"name":"todo_write","arguments":{}} trailing',
+                        '[{"name":"unknown","arguments":{}}'):
+            with self.subTest(payload=payload), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + payload + '\n```', {'todo_write'},
+                                 allow_missing_array_closer=True)
+
     def test_observed_dsml_closers_after_json_never_authorize_other_markup(self):
         arguments = {"command": 'printf "%s\\n" "fixture"', "description": "Print fixture"}
         payload = json.dumps([{"name": "bash", **arguments}])

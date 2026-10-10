@@ -147,9 +147,22 @@ after a manual website check; see [account safety](ACCOUNT_SAFETY.md). All
 providers have account limits, including Chinese models. Tool continuations can
 consume another message.
 
+For unattended DeepSeek goals, optionally set `TOOLCALL_FORMAT_REPAIR=1` in
+the bridge process environment and restart the bridge. After a normally
+completed malformed JSON reply, commentary mixed with a tool block, or unsupported
+DSML, the bridge asks once for a newly formatted response in the same conversation.
+The original calls are not executed and argument values are never guessed.
+A second invalid reply is terminal; quota/account refusals, cancellation and
+output-limit replies do not trigger correction. The additional generation costs
+quota and observes the normal request interval. This setting defaults to off.
+
+Create the goal in the repository's own workspace: Workspace Write permissions
+apply to that directory. A successful text response alone does not establish
+that tools ran or the goal completed.
+
 ## Offline verification
 
-Verified with installed Harness **0.1.7-rc.1** and **0.2.0-rc.2**: four real CLI scenarios and setup
+The current suite was verified with installed Harness **0.2.0-rc.2**: 13 real CLI scenarios and setup
 tests. For an owned HTTP 503 fixture, the default policy made six requests;
 the bridge configuration made one. No real accounts were used.
 

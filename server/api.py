@@ -339,8 +339,8 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
     """Validate the whole reply; continuation requires opt-in and an output limit.
 
     A missing Markdown fence alone is not evidence of an output limit. A
-    normally completed response can omit that wrapper only if its entire JSON
-    payload validates, without adding or repairing any JSON characters.
+    normally completed response may omit the fence or exactly the outer array
+    closer only when all call objects and their arguments validate in full.
     """
     names = _tool_names(req.tools)
 
@@ -354,6 +354,7 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
                     reply.text, allowed_names=names,
                     allow_unclosed_fence=reply.finish_reason == "stop",
                     allow_closing_artifacts=reply.finish_reason == "stop",
+                    allow_missing_array_closer=reply.finish_reason == "stop",
                     flat_argument_tools=req.tools if reply.finish_reason == "stop" else None)
                 if (_FORMAT_REPAIR and req.tool_choice != "none" and tool_calls is None
                         and any(marker in reply.text for marker in ("```tool_calls", "<｜｜DSML｜｜ calls>"))):

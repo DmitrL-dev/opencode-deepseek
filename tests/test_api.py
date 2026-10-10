@@ -56,6 +56,22 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
 
+    async def test_missing_outer_array_closer_is_normalized_without_generation(self):
+        text = '```tool_calls\n' + json.dumps([{"name": "bash", "arguments": {"command": "printf fixture"}}])[:-1] + '\n```'
+        for finish in ('stop', 'length'):
+            for stream in (False, True):
+                fake = Mock()
+                fake.chat.return_value = Reply(text, 'owned:2', finish)
+                with patch.object(api, "get_client", return_value=fake), patch.object(api, "_MAX_CONTINUATIONS", 0):
+                    response = await self.post(tools=TOOLS, stream=stream)
+                fake.chat.assert_called_once()
+                if finish == 'stop':
+                    self.assertIn('"tool_calls":', response.text)
+                    self.assertNotIn('"error":', response.text)
+                else:
+                    self.assertIn('"error":', response.text)
+                    self.assertNotIn('"tool_calls":', response.text)
+
     async def test_opt_in_format_correction_is_bounded_and_preserves_validated_calls(self):
         good = block([{"name": "bash", "arguments": {"command": "printf verified"}}])
         broken = '```tool_calls\n[{"name":"write","arguments":{}},'
