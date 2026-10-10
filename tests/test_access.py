@@ -19,6 +19,7 @@ from deepseek.client import DeepSeekClient, _biz, _parse_sse
 from providers.access import AccessGuard, ProviderRejected
 from providers.common import ProviderUnavailable
 from server import api
+from server.conversation_cache import ConversationCache
 from server.config import DEEPSEEK_MODEL_MAP, QWEN_MODEL_MAP
 from tests.test_api import TOOLS
 from tests.test_stream import event
@@ -32,6 +33,9 @@ class AccessTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = Path(self.directory.name) / "pauses.json"
+        cache_patch = patch.object(api, 'conversation_cache', ConversationCache(Path(self.directory.name) / 'conversations.sqlite3'))
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
 
     def test_pause_survives_restart_and_resume_in_separate_process_view(self):
         guard = AccessGuard(self.path, interval=0)
@@ -222,6 +226,9 @@ class SafetySdkTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
+        cache_patch = patch.object(api, 'conversation_cache', ConversationCache(Path(self.directory.name) / 'conversations.sqlite3'))
+        cache_patch.start()
+        self.addCleanup(cache_patch.stop)
         self.guard = AccessGuard(Path(self.directory.name) / "pauses.json", interval=0)
         for patcher in (patch.object(api, "guard", self.guard), patch.dict(api.MODEL_MAP, {**DEEPSEEK_MODEL_MAP, **QWEN_MODEL_MAP}, clear=True)):
             patcher.start()
@@ -350,7 +357,7 @@ class SafetySdkTests(unittest.TestCase):
             fresh.chat.return_value = Reply("verified", None)
             cache = "_client" if provider == "deepseek" else "_qwen_client"
             builder = "_build_client" if provider == "deepseek" else "QwenClient"
-            with patch.object(api, cache, old), patch.object(api, builder, return_value=fresh) as build, patch.object(api, "get_qwen_session", side_effect=[old.session, fresh.session]):
+            with patch.object(api, "_client_identity", "isolated"), patch.object(api, cache, old), patch.object(api, builder, return_value=fresh) as build, patch.object(api, "get_qwen_session", side_effect=[old.session, fresh.session]):
                 with self.assertRaises(PermissionDeniedError):
                     self.sdk.chat.completions.create(model=model, messages=self.messages)
                 AccessGuard(self.guard.path, interval=0).resume(provider)

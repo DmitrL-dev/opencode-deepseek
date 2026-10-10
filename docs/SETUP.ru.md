@@ -17,7 +17,7 @@
 Проверка состояния: `python -m providers.access status`. После ручной проверки
 доступа на обычном сайте: `python -m providers.access resume qwen` (укажите
 нужного провайдера). Перелогин паузу не снимает. По умолчанию между попытками
-одного провайдера — 10 секунд, включая продолжения инструментов.
+одного провайдера — 30 секунд, включая продолжения инструментов.
 
 ## Требования
 
@@ -687,7 +687,7 @@ opencode run --model local-qwen/qwen3.8-max "Объясни этот проек�
 | `RATE_LIMIT_PER_MINUTE` | `30` | Лимит запросов/мин на IP клиента (`/healthz` не считается) |
 | `DEEPSEEK_PROFILE_DIR` | — | Переиспользовать существующий профиль Chrome с активной сессией |
 | `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
-| `PROVIDER_MIN_INTERVAL` | `10` | Seconds between provider attempts/continuations; not a quota guarantee |
+| `PROVIDER_MIN_INTERVAL` | `30` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Включить модели Qwen Chat на том же `/v1` |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Отдельный постоянный профиль Qwen Chat |
 | `TOOLCALL_MAX_CONTINUATIONS` | `0` | Явно включаемый лимит продолжений при подтверждённом провайдером обрыве по длине; штатное завершение не вызывает продолжений |

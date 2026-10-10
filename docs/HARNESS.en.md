@@ -147,6 +147,8 @@ after a manual website check; see [account safety](ACCOUNT_SAFETY.md). All
 providers have account limits, including Chinese models. Tool continuations can
 consume another message.
 
+After the repeated October 10 restriction, live qualification is stopped. Keep `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge now resumes saved conversations and sends only new results; unknown history stops without a new-chat fallback. Durable load budgets and a 20-reply conversation cap apply. See [account safety](ACCOUNT_SAFETY.md).
+
 For unattended DeepSeek goals, optionally set `TOOLCALL_FORMAT_REPAIR=1` in
 the bridge process environment and restart the bridge. After a normally
 completed malformed JSON reply, commentary mixed with a tool block, or unsupported

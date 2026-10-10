@@ -49,6 +49,7 @@ from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
 from providers.access import guard, ProviderRejected, rejection
 from .diagnostics import save_tool_failure
+from .conversation_cache import conversation_cache, ConversationStateError
 
 from .config import (
     MODEL_MAP,
@@ -81,6 +82,7 @@ from .schemas import ChatCompletionRequest
 
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
+_client_identity = None
 _client_lock = threading.Lock()
 _stop_refresh = threading.Event()
 _request_gate = asyncio.Lock()
@@ -133,12 +135,14 @@ def _build_client(force: bool = False, allow_interactive=None) -> DeepSeekClient
 
 def get_client(force_refresh: bool = False, rejected_client=None) -> DeepSeekClient:
     """Cache a client; an explicit reset reloads the session file without browsing."""
-    global _client
+    global _client, _client_identity
+    identity = conversation_cache.account_identity()
     with _client_lock:
-        if _client is None or _client.session.age >= SESSION_MAX_AGE or (force_refresh and (
+        if _client_identity != identity or _client is None or _client.session.age >= SESSION_MAX_AGE or (force_refresh and (
             rejected_client is None or _client is rejected_client
         )):
             _client = _build_client(force=force_refresh)
+            _client_identity = identity
         return _client
 
 
@@ -253,6 +257,8 @@ def _invalidate_client(provider, client=None):
 def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     """One durable attempt; cancellation cannot erase an uncertain dispatch."""
     provider = model_provider(req.model)
+    if provider == 'deepseek' and len(prompt.encode('utf-8')) > 131072:
+        raise ProviderRejected('local_budget_exceeded')
     client = None
     attempt = None
     try:
@@ -313,7 +319,32 @@ def _continue_reply(prev: Reply, req: ChatCompletionRequest):
 
 
 async def _run_tool_chat(prompt: str, req: ChatCompletionRequest, model_type):
-    return await _run_queued(_tool_chat_with_retry, prompt, req, model_type, gate=_request_queue(req))
+    return await _run_queued(_conversation_tool_chat, prompt, req, model_type, gate=_request_queue(req))
+
+
+def _plain_conversation_reply(prompt, req, model_type):
+    reply = _chat_with_retry(prompt, req, model_type)
+    return reply, reply.text, None
+
+
+def _conversation_tool_chat(prompt, req, model_type):
+    if model_provider(req.model) != "deepseek":
+        return _tool_chat_with_retry(prompt, req, model_type)
+    original = req
+    try:
+        identity = conversation_cache.account_identity()
+        req, steps = conversation_cache.prepare(req)
+        if req is not original:
+            prompt = messages_to_prompt(req.messages, req.tools, req.tool_choice)
+            model_type = None
+        result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
+                  _plain_conversation_reply(prompt, req, model_type))
+        if conversation_cache.account_identity() != identity:
+            raise ConversationStateError("Account changed during request; continuation stopped.")
+        conversation_cache.remember(original, *result, steps)
+        return result
+    except ConversationStateError as exc:
+        raise ToolCallError(str(exc)) from exc
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
@@ -625,7 +656,7 @@ async def chat_completions(req: ChatCompletionRequest):
     # Tool calls are emulated by buffering the reply and parsing it, so we use the
     # non-streaming call and then emit SSE frames when the client asked to stream.
     # The provider worker latches upstream failures before exposing the result.
-    if req.tools:
+    if req.tools or model_provider(req.model) == "deepseek":
         if req.stream:
             return StreamingResponse(
                 _tool_stream(req, prompt, model_type),
