@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from settings import ROOT
+from .config import canonical_model
 from .schemas import ChatMessage
 
 
@@ -37,7 +38,10 @@ def normalized(message):
 
 
 def digest(req, messages):
-    payload = [req.model, req.user, req.thinking, req.search, req.tools,
+    # Owner-prefixed aliases (deepseek/deepseek-expert) must share history with
+    # the bare public id used when the link was stored.
+    model = canonical_model(req.model) or req.model
+    payload = [model, req.user, req.thinking, req.search, req.tools,
                [normalized(m) for m in messages]]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                     separators=(',', ':')).encode()).hexdigest()

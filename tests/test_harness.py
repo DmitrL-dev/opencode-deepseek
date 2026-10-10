@@ -98,6 +98,23 @@ class HarnessSetupTests(unittest.TestCase):
         self.assertEqual([m['id'] for m in models], ['kimi-instant', 'kimi-k3', 'kimi-k2.8'])
         self.assertEqual(models[0]['name'], 'Kimi Instant · web')
 
+    def test_catalog_accepts_matching_owner_prefixed_aliases(self):
+        catalog = {"data": [
+            {"id": "qwen3.8-omni-flash", "owned_by": "qwen"},
+            {"id": "qwen/qwen3.8-omni-flash", "owned_by": "qwen"},
+            {"id": "kimi/kimi-instant", "owned_by": "kimi"},
+        ]}
+        models = harness.catalog_models(catalog)
+        self.assertEqual([model["id"] for model in models],
+                         ["qwen3.8-omni-flash", "qwen/qwen3.8-omni-flash", "kimi/kimi-instant"])
+        self.assertEqual(models[1]["name"], "Qwen3.8 Omni Flash · web")
+        self.assertEqual(
+            [model["id"] for model in harness.catalog_models(catalog, without_browser=True)],
+            ["qwen3.8-omni-flash", "qwen/qwen3.8-omni-flash", "kimi/kimi-instant"],
+        )
+        with self.assertRaises(ValueError):
+            harness.catalog_models({"data": [{"id": "evil/qwen3.8-omni-flash", "owned_by": "qwen"}]})
+
     def run_cli_catalog(self, catalog, *args):
         requests = []
         real_client = httpx.Client
