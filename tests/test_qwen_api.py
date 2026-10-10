@@ -51,8 +51,24 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
         response = await self.http.get("/v1/models")
         models = {m["id"]: m["owned_by"] for m in response.json()["data"]}
         self.assertEqual(models["qwen3.8-omni-flash"], "qwen")
+        self.assertEqual(models["qwen/qwen3.8-omni-flash"], "qwen")
         self.assertEqual(models["qwen3.8-max"], "qwen")
+        self.assertEqual(models["qwen/qwen3.8-max"], "qwen")
         self.assertEqual(models["deepseek-chat"], "deepseek")
+        self.assertEqual(models["deepseek/deepseek-chat"], "deepseek")
+
+    async def test_author_prefixed_model_ids_are_accepted(self):
+        fake = Mock()
+        fake.chat.return_value = Reply("QWEN_OK", CID)
+        with patch.object(api, "get_qwen_client", return_value=fake), patch.object(api, "get_client") as ds:
+            response = await self.http.post(
+                "/v1/chat/completions",
+                json={**self.body, "model": "qwen/qwen3.8-max"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["model"], "qwen/qwen3.8-max")
+        self.assertEqual(fake.chat.call_args.args[2], "qwen3.8-max")
+        ds.assert_not_called()
 
     async def test_qwen_requests_do_not_use_deepseek_credentials(self):
         fake = Mock()

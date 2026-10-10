@@ -58,6 +58,7 @@ from .config import (
     SERVER_INTERACTIVE_LOGIN,
     SESSION_REFRESH_ENABLED,
     SESSION_REFRESH_INTERVAL,
+    advertised_model_ids,
     is_known_model,
     resolve_model_type,
     model_provider,
@@ -530,7 +531,7 @@ def list_models():
         "object": "list",
         "data": [
             {"id": name, "object": "model", "created": created, "owned_by": model_provider(name)}
-            for name in MODEL_MAP
+            for name in advertised_model_ids()
         ],
     }
 
@@ -543,7 +544,7 @@ async def chat_completions(req: ChatCompletionRequest):
     if not is_known_model(req.model):
         return _error(
             f"The model `{req.model}` does not exist. Available models: "
-            f"{', '.join(MODEL_MAP)}",
+            f"{', '.join(advertised_model_ids())}",
             status=404, err_type="model_not_found",
         )
 
