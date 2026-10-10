@@ -331,7 +331,7 @@ class SafetySdkTests(unittest.TestCase):
             fresh.chat.return_value = Reply("verified", None)
             cache = "_client" if provider == "deepseek" else "_qwen_client"
             builder = "_build_client" if provider == "deepseek" else "QwenClient"
-            with patch.object(api, cache, old), patch.object(api, builder, return_value=fresh) as build, patch.object(api, "get_qwen_session"):
+            with patch.object(api, cache, old), patch.object(api, builder, return_value=fresh) as build, patch.object(api, "get_qwen_session", side_effect=[old.session, fresh.session]):
                 with self.assertRaises(PermissionDeniedError):
                     self.sdk.chat.completions.create(model=model, messages=self.messages)
                 AccessGuard(self.guard.path, interval=0).resume(provider)

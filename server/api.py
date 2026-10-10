@@ -153,11 +153,15 @@ def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
     """Load a manually captured, usable Qwen session; never capture a browser."""
     global _qwen_client
     with _qwen_client_lock:
-        if (_qwen_client is None or not _qwen_client.session.usable
+        # A visible auth window can save a rotated token before the previous
+        # token expires. Read the atomic local snapshot on every new request;
+        # never keep using an older in-memory credential after that handoff.
+        session = get_qwen_session(allow_interactive=False, allow_refresh=False,
+                                   channel=REFRESH_BROWSER_CHANNEL,
+                                   fallback_channel=REFRESH_BROWSER_CHANNEL_FALLBACK)
+        if (_qwen_client is None or _qwen_client.session != session
                 or (force_refresh and (rejected_client is None or _qwen_client is rejected_client))):
-            session = get_qwen_session(force=force_refresh, allow_interactive=False, allow_refresh=False,
-                                       channel=REFRESH_BROWSER_CHANNEL,
-                                       fallback_channel=REFRESH_BROWSER_CHANNEL_FALLBACK)
+            # Existing requests retain their own client; do not close it here.
             _qwen_client = QwenClient(session, access_guard=None)  # server owns pause/pacing
         return _qwen_client
 

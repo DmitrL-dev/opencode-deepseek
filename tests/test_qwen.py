@@ -1,3 +1,5 @@
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -8,7 +10,9 @@ from unittest.mock import Mock, patch
 import httpx
 
 from deepseek.auth import Session as DeepSeekSession
-from qwen.auth import LoginRequired, Session, _capture, get_session, login
+from playwright.sync_api import Error as PlaywrightError
+
+from qwen.auth import LoginRequired, Session, _capture, _launch, get_session, keep_open, login, main
 from qwen.client import QwenClient, QwenStreamError, _decode_cid, _parse_sse
 from providers.access import ProviderRejected
 
@@ -125,6 +129,163 @@ class QwenSessionTests(unittest.TestCase):
         self.assertEqual(capture.call_count, 1)
         self.assertTrue(capture.call_args.args[1])
         login.assert_not_called()
+
+
+class QwenKeepOpenTests(unittest.TestCase):
+    def watch(self, states, shutdown="interrupt"):
+        page, context = Mock(), Mock()
+        context.pages = [page]
+        page.is_closed.return_value = False
+        waits = 0
+
+        def wait(_):
+            nonlocal waits
+            waits += 1
+            if waits == len(states):
+                if shutdown == "interrupt":
+                    raise KeyboardInterrupt
+                if shutdown == "context":
+                    context.on.call_args.args[1]()
+                else:
+                    page.is_closed.return_value = True
+                raise PlaywrightError("closed with fake-secret-detail")
+
+        page.wait_for_timeout.side_effect = wait
+        output = io.StringIO()
+        with patch("qwen.auth.sync_playwright") as playwright, \
+                patch("qwen.auth._launch", return_value=context) as launch, \
+                patch("qwen.auth._capture", side_effect=states) as capture, \
+                patch.object(Session, "save", autospec=True) as save, \
+                contextlib.redirect_stdout(output):
+            keep_open(Path("unused-profile"), Path("unused-session.json"))
+        launch.assert_called_once_with(playwright.return_value.__enter__.return_value,
+                                       Path("unused-profile"), False, "chrome")
+        page.goto.assert_called_once_with("https://chat.qwen.ai/auth", wait_until="commit", timeout=60000)
+        self.assertEqual(capture.call_count, len(states))
+        context.close.assert_called_once()
+        self.assertNotIn("fake-secret-detail", output.getvalue())
+        return save, output.getvalue()
+
+    def test_unchanged_session_is_saved_once_despite_capture_time_and_cookie_order(self):
+        initial = session()
+        initial.cookies = [{"name": "b", "value": "cookie-secret"}, {"name": "a", "value": "other"}]
+        later = Session(**{**vars(initial), "captured_at": initial.captured_at + 1,
+                           "cookies": list(reversed(initial.cookies))})
+        save, output = self.watch([initial, later, later])
+        save.assert_called_once_with(initial, Path("unused-session.json"))
+        self.assertEqual(output.count("Valid session saved"), 1)
+        self.assertIn("Ctrl+C", output)
+        self.assertNotIn(initial.token, output)
+        self.assertNotIn("cookie-secret", output)
+
+    def test_rotation_of_token_expiry_cookies_or_user_agent_is_saved(self):
+        initial = session()
+        for changes in ({"token": "rotated-secret"}, {"expires_at": initial.expires_at + 900},
+                        {"cookies": [{"name": "auth", "value": "cookie-secret"}]},
+                        {"user_agent": "rotated-agent-secret"}):
+            with self.subTest(field=next(iter(changes))):
+                rotated = Session(**{**vars(initial), **changes})
+                save, output = self.watch([initial, rotated, rotated])
+                self.assertEqual([call.args[0] for call in save.call_args_list], [initial, rotated])
+                self.assertEqual(output.count("Valid session saved"), 2)
+                self.assertNotIn("rotated-secret", output)
+                self.assertNotIn("cookie-secret", output)
+                self.assertNotIn("rotated-agent-secret", output)
+
+    def test_invalid_or_expiring_state_is_never_saved_or_announced_valid(self):
+        blank = session()
+        blank.token = " \t"
+        expired = session()
+        expired.expires_at = time.time() - 1
+        expiring = session()
+        expiring.expires_at = time.time() + 30
+        invalid = session()
+        invalid.expires_at = float("nan")
+        save, output = self.watch([None, blank, expired, expiring, invalid])
+        save.assert_not_called()
+        self.assertNotIn("Valid session", output)
+
+    def test_invalidation_clears_ready_notice_without_rewriting_unchanged_recovery(self):
+        valid = session()
+        save, output = self.watch([valid, None, None, valid])
+        save.assert_called_once()
+        self.assertEqual(output.count("Website session is missing or expired"), 1)
+        self.assertEqual(output.count("Valid session available"), 1)
+
+    def test_page_close_stops_gracefully(self):
+        save, output = self.watch([session()], shutdown="page")
+        save.assert_called_once()
+        self.assertIn("Website window closed; capture stopped.", output)
+
+    def test_context_close_stops_gracefully(self):
+        save, output = self.watch([session()], shutdown="context")
+        save.assert_called_once()
+        self.assertIn("Website window closed; capture stopped.", output)
+
+    def test_startup_preserves_existing_local_browser_fallback(self):
+        playwright, profile = Mock(), Mock()
+        playwright.chromium.launch_persistent_context.side_effect = [PlaywrightError("missing executable"), Mock()]
+        _launch(playwright, profile, False, "chrome")
+        self.assertEqual(playwright.chromium.launch_persistent_context.call_count, 2)
+        self.assertEqual(playwright.chromium.launch_persistent_context.call_args_list[0].kwargs,
+                         {"headless": False, "channel": "chrome"})
+        self.assertEqual(playwright.chromium.launch_persistent_context.call_args_list[1].kwargs,
+                         {"headless": False})
+
+    def test_navigation_failure_does_not_retry_or_expose_details(self):
+        page, context = Mock(), Mock()
+        context.pages = [page]
+        page.is_closed.return_value = False
+        page.goto.side_effect = PlaywrightError("fake-secret-navigation-detail")
+        output = io.StringIO()
+        with patch("qwen.auth.sync_playwright"), patch("qwen.auth._launch", return_value=context) as launch, \
+                patch("qwen.auth._capture") as capture, patch.object(Session, "save") as save, \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+            main(["--keep-open"])
+        self.assertEqual(stopped.exception.code, 1)
+        launch.assert_called_once()
+        page.goto.assert_called_once()
+        capture.assert_not_called()
+        save.assert_not_called()
+        context.close.assert_called_once()
+        self.assertNotIn("fake-secret-navigation-detail", output.getvalue())
+
+    def test_default_login_still_closes_after_initial_capture(self):
+        page, context = Mock(), Mock()
+        context.pages = [page]
+        valid = session()
+        with patch("qwen.auth.sync_playwright"), patch("qwen.auth._launch", return_value=context) as launch, \
+                patch("qwen.auth._capture", return_value=valid), patch.object(Session, "save") as save, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertIs(login(), valid)
+        self.assertFalse(launch.call_args.args[2])
+        context.close.assert_called_once()
+        page.wait_for_timeout.assert_not_called()
+        save.assert_called_once()
+
+    def test_cli_keep_open_is_explicit(self):
+        with patch("qwen.auth.login", return_value=session()) as normal, \
+                patch("qwen.auth.keep_open") as watcher, contextlib.redirect_stdout(io.StringIO()):
+            main([])
+            normal.assert_called_once_with()
+            watcher.assert_not_called()
+            main(["--keep-open"])
+            watcher.assert_called_once_with()
+            normal.assert_called_once_with()
+
+    def test_default_get_session_never_starts_a_browser(self):
+        with patch.object(Session, "load", return_value=None) as load, \
+                patch("qwen.auth._capture_profile") as capture, patch("qwen.auth.login") as normal, \
+                patch("qwen.auth.keep_open") as watcher, self.assertRaises(LoginRequired) as failure:
+            get_session()
+        load.assert_called_once()
+        capture.assert_not_called()
+        normal.assert_not_called()
+        watcher.assert_not_called()
+        self.assertIn("python -m qwen.auth --keep-open", str(failure.exception))
+        self.assertIn("expired", str(failure.exception))
+        self.assertIn("window open", str(failure.exception))
+        self.assertNotIn("\n", str(failure.exception))
 
 
 class QwenStreamTests(unittest.TestCase):
