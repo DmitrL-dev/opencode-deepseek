@@ -147,7 +147,7 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
     elif tool_choice == "none":
         instructions += "\n\nDo NOT call any tools; answer in plain text."
     # Keep the protocol reminder next to the model's turn.
-    if tool_choice != "none":
+    if tool_choice is None or tool_choice == "auto":
         instructions += (
             "\n\nNext reply: either a single fenced tool_calls block to perform a "
             "necessary action, or plain text to answer the user when no action "
