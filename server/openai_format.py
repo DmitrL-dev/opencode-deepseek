@@ -277,6 +277,19 @@ def _flat_tool_arguments(item: dict, tools: Optional[List[dict]]) -> Optional[di
     return arguments
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _tool_json(payload):
+    return json.loads(payload, object_pairs_hook=_unique_json_object)
+
+
 def parse_tool_calls(
     text: str, allowed_names: Optional[Iterable[str]] = None, *,
     allow_unclosed_fence: bool = False,
@@ -311,7 +324,7 @@ def parse_tool_calls(
     else:
         raise ToolCallError("Expected one complete fenced tool_calls block")
     try:
-        data = json.loads(payload)
+        data = _tool_json(payload)
     except json.JSONDecodeError as exc:
         if (allow_missing_array_closer and exc.msg == "Expecting ',' delimiter"
                 and exc.pos == len(payload) and payload.lstrip().startswith("[")
@@ -320,7 +333,7 @@ def parse_tool_calls(
             # JSON must then parse in full: never close a string, argument
             # object, nested array, trailing comma, or partial batch member.
             try:
-                data = json.loads(payload.rstrip() + "]")
+                data = _tool_json(payload.rstrip() + "]")
             except (ValueError, TypeError):
                 raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
         elif (allow_closing_artifacts
@@ -330,7 +343,7 @@ def parse_tool_calls(
             # object closer or closing-only DSML. JSON was fully consumed.
             # Never repair strings, add missing delimiters, drop array members,
             # or tolerate any other suffix. Markdown framing is independent.
-            data = json.loads(payload[:exc.pos])
+            data = _tool_json(payload[:exc.pos])
         else:
             raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
     except ValueError as exc:
@@ -356,7 +369,7 @@ def parse_tool_calls(
             args = _flat_tool_arguments(item, flat_argument_tools)
         if isinstance(args, str):
             try:
-                args = json.loads(args)
+                args = _tool_json(args)
             except json.JSONDecodeError as exc:
                 raise _json_tool_error("Tool arguments contain invalid JSON", exc) from exc
             except ValueError as exc:

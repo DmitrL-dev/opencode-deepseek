@@ -51,9 +51,9 @@
   const label = message => { button.textContent = message || (enabled ? "OpenCode: подключено · отключить" : "Подключить вкладку к OpenCode"); };
   label();
 
-  async function rpc(path, method = "GET", data) {
+  async function rpc(path, method = "GET", data, timeout = 10000) {
     const response = await GM.xmlHttpRequest({
-      url: BASE + path, method, timeout: 10000,
+      url: BASE + path, method, timeout,
       headers: { Authorization: "Bearer " + TOKEN, "Content-Type": "application/json" },
       ...(data ? { data: JSON.stringify(data) } : {}),
     });
@@ -120,7 +120,7 @@
     }
     if (pending !== job) return;
     await finish({ status: value.status, body: value.body, path: location.pathname,
-      ...(site.provider === "mistral" ? { request_turn: value.request_turn } : {}),
+      ...(value.request_turn ? { request_turn: value.request_turn } : {}),
     }).catch(() => label("OpenCode: ответ не принят"));
   });
 
@@ -180,7 +180,9 @@
         detail: JSON.stringify({ nonce, prompt: job.prompt, path: job.path ?? null }),
       }));
     });
-    await rpc("/browser/submit", "POST", identity(job));
+    // Submission may legitimately wait for the provider's pacing interval.
+    // The job deadline still bounds this RPC; ordinary status calls stay short.
+    await rpc("/browser/submit", "POST", identity(job), Math.max(1, Math.ceil(deadline - performance.now())));
     if (performance.now() >= deadline || !(await rpc("/browser/check", "POST", identity(job))).active
         || performance.now() >= deadline) {
       throw new BridgeFailure("The browser lease ended before insertion");

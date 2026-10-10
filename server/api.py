@@ -37,13 +37,13 @@ import hashlib
 from contextvars import ContextVar
 
 import anyio
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from deepseek.auth import SESSION_MAX_AGE, LoginRequired, get_session
 from chat_protocol import Reply
-from deepseek.client import DeepSeekClient
+from deepseek.client import DeepSeekClient, _decode_cid as decode_deepseek_cid
 from qwen.auth import get_session as get_qwen_session
 from qwen.renewal import renew_session as renew_qwen_session
 from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
@@ -643,7 +643,40 @@ def list_models():
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+async def chat_completions(req: ChatCompletionRequest, request: Request = None):
+    # StreamingResponse owns disconnect monitoring after headers. Direct Python
+    # callers do not have an ASGI transport to monitor.
+    if request is None or req.stream:
+        return await _chat_completions(req)
+    stopping = asyncio.Event()
+    async def disconnected():
+        # The body has already been parsed by FastAPI. Await the next ASGI
+        # event instead of polling is_disconnected: its immediately-cancelled
+        # scope can lose disconnects behind BaseHTTPMiddleware task groups.
+        while not stopping.is_set():
+            message = await request.receive()
+            if message["type"] == "http.disconnect":
+                return
+    work = asyncio.create_task(_chat_completions(req))
+    watch = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait({work, watch}, return_when=asyncio.FIRST_COMPLETED)
+        if watch in done:
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+            return _error("Client disconnected", status=499, err_type="client_disconnected")
+        return await work
+    finally:
+        # Stop and join both tasks, including through the middleware's
+        # cancellation scopes. No orphaned receive or provider worker remains.
+        stopping.set()
+        watch.cancel()
+        if not work.done():
+            work.cancel()
+        await asyncio.gather(work, watch, return_exceptions=True)
+
+
+async def _chat_completions(req: ChatCompletionRequest):
     if not req.messages:
         return _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
 
@@ -668,8 +701,8 @@ async def chat_completions(req: ChatCompletionRequest):
                 decode_provider_cid(req.conversation_id, provider)
             elif provider == "qwen":
                 decode_qwen_cid(req.conversation_id)
-            elif req.conversation_id.startswith(("qwen:", "web:")):
-                raise ValueError("A provider conversation cannot be resumed through DeepSeek")
+            else:
+                decode_deepseek_cid(req.conversation_id)
         except ValueError as exc:
             return _error(str(exc), status=400, err_type="invalid_request_error")
 

@@ -556,7 +556,8 @@ class QwenStreamTests(unittest.TestCase):
             if request.url.path == "/api/v2/chats/new":
                 return httpx.Response(200, json={"success": True, "data": {"id": CHAT}})
             self.assertEqual(request.url.path, "/api/v2/chat/completions")
-            text = "\n".join(events({"response.created": {"response_id": MESSAGE, "chat_id": CHAT}}, answer("OK")))
+            mid = SECONDARY if json.loads(request.content).get("parent_id") else MESSAGE
+            text = "\n".join(events({"response.created": {"response_id": mid, "chat_id": CHAT}}, {**answer("OK"), "response_id": mid}))
             return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
         client = QwenClient(session(), access_guard=None, transport=httpx.MockTransport(handler))
         try:

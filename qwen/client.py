@@ -9,6 +9,7 @@ import uuid
 from typing import Iterator, Optional
 
 import httpx
+from providers.stream_limits import bounded_lines, READ_TIMEOUT, MAX_SECONDS
 
 from chat_protocol import Reply, sse_events
 from providers.access import ProviderRejected, rejection, guard, current_attempt
@@ -187,12 +188,15 @@ def _parse_sse_events(lines, meta: dict) -> Iterator[str]:
         for choice in choices:
             if choice.get("index", 0) != 0:
                 continue
+            was_terminal = terminal
             delta = choice.get("delta", {})
             phase = delta.get("phase")
             if phase in (None, "answer", "final"):
                 content = delta.get("content")
                 if content is not None and not isinstance(content, str):
                     raise QwenStreamError("Qwen content is not text")
+                if terminal and (content or delta.get("status") not in (None, "finished")):
+                    raise QwenStreamError("Qwen changed an answer after completion")
                 if content:
                     yield content
                 if delta.get("status") == "finished":
@@ -202,6 +206,8 @@ def _parse_sse_events(lines, meta: dict) -> Iterator[str]:
             if finish is not None:
                 if finish not in ("stop", "length"):
                     raise QwenStreamError(f"Unsupported Qwen finish_reason: {finish}")
+                if was_terminal and meta.get("finish_reason") != finish:
+                    raise QwenStreamError("Qwen changed completion status")
                 terminal = True
                 meta["finish_reason"] = finish
     if not terminal:
@@ -316,22 +322,28 @@ class _Stream:
         }
         meta = {"chat_id": self.chat_id}
         self._dispatch()
-        with self.client._http.stream("POST", "/api/v2/chat/completions", params={"chat_id": self.chat_id},
+        stream_started = time.monotonic()
+        with self.client._http.stream("POST", "/api/v2/chat/completions", timeout=httpx.Timeout(READ_TIMEOUT), params={"chat_id": self.chat_id},
                                      json=body, headers={"X-Request-Id": str(uuid.uuid4()),
                                                          "X-Accel-Buffering": "no"}) as response:
             response.raise_for_status()
             if "text/event-stream" not in response.headers.get("content-type", ""):
-                response.read()
-                _business(response.json())
+                error_body = "\n".join(bounded_lines(response, self.access_attempt, started=stream_started))
+                _business(json.loads(error_body))
                 raise QwenStreamError("Qwen did not return an SSE response")
-            yield from _parse_sse(response.iter_lines(), meta)
-        self.message_id = meta.get("message_id")
-        if not self.message_id:
-            raise QwenStreamError("Qwen completion returned no response_id")
+            yield from _parse_sse(bounded_lines(response, self.access_attempt, started=stream_started), meta)
+            if self.access_attempt is not None:
+                self.access_attempt.check()
+            if time.monotonic() - stream_started >= MAX_SECONDS:
+                raise TimeoutError("Provider stream exceeded total deadline")
+        identity = meta.get("message_id")
         try:
-            uuid.UUID(self.message_id)
+            parsed_id = uuid.UUID(identity) if isinstance(identity, str) else None
+            if parsed_id is None or (self.parent_id and parsed_id == uuid.UUID(self.parent_id)):
+                raise ValueError("Missing or stale response identity")
         except ValueError as exc:
-            raise QwenStreamError("Qwen returned an invalid response_id") from exc
+            raise QwenStreamError("Qwen returned a missing, invalid or stale response_id") from exc
+        self.message_id = identity
         self.finish_reason = meta["finish_reason"]
 
     @property

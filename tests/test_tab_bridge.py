@@ -114,8 +114,10 @@ class BrokerTests(unittest.TestCase):
 
     def test_result_cannot_change_origin_path_or_resumed_conversation(self):
         body = json.dumps({"result":{"response":{"modelResponse":{"message":"marker","partial":False}}}}).encode()
-        result = {"status":200,"body":base64.b64encode(body).decode(),"path":"/c/abc"}
-        self.assertEqual(tab_bridge.parse_browser_result("grok", result).text, "marker")
+        result = {"status":200,"body":base64.b64encode(body).decode(),"path":"/c/abc",
+                  "request_turn":{"chat_id":"abc","prompt":"marker",
+                                  "endpoint":"/rest/app-chat/conversations/abc/responses"}}
+        self.assertEqual(tab_bridge.parse_browser_result("grok", result, prompt="marker").text, "marker")
         for bad in ({**result,"path":"https://evil.test/c/abc"}, {**result,"status":403},
                     {**result,"body":"!"}, {**result,"error":"blocked"}):
             with self.assertRaises((ProviderUnavailable, ValueError)):

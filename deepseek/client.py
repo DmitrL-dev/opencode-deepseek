@@ -28,6 +28,8 @@ import threading
 from typing import Iterator, Optional
 
 import httpx
+from providers.stream_limits import bounded_lines, READ_TIMEOUT, MAX_SECONDS
+import time
 
 from chat_protocol import Reply, sse_events as _sse_events
 from providers.access import ProviderRejected, rejection, guard, current_attempt
@@ -74,9 +76,12 @@ def _decode_cid(conversation_id: Optional[str]) -> tuple[Optional[str], Optional
     """Split a conversation_id back into (chat_session_id, parent_message_id)."""
     if not conversation_id:
         return None, None
-    session_id, _, msg = conversation_id.partition(_CID_SEP)
-    parent = int(msg) if msg.isdigit() else None
-    return (session_id or None), parent
+    if not isinstance(conversation_id, str) or len(conversation_id) > 256:
+        raise ValueError("Invalid DeepSeek conversation_id")
+    match = re.fullmatch(r"([A-Za-z0-9_-]{1,128}):([1-9][0-9]{0,18})", conversation_id)
+    if match is None:
+        raise ValueError("Invalid DeepSeek conversation_id")
+    return match[1], int(match[2])
 
 
 def _biz(data: dict) -> dict:
@@ -297,20 +302,25 @@ class _Stream:
         meta: dict = {}
         self._client._diagnostic_phase, self._client._diagnostic_status = "completion", None
         self._dispatch()
+        stream_started = time.monotonic()
         with self._client._http.stream(
-            "POST", COMPLETION_PATH, json=body, headers=headers
+            "POST", COMPLETION_PATH, json=body, headers=headers, timeout=httpx.Timeout(READ_TIMEOUT)
         ) as resp:
             self._client._diagnostic_status = resp.status_code
             resp.raise_for_status()
             if "text/event-stream" not in resp.headers.get("content-type", "").lower():
-                resp.read()
+                error_body = "\n".join(bounded_lines(resp, self.access_attempt, started=stream_started))
                 try:
-                    _biz(resp.json())
+                    _biz(json.loads(error_body))
                 except ValueError as exc:
                     raise ProviderRejected() from exc
                 raise ProviderRejected()
             self._client._diagnostic_phase = "parse_stream"
-            yield from _parse_sse(resp.iter_lines(), meta)
+            yield from _parse_sse(bounded_lines(resp, self.access_attempt, started=stream_started), meta)
+            if self.access_attempt is not None:
+                self.access_attempt.check()
+            if time.monotonic() - stream_started >= MAX_SECONDS:
+                raise TimeoutError("Provider stream exceeded total deadline")
         identity = meta.get("message_id")
         if (isinstance(identity, bool) or not isinstance(identity, int)
                 or identity <= 0 or identity == self._parent_id):
@@ -349,10 +359,15 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
     def status(value):
         nonlocal terminal
         if value in ("FINISHED", "INCOMPLETE"):
+            reason = "length" if value == "INCOMPLETE" else "stop"
+            if terminal and meta.get("finish_reason") != reason:
+                raise DeepSeekStreamError("DeepSeek changed completion status")
             terminal = True
-            meta["finish_reason"] = "length" if value == "INCOMPLETE" else "stop"
+            meta["finish_reason"] = reason
         elif value in ("ERROR", "FAILED", "CANCELLED"):
             raise DeepSeekStreamError(f"DeepSeek response status: {value}")
+        elif terminal:
+            raise DeepSeekStreamError("DeepSeek changed status after completion")
 
     def claim(index, fragment):
         nonlocal last_emitted_index
@@ -370,6 +385,9 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             yield content[len(previous):]
 
     for event, payload in _sse_events(lines):
+        if event == "error" and (not payload or payload == "[DONE]"):
+            raise DeepSeekStreamError("DeepSeek emitted an error event")
+        was_terminal = terminal
         if payload == "[DONE]":
             terminal = True
             meta.setdefault("finish_reason", "stop")
@@ -402,6 +420,18 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         value = obj.get("v")
         if isinstance(value, dict) and "response" in value:
             response = value["response"]
+            if was_terminal:
+                if not isinstance(response, dict):
+                    raise DeepSeekStreamError("Invalid final snapshot")
+                final_fragments = _parse_fragment_list(response.get("fragments", []))
+                final_types = [f.get("type") for f in final_fragments]
+                final_text = {i: f.get("content", "") for i, f in enumerate(final_fragments)
+                              if f.get("type") == "RESPONSE" and f.get("content", "")}
+                if final_types != types or final_text != emitted:
+                    raise DeepSeekStreamError("DeepSeek changed response after completion")
+                _capture_message_id(meta, value)
+                status(response.get("status"))
+                continue
             if not isinstance(response, dict):
                 raise DeepSeekStreamError("Unexpected DeepSeek response snapshot")
             _capture_message_id(meta, value)
@@ -430,6 +460,8 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             _set_message_id(meta, value)
             continue
         if current_path == "response/fragments":
+            if was_terminal:
+                raise DeepSeekStreamError("DeepSeek sent fragments after completion")
             if current_operation != "APPEND":
                 raise DeepSeekStreamError("Unsupported DeepSeek fragment list patch")
             for fragment in _parse_fragment_list(value):
@@ -441,6 +473,8 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         match = _CONTENT_PATH.fullmatch(current_path) if isinstance(current_path, str) else None
         if not match:
             continue
+        if was_terminal:
+            raise DeepSeekStreamError("DeepSeek sent content after completion")
         if current_operation != "APPEND" or not isinstance(value, str):
             raise DeepSeekStreamError("Unsupported DeepSeek content patch")
         index = int(match.group(1))

@@ -137,7 +137,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
     if without_browser and not models:
         raise ValueError("No browserless models selected for --without-browser")
     result = copy.deepcopy(document)
-    target_ids = {"llm-pi-ai", "session-title-llm"}
+    target_ids = {"llm-pi-ai", "session-title-llm", "agent-default-model"}
     selected_ids = {model["id"] for model in models}
     if default_model is not None:
         if default_model not in selected_ids:
@@ -161,7 +161,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
             raise ValueError("Dynamic Harness config needs manual editing: " + key)
         existing[key] = row
 
-    if without_browser and default_model is None and "agent-default-model" in existing:
+    if default_model is None and "agent-default-model" in existing:
         default = existing["agent-default-model"].get("config", {})
         provider = default.get("provider")
         if not isinstance(provider, str):
@@ -173,7 +173,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
                 raise ValueError("Dynamic or non-string owned default model cannot be checked for --without-browser; "
                                  "select an advertised --default-model explicitly")
             if model not in selected_ids:
-                raise ValueError("Existing default model is excluded by --without-browser; "
+                raise ValueError("Existing default model is absent from the selected catalog; "
                                  "select an advertised --default-model explicitly")
 
     def entry(key):
@@ -198,6 +198,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
     entry("session-title-llm")["disabled"] = True
     if default_model is not None:
         entry("agent-default-model")["config"] = {"provider": ROUTE, "model": default_model}
+        entry("agent-default-model")["disabled"] = False
     return result
 
 

@@ -101,6 +101,10 @@ class ConversationCache:
         tail = req.messages[end:]
         if not tail or any(m.role not in ('tool', 'user') for m in tail):
             raise ConversationStateError('Ambiguous continuation; no new chat was created.')
+        calls = {call.get('id'): call for call in (req.messages[end - 1].tool_calls or [])}
+        result_ids = [m.tool_call_id for m in tail if m.role == 'tool']
+        if len(set(result_ids)) != len(result_ids) or set(result_ids) != set(calls):
+            raise ConversationStateError('Tool results do not match the delivered calls.')
         key = self.key(req, req.messages[:end], scope)
         with self.connection() as db:
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
@@ -113,10 +117,6 @@ class ConversationCache:
             db.execute('UPDATE links SET used=1, reservation=? WHERE key=?', (reservation, key))
         if claim is not None:
             claim.update(key=key, reservation=reservation)
-        calls = {call.get('id'): call for call in (req.messages[end - 1].tool_calls or [])}
-        result_ids = [m.tool_call_id for m in tail if m.role == 'tool']
-        if len(set(result_ids)) != len(result_ids) or any(cid not in calls for cid in result_ids):
-            raise ConversationStateError('Tool results do not match the delivered calls.')
         tail = [m.model_copy(update={'name': calls[m.tool_call_id]['function']['name']})
                 if m.role == 'tool' else m for m in tail]
         if result_ids:

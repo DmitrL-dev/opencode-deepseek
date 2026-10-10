@@ -33,9 +33,17 @@ class ChatMessage(BaseModel):
     @field_validator("tool_calls")
     @classmethod
     def validate_historical_calls(cls, value):
+        seen = set()
         for call in value or []:
-            if "function" in call and not isinstance(call["function"], dict):
-                raise ValueError("Historical tool call function must be an object")
+            identity, fn = call.get("id"), call.get("function")
+            if (not isinstance(identity, str) or not identity or len(identity) > 256
+                    or identity in seen or call.get("type", "function") != "function"
+                    or not isinstance(fn, dict)
+                    or not isinstance(fn.get("name"), str) or not fn["name"]
+                    or len(fn["name"]) > 256
+                    or not isinstance(fn.get("arguments"), (str, dict))):
+                raise ValueError("Invalid historical tool call")
+            seen.add(identity)
         return value
 
 
