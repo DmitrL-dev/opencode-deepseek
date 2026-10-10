@@ -100,7 +100,11 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "This is a structural example, not a call to copy. Replace the tool name "
         "and the ENTIRE arguments object using the advertised schema, including "
         "all required fields. Never emit the angle-bracket placeholders.\n\n"
-        "Hard rules:\n"
+        "Choose the next step from the latest tool results, not from earlier plans. "
+        "A tool call is a request, not evidence that its action succeeded. "
+        "Only tool results establish what actually happened. Do not repeat a "
+        "successful action unless new evidence makes it necessary.\n\n"
+        "When calling tools, follow these rules:\n"
         "- The fenced `tool_calls` block must be the WHOLE reply. Never write any "
         "text, plan, explanation, or reasoning before or after it.\n"
         "- Never describe the action you are about to take — perform it by emitting "
@@ -117,8 +121,10 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "- Keep tool batches small and split large file changes into separate "
         "complete calls. Check that the JSON array closes before the final fence.\n"
         "- Never use XML/DSML tags such as <tool_call> or <|tool_calls|>.\n"
-        "- Only if no tool is needed, answer normally in plain text and do NOT emit "
-        "a tool_calls block."
+        "- When the requested work and its verification are complete, finish with "
+        "a plain-text answer and no tool_calls block. If you created a goal, mark "
+        "it complete once the objective is achieved, then give the final answer; "
+        "do not keep checking a completed goal."
     )
     if _forced_tool_name(tool_choice) is not None:
         instructions += f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
@@ -130,8 +136,9 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
     # Keep the protocol reminder next to the model's turn.
     if tool_choice != "none":
         instructions += (
-            "\n\nREMINDER: if you are about to perform any action, respond with the "
-            "fenced ```tool_calls block now, as your entire reply — no other text."
+            "\n\nNext reply: either a single fenced tool_calls block to perform a "
+            "necessary action, or plain text to answer the user when no action "
+            "remains. Never combine commentary with a tool_calls block."
         )
     return instructions
 
@@ -144,10 +151,17 @@ def _render_message(m: ChatMessage, call_names: dict) -> str:
             fn = (tc or {}).get("function") or {}
             name = fn.get("name", "")
             args = fn.get("arguments")
-            args_s = args if isinstance(args, str) else json.dumps(args or {}, ensure_ascii=False)
-            calls.append(f"{name}({args_s}) [call_id={tc.get('id', 'unknown')}]")
-        call_txt = "[called tools: " + ", ".join(calls) + "]"
-        content = f"{content} {call_txt}".strip() if content else call_txt
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except ValueError:
+                    pass  # Preserve invalid historical arguments; never repair them.
+            calls.append({"id": tc.get("id", "unknown"), "name": name,
+                          "arguments": args if args is not None else {}})
+        # Show the same protocol we request next, including exact call IDs for
+        # out-of-order results. Historical calls are data, never executed here.
+        call_txt = "```tool_calls\n" + json.dumps(calls, ensure_ascii=False) + "\n```"
+        content = f"{content}\n{call_txt}" if content else call_txt
         return f"Assistant: {content}"
     if m.role == "tool":
         label = m.name or call_names.get(m.tool_call_id, "tool")

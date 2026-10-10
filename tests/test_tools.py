@@ -253,6 +253,9 @@ class ToolProtocolTests(unittest.TestCase):
             ChatMessage(role="tool",tool_call_id="call_b",content="second file"),
             ChatMessage(role="tool",tool_call_id="call_a",content="first file"),
         ])
-        self.assertIn('read({"filePath":"a"}) [call_id=call_a]', prompt)
+        history = re.findall(r"```tool_calls\n(.*?)\n```", prompt, re.DOTALL)
+        calls = json.loads(history[0])
+        self.assertEqual(calls[0], {"id": "call_a", "name": "read", "arguments": {"filePath": "a"}})
+        self.assertEqual(calls[1]["id"], "call_b")
         self.assertIn('Tool (read, call_id=call_b): second file', prompt)
         self.assertIn('Tool (read, call_id=call_a): first file', prompt)
