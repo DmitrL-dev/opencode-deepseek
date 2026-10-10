@@ -114,6 +114,40 @@ class QwenSessionTests(unittest.TestCase):
             loaded.expires_at = time.time() + 30
             self.assertFalse(loaded.usable)
 
+    def test_session_compare_and_swap_preserves_newer_manual_signin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            old, renewed, manual = session(), session(), session()
+            old.save(path)
+            renewed.token = "renewed-fixture-token"
+            self.assertTrue(renewed.save_if_current(old, path))
+            self.assertEqual(Session.load(path), renewed)
+            manual.token = "manual-fixture-token"
+            manual.save(path)
+            self.assertFalse(old.save_if_current(renewed, path))
+            self.assertEqual(Session.load(path), manual)
+            self.assertEqual(path.with_suffix(".lock").stat().st_mode & 0o777, 0o600)
+
+    def test_session_compare_and_swap_checks_cancellation_after_writer_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            old, renewed = session(), session()
+            old.save(path)
+            cancelled = Mock(side_effect=RuntimeError("owned cancellation"))
+            with self.assertRaisesRegex(RuntimeError, "owned cancellation"):
+                renewed.save_if_current(old, path, check=cancelled)
+            cancelled.assert_called_once()
+            self.assertEqual(Session.load(path), old)
+
+    def test_session_writers_sync_directory_before_reporting_success(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            old, fresh = session(), session()
+            with patch("qwen.auth._sync_session_directory") as sync:
+                old.save(path)
+                self.assertTrue(fresh.save_if_current(old, path))
+            self.assertEqual(sync.call_args_list, [unittest.mock.call(path), unittest.mock.call(path)])
+
     def test_short_expiry_triggers_headless_refresh_even_for_a_fresh_capture(self):
         cached, fresh = session(), session()
         cached.expires_at = time.time() + 30
@@ -282,9 +316,9 @@ class QwenKeepOpenTests(unittest.TestCase):
         capture.assert_not_called()
         normal.assert_not_called()
         watcher.assert_not_called()
-        self.assertIn("python -m qwen.auth --keep-open", str(failure.exception))
+        self.assertIn("python -m qwen.auth", str(failure.exception))
         self.assertIn("expired", str(failure.exception))
-        self.assertIn("window open", str(failure.exception))
+        self.assertIn("QWEN_RENEW_SESSION", str(failure.exception))
         self.assertNotIn("\n", str(failure.exception))
 
 

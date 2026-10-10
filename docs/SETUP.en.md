@@ -13,8 +13,9 @@ All providers are now disabled by default. **The instructions below describe
 an explicit DeepSeek opt-in (`DEEPSEEK_ENABLED=1` in `.env`) with account
 restriction risk.** Do not run them on a restricted account. Use the README's
 Qwen path for first-time setup. Failures persist a pause in
-`session/provider-pauses.json`; the server never refreshes sessions or replays
-requests. Inspect: `python -m providers.access status`. After manually confirming
+`session/provider-pauses.json`; the server never renews a session or replays a
+request in response to refusal. The separate Qwen renewal option is described
+under Qwen Chat. Inspect: `python -m providers.access status`. After manually confirming
 normal website access: `python -m providers.access resume qwen` (choose the
 actual provider). Sign-in does not clear a pause. Provider attempts, including
 tool continuations, are spaced by 10 seconds by default.
@@ -513,14 +514,13 @@ It uses your [chat.qwen.ai](https://chat.qwen.ai/) account and its limits;
 this is neither the official Alibaba Cloud API nor Qwen Code authentication.
 The web service determines model access and quotas. Support is disabled by default.
 
-1. Run `python -m qwen.auth --keep-open` in the active Python environment and sign in manually
+1. Run `python -m qwen.auth` in the active Python environment and sign in manually
    in the opened window. If Google rejects the automated browser, use the email-code
    sign-in option available for your account on the login page.
-   Keep the window and terminal open: the token can expire after about 15 minutes.
-   The command reads session changes made by the website and atomically saves
-   them for the next request. It does not call a refresh API, reload the page,
-   or replay model requests. If the website does not renew the session itself,
-   manual sign-in is needed; continuous availability is not guaranteed.
+   The token can expire after about 15 minutes. Optional `QWEN_RENEW_SESSION=1`
+   allows one pre-request renewal using the saved sign-in cookie, without a
+   browser, timers, or replay after refusal.
+   [Renewal conditions and manual mode](HARNESS.en.md#qwen-session).
 2. Add `QWEN_ENABLED=1` to `.env` and restart the server.
 3. Add this provider inside your existing opencode `provider` object, restart
    opencode, and select a model with `/models`.
@@ -566,13 +566,13 @@ opencode run --model local-qwen/qwen3.8-max "Explain this project"
 ```
 
 Qwen uses separate private state: `session/qwen/session.json` and
-`session/qwen/profile/`. The server loads a usable cache only. Missing or expired
+`session/qwen/profile/`. By default, the server loads a usable cache only. Missing or expired
 sessions return `401 login_required`, or a terminal `login_required` error in an
-already-open SSE stream: run `python -m qwen.auth --keep-open` manually.
+already-open SSE stream: run `python -m qwen.auth` manually.
 The server picks up the saved session on the next request without a restart.
-Without `--keep-open`, the command saves once and closes the window; this mode
-requires another sign-in after token expiry. Upstream rejection persists a pause; no automatic refresh
-or replay occurs.
+With `QWEN_RENEW_SESSION` enabled it may renew a locally expired token before
+the request while the sign-in cookie remains usable. Upstream rejection persists
+a pause; there is no renewal or replay in response to that refusal.
 
 Flash and Max share one Qwen account queue, independent of DeepSeek's queue.
 Qwen's `conversation_id` includes the `qwen:` prefix and original model;
@@ -748,8 +748,9 @@ GitHub Actions runs these checks on Python 3.9 and 3.12.
 - On POSIX, session/chat state files are replaced atomically with `0600`
   permissions; their directories and browser profile use `0700`. Each provider
   captures only its own cookies, preserving domain, path, expiry, and HTTPS restrictions.
-- Legacy caches containing a cookie dictionary are recaptured from the browser
-  profile. If that fails, run `python -m deepseek.auth` and restart the server.
+- Legacy caches containing a cookie dictionary require manual sign-in with
+  `python -m deepseek.auth` or `python -m qwen.auth` for that provider.
+  The server does not capture a browser automatically.
 - Passwords/secrets are not stored in `.env` — login is done manually in the
   browser.
 - With `HOST=0.0.0.0` the bridge is reachable on the network with no

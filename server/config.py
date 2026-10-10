@@ -39,6 +39,9 @@ QWEN_MODEL_MAP = {
     "qwen3.8-max": "qwen3.8-max",
 }
 QWEN_ENABLED = os.getenv("QWEN_ENABLED", "0").lower() not in ("", "0", "false", "no", "off")
+# Separate opt-in: one normal cookie renewal only before a new user request,
+# under the same durable guard. Never renew in response to an upstream refusal.
+QWEN_RENEW_SESSION = os.getenv("QWEN_RENEW_SESSION", "0").lower() not in ("", "0", "false", "no", "off")
 if QWEN_ENABLED:
     MODEL_MAP.update(QWEN_MODEL_MAP)
 
