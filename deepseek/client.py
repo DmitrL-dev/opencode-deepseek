@@ -22,6 +22,7 @@ session (see `deepseek.auth`). For each message it:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from typing import Iterator, Optional
@@ -36,6 +37,22 @@ from .pow import DeepSeekPow
 
 BASE = "https://chat.deepseek.com"
 COMPLETION_PATH = "/api/v0/chat/completion"
+_log = logging.getLogger(__name__)
+
+
+def _failure_kind(exc):
+    # Never log exception text, upstream bodies, headers, or account values.
+    if isinstance(exc, ProviderRejected):
+        return exc.code
+    if isinstance(exc, httpx.HTTPStatusError):
+        return "http_status"
+    if isinstance(exc, httpx.TimeoutException):
+        return "transport_timeout"
+    if isinstance(exc, httpx.RequestError):
+        return "transport_error"
+    if isinstance(exc, (ValueError, KeyError, TypeError)):
+        return "invalid_protocol"
+    return "unexpected_failure"
 
 # DeepSeek's mode pill, sent as `model_type` in the completion body. "default" is
 # Instant (the fast model); "expert" is the stronger, slower model. Omitting the
@@ -81,6 +98,20 @@ def _biz(data: dict) -> dict:
     return biz
 
 
+def _chat_session_id(biz: dict) -> str:
+    """Accept the flat and nested create-chat envelopes without guessing IDs."""
+    session = biz.get('chat_session') if 'chat_session' in biz else biz
+    if not isinstance(session, dict):
+        raise ValueError('Invalid DeepSeek chat session object')
+    identity = session.get('id')
+    if (not isinstance(identity, str) or not identity.strip()
+            or identity != identity.strip() or ':' in identity):
+        raise ValueError('Invalid DeepSeek chat session identity')
+    if 'chat_session' in biz and 'id' in biz and biz['id'] != identity:
+        raise ValueError('Conflicting DeepSeek chat session identities')
+    return identity
+
+
 class DeepSeekClient:
     def __init__(
         self,
@@ -92,7 +123,7 @@ class DeepSeekClient:
         if access_guard is not None:
             access_guard.check("deepseek")
         # `allow_interactive=False` makes session resolution non-blocking: it
-        # uses a cached/headless session and raises LoginRequired instead of
+        # uses a cached session and raises LoginRequired instead of
         # opening a browser window. The server passes False (see server/api.py).
         self.session = session or get_session(allow_interactive=allow_interactive)
         self._pow = DeepSeekPow()
@@ -123,23 +154,28 @@ class DeepSeekClient:
         if access_attempt is None and getattr(self, "access_guard", None) is not None:
             with self.access_guard.attempt("deepseek") as attempt:
                 return self.create_chat_session(attempt)
+        self._diagnostic_phase, self._diagnostic_status = "create_chat", None
         if access_attempt is not None:
             access_attempt.dispatch()
         r = self._http.post("/api/v0/chat_session/create", json={})
+        self._diagnostic_status = r.status_code
         r.raise_for_status()
-        return _biz(r.json())["chat_session"]["id"]
+        return _chat_session_id(_biz(r.json()))
 
     def _pow_header(self, target_path: str = COMPLETION_PATH, access_attempt=None) -> str:
         if access_attempt is None and getattr(self, "access_guard", None) is not None:
             with self.access_guard.attempt("deepseek") as attempt:
                 return self._pow_header(target_path, attempt)
+        self._diagnostic_phase, self._diagnostic_status = "challenge", None
         if access_attempt is not None:
             access_attempt.dispatch()
         r = self._http.post(
             "/api/v0/chat/create_pow_challenge", json={"target_path": target_path}
         )
+        self._diagnostic_status = r.status_code
         r.raise_for_status()
         challenge = _biz(r.json())["challenge"]
+        self._diagnostic_phase = "solve_challenge"
         with self._pow_lock:
             return self._pow.make_header(challenge)
 
@@ -226,6 +262,10 @@ class _Stream:
                 if owned:
                     attempt.complete()
             except BaseException as exc:
+                phase = getattr(self._client, "_diagnostic_phase", "before_request")
+                status = getattr(self._client, "_diagnostic_status", None)
+                _log.warning("DeepSeek request stopped: phase=%s http_status=%s reason=%s",
+                             phase, status, _failure_kind(exc))
                 if attempt is not None:
                     attempt.abort(exc)
                 raise
@@ -253,10 +293,12 @@ class _Stream:
         # PoW challenges are short-lived, so solve right before the request.
         headers = {"x-ds-pow-response": self._client._pow_header(access_attempt=self.access_attempt)}
         meta: dict = {}
+        self._client._diagnostic_phase, self._client._diagnostic_status = "completion", None
         self._dispatch()
         with self._client._http.stream(
             "POST", COMPLETION_PATH, json=body, headers=headers
         ) as resp:
+            self._client._diagnostic_status = resp.status_code
             resp.raise_for_status()
             if "text/event-stream" not in resp.headers.get("content-type", "").lower():
                 resp.read()
@@ -265,6 +307,7 @@ class _Stream:
                 except ValueError as exc:
                     raise ProviderRejected() from exc
                 raise ProviderRejected()
+            self._client._diagnostic_phase = "parse_stream"
             yield from _parse_sse(resp.iter_lines(), meta)
         if meta.get("message_id") is not None:
             self._message_id = meta["message_id"]

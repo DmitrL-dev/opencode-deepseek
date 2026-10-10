@@ -255,7 +255,8 @@ class SafetySdkTests(unittest.TestCase):
         for path in ("/api/v0/chat_session/create", "/api/v0/chat/create_pow_challenge", "/api/v0/chat/completion"):
             self.guard.resume("deepseek")
             client, calls = self.deepseek_fixture(path)
-            with self.subTest(path=path), patch.object(api, "get_client", return_value=client) as factory:
+            with self.subTest(path=path), patch.object(api, "get_client", return_value=client) as factory, \
+                    self.assertLogs('deepseek.client', level='WARNING') as diagnostics:
                 for _ in range(2):
                     with self.assertRaises(PermissionDeniedError) as failure:
                         self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
@@ -263,6 +264,24 @@ class SafetySdkTests(unittest.TestCase):
                     self.assertEqual(failure.exception.body["code"], "account_restricted")
                 self.assertEqual(calls.count(path), 1)
                 self.assertEqual(factory.call_count, 1)
+            expected_phase = {'/api/v0/chat_session/create': 'create_chat',
+                              '/api/v0/chat/create_pow_challenge': 'challenge',
+                              '/api/v0/chat/completion': 'completion'}[path]
+            self.assertEqual(len(diagnostics.records), 1)
+            self.assertIn('phase=' + expected_phase + ' http_status=200 reason=account_restricted',
+                          diagnostics.output[0])
+            self.assertNotIn('user is muted', diagnostics.output[0])
+
+    def test_deepseek_transport_diagnostics_do_not_log_exception_text(self):
+        client, calls = self.deepseek_fixture('unused')
+        with patch.object(client._http, 'post', side_effect=httpx.ConnectError('private-token-and-network-detail')), \
+                self.assertLogs('deepseek.client', level='WARNING') as diagnostics:
+            with self.assertRaises(httpx.ConnectError):
+                client.chat('owned fixture')
+        self.assertEqual(calls, [])
+        self.assertEqual(len(diagnostics.records), 1)
+        self.assertIn('phase=create_chat http_status=None reason=transport_error', diagnostics.output[0])
+        self.assertNotIn('private-token', diagnostics.output[0])
 
     def test_stream_error_is_terminal_and_reconnect_is_blocked_before_auth(self):
         for tools in (None, TOOLS):

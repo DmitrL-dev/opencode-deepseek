@@ -24,6 +24,7 @@ def session():
 class SessionTests(unittest.TestCase):
     def test_only_scoped_deepseek_cookies_are_captured_and_sent(self):
         page = Mock()
+        page.url = auth.CHAT_URL
         page.evaluate.side_effect = ["fake-token","audit-agent"]
         context = Mock()
         context.cookies.return_value = [
@@ -39,6 +40,26 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(headers.get("cookie"), "ds=fake-ds")
             self.assertNotIn("cookie", client.build_request("GET","https://unrelated.invalid/").headers)
             self.assertNotIn("ds=fake-ds", client.build_request("GET","http://chat.deepseek.com/").headers.get("cookie", ""))
+
+    def test_capture_never_reads_storage_on_foreign_or_insecure_origins(self):
+        for url in ('https://accounts.google.com/', 'https://chat.deepseek.com.evil.invalid/',
+                    'http://chat.deepseek.com/', 'https://chat.deepseek.com:8000/',
+                    'https://user@chat.deepseek.com/', 'https://chat.deepseek.com:invalid/'):
+            with self.subTest(url=url):
+                page, context = Mock(), Mock()
+                page.url = url
+                self.assertIsNone(auth._capture_from_context(context, page))
+                page.evaluate.assert_not_called()
+                context.cookies.assert_not_called()
+
+    def test_capture_rejects_invalid_token_without_capturing_cookies(self):
+        for token in (None, '', '  ', {}, ['secret'], 123):
+            with self.subTest(token=token):
+                page, context = Mock(), Mock()
+                page.url = auth.CHAT_URL
+                page.evaluate.return_value = token
+                self.assertIsNone(auth._capture_from_context(context, page))
+                context.cookies.assert_not_called()
 
     def test_cookie_names_are_not_collapsed_across_paths(self):
         captured = session()
@@ -139,3 +160,76 @@ with patch("dotenv.load_dotenv",load):
 '''
         output = subprocess.check_output([sys.executable,"-c",code],cwd=auth.ROOT,text=True)
         self.assertEqual(json.loads(output),[7,False,"/tmp/audit-profile"])
+
+
+class ManualInspectionTests(unittest.TestCase):
+    def test_capture_saves_changed_credentials_once_and_closes_on_interrupt(self):
+        first = session()
+        later = auth.Session(first.token, [], first.user_agent, first.captured_at + 10)
+        rotated = auth.Session('rotated-secret', [], first.user_agent, first.captured_at + 20)
+        context, page = Mock(), Mock()
+        context.pages = [page]
+        page.is_closed.return_value = False
+        page.wait_for_timeout.side_effect = [None, None, KeyboardInterrupt]
+        output = io.StringIO()
+        with patch.object(auth, 'sync_playwright') as playwright, \
+                patch.object(auth, '_launch_context', return_value=context) as launch, \
+                patch.object(auth, '_safe_goto') as navigate, \
+                patch.object(auth, '_capture_from_context', side_effect=[first, later, rotated]), \
+                patch.object(auth.Session, 'save', autospec=True) as save, \
+                contextlib.redirect_stdout(output):
+            auth.keep_open(Path('owned-profile'), Path('owned-session'), channel=None)
+        launch.assert_called_once_with(playwright.return_value.__enter__.return_value,
+                                       Path('owned-profile'), False, None, allow_fallback=False)
+        navigate.assert_called_once_with(page, auth.CHAT_URL)
+        self.assertEqual([c.args for c in save.call_args_list],
+                         [(first, Path('owned-session')), (rotated, Path('owned-session'))])
+        context.close.assert_called_once()
+        self.assertNotIn('rotated-secret', output.getvalue())
+        self.assertIn('does not confirm account access', output.getvalue())
+
+    def test_window_close_stops_capture_without_recapturing_or_raising(self):
+        context, page = Mock(), Mock()
+        context.pages = [page]
+        page.is_closed.return_value = False
+
+        def close_window(_):
+            context.on.call_args.args[1]()
+            page.is_closed.return_value = True
+            raise auth.PlaywrightError('private-close-detail')
+
+        page.wait_for_timeout.side_effect = close_window
+        output = io.StringIO()
+        with patch.object(auth, 'sync_playwright'), \
+                patch.object(auth, '_launch_context', return_value=context), \
+                patch.object(auth, '_safe_goto'), \
+                patch.object(auth, '_capture_from_context', return_value=None) as capture, \
+                contextlib.redirect_stdout(output):
+            auth.keep_open()
+        capture.assert_called_once()
+        context.close.assert_called_once()
+        self.assertNotIn('private-close-detail', output.getvalue())
+
+    def test_inspection_never_falls_back_to_another_browser_channel(self):
+        with tempfile.TemporaryDirectory() as directory:
+            playwright = Mock()
+            launch = playwright.chromium.launch_persistent_context
+            launch.side_effect = auth.PlaywrightError('browser unavailable')
+            with self.assertRaises(auth.PlaywrightError):
+                auth._launch_context(playwright, Path(directory), False, 'chrome', allow_fallback=False)
+            launch.assert_called_once()
+
+    def test_cli_inspection_requires_explicit_flag_and_sanitizes_failure(self):
+        with patch.object(auth, 'login', return_value=session()) as login, \
+                patch.object(auth, 'keep_open') as inspect, contextlib.redirect_stdout(io.StringIO()):
+            auth.main([])
+            login.assert_called_once_with(channel='chrome')
+            inspect.assert_not_called()
+            auth.main(['--keep-open', '--channel', 'chromium'])
+            inspect.assert_called_once_with(channel=None)
+        output = io.StringIO()
+        with patch.object(auth, 'keep_open', side_effect=RuntimeError('private-failure-detail')), \
+                contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as failure:
+            auth.main(['--keep-open'])
+        self.assertEqual(failure.exception.code, 1)
+        self.assertNotIn('private-failure-detail', output.getvalue())
