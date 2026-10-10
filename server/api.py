@@ -276,6 +276,21 @@ _MAX_CONTINUATIONS = int(os.getenv("TOOLCALL_MAX_CONTINUATIONS", "0"))
 if _MAX_CONTINUATIONS < 0:
     raise ValueError("TOOLCALL_MAX_CONTINUATIONS must be non-negative")
 
+# One opt-in format correction in the same DeepSeek conversation. This is
+# separate from transport retries and output-limit continuation; neither a
+# rejection nor an uncertain/truncated generation qualifies.
+_FORMAT_REPAIR = os.getenv("TOOLCALL_FORMAT_REPAIR", "0") == "1"
+_FORMAT_REPAIR_PROMPT = (
+    "No tools were executed from your previous reply: its tool-call format was invalid. "
+    "Choose the next response using the task and tool schemas already provided. "
+    "If a tool is necessary, return ONLY one fenced tool_calls block containing a "
+    "complete valid JSON array. Each entry must have name and arguments; ALL input "
+    "fields belong inside the arguments object. Escape string values correctly. "
+    "No commentary before or after the block, and no XML/DSML tags. "
+    "If you intended only an explanation or the work is complete, give plain text "
+    "without a tool_calls block. Do not claim an unexecuted action succeeded."
+)
+
 # Sent to make the model finish an answer its output limit cut off.
 _CONTINUE_PROMPT = (
     "Your previous message was cut off by the output limit before it finished. "
@@ -301,6 +316,26 @@ async def _run_tool_chat(prompt: str, req: ChatCompletionRequest, model_type):
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
+    reply = _chat_with_retry(prompt, req, model_type)
+    try:
+        return _validate_tool_reply(reply, req)
+    except ToolCallError:
+        if not (_FORMAT_REPAIR and model_provider(req.model) == "deepseek"
+                and req.tool_choice != "none" and reply.finish_reason == "stop"
+                and reply.conversation_id):
+            raise
+        _check_cancelled()
+        correction = req.model_copy(update={"conversation_id": reply.conversation_id})
+        corrected = _chat_with_retry(_FORMAT_REPAIR_PROMPT, correction, None)
+        if corrected.finish_reason != "stop":
+            save_tool_failure(corrected, req)
+            raise ToolCallError("The format correction did not finish normally; no calls were returned")
+        # No recursion: a second invalid answer is terminal. The original
+        # batch never escaped validation and cannot be executed twice.
+        return _validate_tool_reply(corrected, req)
+
+
+def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
     """Validate the whole reply; continuation requires opt-in and an output limit.
 
     A missing Markdown fence alone is not evidence of an output limit. A
@@ -308,7 +343,6 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     payload validates, without adding or repairing any JSON characters.
     """
     names = _tool_names(req.tools)
-    reply = _chat_with_retry(prompt, req, model_type)
 
     for attempt in range(_MAX_CONTINUATIONS + 1):
         _check_cancelled()
@@ -321,6 +355,9 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
                     allow_unclosed_fence=reply.finish_reason == "stop",
                     allow_closing_artifacts=reply.finish_reason == "stop",
                     flat_argument_tools=req.tools if reply.finish_reason == "stop" else None)
+                if (_FORMAT_REPAIR and req.tool_choice != "none" and tool_calls is None
+                        and "```tool_calls" in reply.text):
+                    raise ToolCallError("Tool-call markup was mixed with ordinary text; no calls were returned")
                 enforce_tool_choice(req.tool_choice, tool_calls)
                 if tool_calls and reply.finish_reason != "stop":
                     raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")

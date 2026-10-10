@@ -100,6 +100,18 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.prompts.append(prompt)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
+        if self.behavior == "format_correction":
+            answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
+            if len(self.prompts) == 1:
+                answer = "I will read the file.\n" + answer
+            elif len(self.prompts) == 2:
+                self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
+                self.assertEqual(args[:2], ("owned-fixture:2", None))
+            else:
+                self.assertIn("HARNESS_OWNED_FILE_73", prompt)
+                answer = "HARNESS_BRIDGE_OK"
+            attempt.complete()
+            return Reply(answer, "owned-fixture:2")
         if self.behavior in ("flat_tools", "combined_envelopes", "dsml_closers"):
             if len(self.prompts) == 1:
                 answer = block([
@@ -166,6 +178,17 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.prompts), 2)
         self.assertTrue(any(message["role"] == "tool" for message in self.calls[1]["messages"]))
+
+    def test_opt_in_format_correction_executes_native_tool_once(self):
+        self.behavior = "format_correction"
+        with patch.object(api, "_FORMAT_REPAIR", True):
+            result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("HARNESS_BRIDGE_OK", result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 3)
+        results = [m for m in self.calls[1]["messages"] if m["role"] == "tool"]
+        self.assertEqual(len(results), 1)
 
     def test_complete_json_without_closing_wrapper_executes_without_continuations(self):
         self.behavior = "tools_without_fence"
