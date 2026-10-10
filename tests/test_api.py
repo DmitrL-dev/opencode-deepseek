@@ -110,6 +110,25 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fake.chat.call_count, 2)
             continuation.assert_not_called()
 
+    async def test_cancelled_normal_reply_never_starts_format_correction(self):
+        entered, release = threading.Event(), threading.Event()
+        def chat(*args):
+            entered.set()
+            release.wait(timeout=2)
+            return Reply('```tool_calls\n[{"name":"write","arguments":{', "owned:2")
+        fake = Mock()
+        fake.chat.side_effect = chat
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user", content="audit")], tools=TOOLS)
+        with patch.object(api, "_FORMAT_REPAIR", True), patch.object(api, "get_client", return_value=fake):
+            task = asyncio.create_task(api._run_tool_chat("fixture", req, "default"))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            task.cancel()
+            await asyncio.sleep(.01)
+            release.set()
+            result = (await asyncio.gather(task, return_exceptions=True))[0]
+        self.assertIsInstance(result, asyncio.CancelledError)
+        fake.chat.assert_called_once()
+
     async def test_flat_tool_inputs_require_normal_stop_and_respect_tool_choice(self):
         answer = block([{"name": "read", "file_path": "fixture", "offset": 1, "limit": 60},
                         {"name": "bash", "command": "printf fixture", "description": "Print fixture"}])
