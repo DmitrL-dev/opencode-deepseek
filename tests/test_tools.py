@@ -1,4 +1,5 @@
 import json
+import re
 import unittest
 
 from server.openai_format import (
@@ -13,6 +14,41 @@ def block(calls):
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_prompt_examples_are_valid_json_and_require_real_schema_arguments(self):
+        prompt = messages_to_prompt([ChatMessage(role="user", content="edit a file")], tools=[{
+            "type": "function", "function": {"name": "write", "parameters": {
+                "type": "object", "required": ["path", "content"], "properties": {
+                    "path": {"type": "string"}, "content": {"type": "string"}}}}}])
+        examples = re.findall(r"```tool_calls\n(.*?)\n```", prompt, re.DOTALL)
+        self.assertEqual(len(examples), 1)
+        self.assertIsInstance(json.loads(examples[0])[0]["arguments"], dict)
+        self.assertIn("including all required fields", prompt)
+        literal = prompt.split("A valid JSON string example is: ", 1)[1].splitlines()[0]
+        self.assertEqual(json.loads(literal), 'first line\n"quoted text" and a \\backslash')
+
+    def test_json_diagnostics_report_only_category_and_position(self):
+        bodies = [
+            ('[{"name":"write","arguments":{"content":"private\nvalue"}}]',
+             "unescaped_control_character"),
+            ('[{"name":"write","arguments":{"content":"private\\q"}}]', "invalid_escape"),
+            ('[{"name":"write","arguments":{"content":"private', "unterminated_string"),
+            ('[{"name":"write","arguments":{"content":"private",}}]', "invalid_syntax"),
+        ]
+        for body, category in bodies:
+            with self.subTest(category=category), self.assertRaises(ToolCallError) as caught:
+                parse_tool_calls("```tool_calls\n" + body + "\n```", {"write"})
+            message = str(caught.exception)
+            self.assertIn(category, message)
+            self.assertRegex(message, r"line \d+, column \d+")
+            self.assertNotIn("private", message)
+            self.assertIn("automatic replay is disabled", message)
+
+    def test_commands_preserve_escaped_payload_byte_for_byte(self):
+        arguments = {"command": 'printf "%s\\n" "hello"\ncat <<\'EOF\'\n```\nEOF',
+                     "content": 'line 1\r\n\t"quoted" \\path русский'}
+        _, calls = parse_tool_calls(block([{"name": "bash", "arguments": arguments}]), {"bash"})
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), arguments)
+
     def test_examples_and_native_markup_remain_text(self):
         samples = [
             'Do not execute `bash(command="echo audit")`.',

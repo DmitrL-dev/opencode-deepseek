@@ -80,15 +80,22 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
     if not specs:
         return ""
     rendered = "\n".join(json.dumps(s, ensure_ascii=False) for s in specs)
-    example = specs[0]["name"]
+    # Keep even the structural example valid JSON; placeholders are values,
+    # never bare tokens that a model could copy into an executable response.
+    example = json.dumps([{"name": "<advertised_tool_name>",
+                           "arguments": {"<argument_name>": "<argument_value>"}}])
+    escaped_string = json.dumps('first line\n"quoted text" and a \\backslash')
     instructions = (
         "You can call functions (tools). Available tools, given as JSON Schema:\n\n"
         f"{rendered}\n\n"
         "To call one or more tools, your ENTIRE reply must be a single fenced code "
         "block in exactly this format and nothing else:\n\n"
         "```tool_calls\n"
-        '[{"name": "<tool_name>", "arguments": {<arguments>}}]\n'
+        f"{example}\n"
         "```\n\n"
+        "This is a structural example, not a call to copy. Replace the tool name "
+        "and the ENTIRE arguments object using the advertised schema, including "
+        "all required fields. Never emit the angle-bracket placeholders.\n\n"
         "Hard rules:\n"
         "- The fenced `tool_calls` block must be the WHOLE reply. Never write any "
         "text, plan, explanation, or reasoning before or after it.\n"
@@ -96,13 +103,17 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "the block.\n"
         "- Use the exact tool name and an `arguments` object matching that tool's "
         "schema. To call several tools, put multiple objects in the array.\n"
+        "- Emit strict JSON: double-quoted keys and strings, no comments, "
+        "trailing commas, Python literals, or string concatenation.\n"
+        "- Shell commands, patches, and file contents are JSON string values: "
+        "escape every embedded double quote and backslash; encode line breaks "
+        "as \\n, never as literal newlines inside a string. A valid JSON string "
+        f"example is: {escaped_string}\n"
+        "- Keep tool batches small and split large file changes into separate "
+        "complete calls. Check that the JSON array closes before the final fence.\n"
         "- Never use XML/DSML tags such as <tool_call> or <|tool_calls|>.\n"
         "- Only if no tool is needed, answer normally in plain text and do NOT emit "
-        "a tool_calls block.\n\n"
-        f"Example — to use the `{example}` tool, reply with exactly:\n\n"
-        "```tool_calls\n"
-        f'[{{"name": "{example}", "arguments": {{}}}}]\n'
-        "```"
+        "a tool_calls block."
     )
     if _forced_tool_name(tool_choice) is not None:
         instructions += f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
@@ -225,7 +236,9 @@ def parse_tool_calls(
         raise ToolCallError("Expected one complete fenced tool_calls block")
     try:
         data = json.loads(match.group(1))
-    except (json.JSONDecodeError, ValueError) as exc:
+    except json.JSONDecodeError as exc:
+        raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
+    except ValueError as exc:
         raise ToolCallError("The tool_calls block contains invalid JSON") from exc
     if not isinstance(data, list) or not data:
         raise ToolCallError("tool_calls must be a non-empty JSON array")
@@ -242,7 +255,9 @@ def parse_tool_calls(
         if isinstance(args, str):
             try:
                 args = json.loads(args)
-            except (json.JSONDecodeError, ValueError) as exc:
+            except json.JSONDecodeError as exc:
+                raise _json_tool_error("Tool arguments contain invalid JSON", exc) from exc
+            except ValueError as exc:
                 raise ToolCallError("Tool arguments contain invalid JSON") from exc
         if not isinstance(args, dict):
             raise ToolCallError("Tool arguments must be a JSON object")
@@ -256,6 +271,23 @@ def parse_tool_calls(
             "function": {"name": name, "arguments": arguments},
         })
     return "", calls
+
+
+def _json_tool_error(message: str, exc: json.JSONDecodeError) -> ToolCallError:
+    # Only fixed categories and numeric positions leave the parser. Decoder
+    # messages/documents can contain command text or secrets; never echo them.
+    if exc.msg.startswith("Invalid control character"):
+        reason = "unescaped_control_character"
+    elif exc.msg.startswith("Invalid \\escape"):
+        reason = "invalid_escape"
+    elif exc.msg.startswith("Unterminated string"):
+        reason = "unterminated_string"
+    else:
+        reason = "invalid_syntax"
+    return ToolCallError(
+        f"{message} ({reason}; line {exc.lineno}, column {exc.colno}). "
+        "No tools from this reply were returned; automatic replay is disabled."
+    )
 
 
 def looks_truncated(text: str, allowed_names: Optional[Iterable[str]] = None) -> bool:
