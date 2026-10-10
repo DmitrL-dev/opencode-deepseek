@@ -268,6 +268,7 @@ def parse_tool_calls(
     text: str, allowed_names: Optional[Iterable[str]] = None, *,
     allow_unclosed_fence: bool = False,
     allow_closing_artifacts: bool = False,
+    allow_missing_array_closer: bool = False,
     flat_argument_tools: Optional[List[dict]] = None,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, never examples embedded in prose.
@@ -276,6 +277,8 @@ def parse_tool_calls(
     Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text.
     Optional normal-stop tolerances cover an absent final Markdown fence and
     known closing-only artifacts after a complete array, independently.
+    A caller may permit a missing outer array closer only after all objects
+    have closed; no nested delimiter or argument is repaired.
     Invalid JSON values and partial batches fail closed.
     Normal-stop callers may also supply schemas for an unambiguous flat input
     envelope. No input values or missing fields are inferred.
@@ -297,7 +300,17 @@ def parse_tool_calls(
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
-        if (allow_closing_artifacts
+        if (allow_missing_array_closer and exc.msg == "Expecting ',' delimiter"
+                and exc.pos == len(payload) and payload.lstrip().startswith("[")
+                and payload.rstrip().endswith("}")):
+            # A normal-stop reply can omit exactly the outer array closer.
+            # JSON must then parse in full: never close a string, argument
+            # object, nested array, trailing comma, or partial batch member.
+            try:
+                data = json.loads(payload.rstrip() + "]")
+            except (ValueError, TypeError):
+                raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
+        elif (allow_closing_artifacts
                 and exc.msg == "Extra data"
                 and _CLOSING_ARTIFACTS_RE.fullmatch(payload[exc.pos:].strip())):
             # Observed FINISHED replies: a complete array followed by a stray

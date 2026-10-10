@@ -431,6 +431,10 @@ What was done for reliability:
   invalid arguments, or a violated `tool_choice` produce `502 invalid_tool_response`;
 - continuations default to off. Explicit opt-in applies only to a provider-confirmed
   output limit, never a missing wrapper alone; partial calls are never returned;
+- after a normal stop, exactly one absent outer array `]` can be restored only
+  if every call object and all nested arguments are already closed and the
+  resulting entire JSON validates. Trailing commas, partial members, strings
+  and nested delimiters are never repaired. This needs no additional generation;
 - the instruction was hardened (no prose + an example + a reminder at the end);
 - a discipline plugin adds a late system instruction.
 

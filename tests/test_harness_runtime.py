@@ -130,13 +130,15 @@ class HarnessRuntimeTests(unittest.TestCase):
                 answer = "HARNESS_BRIDGE_OK"
             attempt.complete()
             return Reply(answer, "owned-fixture:2")
-        if self.behavior in ("tools", "tools_without_fence", "write_without_fence", "redundant_closer") and len(self.prompts) == 1:
+        if self.behavior in ("tools", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if self.behavior == "tools_without_fence":
                 answer = answer[:-4]
             elif self.behavior == "redundant_closer":
                 answer = answer[:-4] + '}\n```'
+            elif self.behavior == "missing_array_closer":
+                answer = answer[:-5] + answer[-4:]
         elif self.behavior == "malformed_tools":
             answer = ('```tool_calls\n[{"name":"read","arguments":'
                       '{"file_path":"CONFIDENTIAL_TOOL_PAYLOAD_927\npath"}}]\n```')
@@ -144,7 +146,7 @@ class HarnessRuntimeTests(unittest.TestCase):
             answer = block([{"name": "write", "arguments": {
                 "file_path": str(self.workspace / "fixture.txt"), "content": FILE_PAYLOAD}}])[:-4]
         else:
-            if self.behavior in ("tools", "tools_without_fence", "redundant_closer"):
+            if self.behavior in ("tools", "tools_without_fence", "redundant_closer", "missing_array_closer"):
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
             answer = "HARNESS_BRIDGE_OK"
         attempt.complete()
@@ -211,6 +213,15 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.prompts), 2)
         self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_missing_outer_array_closer_executes_once_without_correction(self):
+        self.behavior = 'missing_array_closer'
+        with patch.object(api, '_FORMAT_REPAIR', True):
+            result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
 
     def test_flat_read_and_bash_batch_round_trip_without_replay(self):
         self.behavior = 'flat_tools'
