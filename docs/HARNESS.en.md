@@ -147,9 +147,35 @@ after a manual website check; see [account safety](ACCOUNT_SAFETY.md). All
 providers have account limits, including Chinese models. Tool continuations can
 consume another message.
 
+After the repeated October 10 restriction, live qualification is stopped. Keep `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge now resumes saved conversations and sends only new results; unknown history stops without a new-chat fallback. Durable load budgets and a 20-reply conversation cap apply. See [account safety](ACCOUNT_SAFETY.md).
+
+For unattended DeepSeek goals, optionally set `TOOLCALL_FORMAT_REPAIR=1` in
+the bridge process environment and restart the bridge. After a normally
+completed malformed JSON reply, commentary mixed with a tool block, or unsupported
+DSML, the bridge asks once for a newly formatted response in the same conversation.
+The original calls are not executed and argument values are never guessed.
+A second invalid reply is terminal; quota/account refusals, cancellation and
+output-limit replies do not trigger correction. The additional generation costs
+quota and observes the normal request interval. This setting defaults to off.
+
+Create the goal in the repository's own workspace: Workspace Write permissions
+apply to that directory. A successful text response alone does not establish
+that tools ran or the goal completed.
+
+On October 10, 2026, live DeepSeek Expert goals were tested in Harness 0.2.0-rc.2
+with this option enabled. A regression-test coding goal finished in 4 minutes
+5 seconds and 23 steps: the model fixed its failing assertion and completed the
+goal itself. An intermediate task exposed two further response-handling defects:
+a missing outer `]` and a false positive on a protocol mention in the final text.
+Both were reproduced offline and fixed. The final fresh control goal on the
+fixed bridge finished in 64 seconds and 7 steps: 67 tests, diff validation,
+goal completion and a final answer. Neither successful run received manual
+steering after its initial task; no subagents or runtime browser were used.
+This qualifies bounded tasks, not error-free execution of every possible goal.
+
 ## Offline verification
 
-Verified with installed Harness **0.1.7-rc.1** and **0.2.0-rc.2**: four real CLI scenarios and setup
+The current suite was verified with installed Harness **0.2.0-rc.2**: 13 real CLI scenarios and setup
 tests. For an owned HTTP 503 fixture, the default policy made six requests;
 the bridge configuration made one. No real accounts were used.
 

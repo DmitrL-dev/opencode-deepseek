@@ -65,7 +65,7 @@ class OpenAISdkTests(unittest.TestCase):
         self.assertEqual(calls[0].function.name, "write")
         self.assertEqual(chunks[-1].choices[0].finish_reason, "tool_calls")
 
-    def test_upstream_eof_raises_sdk_error_after_partial_text(self):
+    def test_upstream_eof_is_buffered_without_publishing_partial_history(self):
         fake = mock_client(snapshot("partial"))
         self.addCleanup(fake.close)
         seen = []
@@ -75,7 +75,7 @@ class OpenAISdkTests(unittest.TestCase):
                 with self.assertRaises(APIError):
                     for chunk in stream:
                         seen.append(chunk)
-        self.assertEqual("".join(chunk.choices[0].delta.content or "" for chunk in seen), "partial")
+        self.assertEqual("".join(chunk.choices[0].delta.content or "" for chunk in seen), "")
         self.assertFalse(any(chunk.choices[0].finish_reason for chunk in seen))
 
     def test_invalid_tool_policy_is_an_sdk_http_error(self):

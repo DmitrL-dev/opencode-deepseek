@@ -50,7 +50,7 @@ requests. Restrictions, quotas, security denials and uncertain outcomes persist
 a provider pause across restarts. HTTP errors use `403` and `retryable: false`.
 Once SSE headers are sent, the first failure is an error event; the next attempt
 returns `403` before accessing the account. Attempts and tool continuations are
-spaced by at least 10 seconds by default; pacing does not guarantee quota or
+spaced by at least 30 seconds by default; pacing does not guarantee quota or
 terms compliance.
 
 Inspect pauses with `python -m providers.access status`. Resume a provider using

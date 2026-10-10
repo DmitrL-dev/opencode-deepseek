@@ -23,6 +23,7 @@ from integrations.harness import ROUTE, catalog_models, patch_document, render, 
 from providers import access
 from providers.access import AccessGuard, ProviderRejected
 from server import api
+from server.conversation_cache import ConversationCache
 from tests.test_tools import block
 
 FILE_PAYLOAD = 'line 1\n"quoted" and \\backslash\n```python\nprint("fixture")\n```\n'
@@ -38,9 +39,10 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.workspace.mkdir()
         (self.workspace / "fixture.txt").write_text("HARNESS_OWNED_FILE_73\n")
         self.guard = AccessGuard(self.root / "pauses.json", interval=0)
-        self.calls, self.prompts = [], []
+        self.calls, self.prompts, self.conversation_args = [], [], []
         self.behavior = "text"
         self.addCleanup(patch.stopall)
+        patch.object(api, "conversation_cache", ConversationCache(self.root / "conversations.sqlite3")).start()
         patch.object(api, "guard", self.guard).start()
         patch.object(access, "guard", self.guard).start()
         patch.dict(api.MODEL_MAP, {"deepseek-chat": "default"}, clear=True).start()
@@ -98,13 +100,48 @@ class HarnessRuntimeTests(unittest.TestCase):
         attempt = access.current_attempt("deepseek")
         attempt.dispatch()
         self.prompts.append(prompt)
+        self.conversation_args.append(args)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior in ("tools", "tools_without_fence", "write_without_fence") and len(self.prompts) == 1:
+        if self.behavior in ("format_correction", "dsml_correction"):
+            answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
+            if len(self.prompts) == 1:
+                answer = "I will read the file.\n" + answer
+                if self.behavior == "dsml_correction":
+                    answer = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="read">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'
+            elif len(self.prompts) == 2:
+                self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
+                self.assertEqual(args[:2], ("owned-fixture:2", None))
+            else:
+                self.assertIn("HARNESS_OWNED_FILE_73", prompt)
+                answer = "HARNESS_BRIDGE_OK. Validated the ` ```tool_calls ` format."
+            attempt.complete()
+            return Reply(answer, "owned-fixture:2")
+        if self.behavior in ("flat_tools", "combined_envelopes", "dsml_closers"):
+            if len(self.prompts) == 1:
+                answer = block([
+                    {"name": "read", "file_path": str(self.workspace / "fixture.txt"), "offset": 1, "limit": 60},
+                    {"name": "bash", "command": "printf HARNESS_FLAT_COMMAND_29",
+                     "description": "Print the owned fixture marker"}])
+                if self.behavior == "combined_envelopes":
+                    answer = answer[:-4] + '}'
+                elif self.behavior == "dsml_closers":
+                    answer = answer[:-4] + '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
+            else:
+                self.assertIn("HARNESS_OWNED_FILE_73", prompt)
+                self.assertIn("HARNESS_FLAT_COMMAND_29", prompt.rsplit("Tool (bash,", 1)[1])
+                answer = "HARNESS_BRIDGE_OK"
+            attempt.complete()
+            return Reply(answer, "owned-fixture:2")
+        if self.behavior in ("tools", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if self.behavior == "tools_without_fence":
                 answer = answer[:-4]
+            elif self.behavior == "redundant_closer":
+                answer = answer[:-4] + '}\n```'
+            elif self.behavior == "missing_array_closer":
+                answer = answer[:-5] + answer[-4:]
         elif self.behavior == "malformed_tools":
             answer = ('```tool_calls\n[{"name":"read","arguments":'
                       '{"file_path":"CONFIDENTIAL_TOOL_PAYLOAD_927\npath"}}]\n```')
@@ -112,20 +149,20 @@ class HarnessRuntimeTests(unittest.TestCase):
             answer = block([{"name": "write", "arguments": {
                 "file_path": str(self.workspace / "fixture.txt"), "content": FILE_PAYLOAD}}])[:-4]
         else:
-            if self.behavior in ("tools", "tools_without_fence"):
+            if self.behavior in ("tools", "tools_without_fence", "redundant_closer", "missing_array_closer"):
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
             answer = "HARNESS_BRIDGE_OK"
         attempt.complete()
         return Reply(answer, "owned-fixture:2")
 
-    def run_harness(self):
+    def run_harness(self, prompt="Run the owned bridge fixture."):
         # Do not inherit account credentials, proxies, a user's DSH_HOME, or a
         # user's workspace .env. HOME is isolated as well as Harness storage.
         env = {key: os.environ[key] for key in ("PATH", "TMPDIR", "SYSTEMROOT", "ELECTRON_RUN_AS_NODE") if key in os.environ}
         env.update(HOME=str(self.root), DSH_HOME=str(self.root / "dsh"),
                    DSH_TELEMETRY_MODE="DISABLED", NO_PROXY="127.0.0.1,::1")
         result = subprocess.run(self.command + ["--profile", "headless", "--patch", str(self.overlay),
-                                               "--json", "Run the owned bridge fixture."],
+                                               "--json", prompt],
                                 cwd=self.workspace, env=env, capture_output=True, text=True, timeout=90)
         # Only owned synthetic messages can enter this transcript.
         self.assertNotIn("MISSING_CREDENTIAL", result.stdout + result.stderr)
@@ -149,6 +186,19 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.prompts), 2)
         self.assertTrue(any(message["role"] == "tool" for message in self.calls[1]["messages"]))
 
+    def test_opt_in_format_correction_executes_native_tool_once(self):
+        for self.behavior in ("format_correction", "dsml_correction"):
+            with self.subTest(behavior=self.behavior), patch.object(api, "_FORMAT_REPAIR", True):
+                self.calls.clear()
+                self.prompts.clear()
+                result = self.run_harness()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("HARNESS_BRIDGE_OK", result.stdout)
+                self.assertEqual(len(self.calls), 2)
+                self.assertEqual(len(self.prompts), 3)
+                results = [m for m in self.calls[1]["messages"] if m["role"] == "tool"]
+                self.assertEqual(len(results), 1)
+
     def test_complete_json_without_closing_wrapper_executes_without_continuations(self):
         self.behavior = "tools_without_fence"
         result = self.run_harness()
@@ -156,6 +206,61 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertIn("HARNESS_BRIDGE_OK", result.stdout)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_redundant_object_closer_round_trip_without_replay(self):
+        self.behavior = 'redundant_closer'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_missing_outer_array_closer_executes_once_without_correction(self):
+        self.behavior = 'missing_array_closer'
+        with patch.object(api, '_FORMAT_REPAIR', True):
+            result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+
+    def test_flat_read_and_bash_batch_round_trip_without_replay(self):
+        self.behavior = 'flat_tools'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_native_followup_reuses_chat_and_omits_old_prompt(self):
+        self.behavior = 'tools'
+        result = self.run_harness('Explore fixture. INITIAL_CONTEXT_SENT_ONCE_84')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.conversation_args), 2)
+        self.assertEqual(self.conversation_args[0][:2], (None, 'default'))
+        self.assertEqual(self.conversation_args[1][:2], ('owned-fixture:2', None))
+        self.assertIn('INITIAL_CONTEXT_SENT_ONCE_84', self.prompts[0])
+        self.assertNotIn('INITIAL_CONTEXT_SENT_ONCE_84', self.prompts[1])
+        self.assertIn('HARNESS_OWNED_FILE_73', self.prompts[1])
+
+    def test_combined_envelope_errors_complete_a_native_tool_round_trip(self):
+        self.behavior = 'combined_envelopes'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_dsml_closing_artifacts_complete_a_native_tool_round_trip(self):
+        self.behavior = 'dsml_closers'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
         self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
 
     def test_native_write_preserves_quoted_multiline_content_without_closing_wrapper(self):

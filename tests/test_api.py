@@ -14,9 +14,10 @@ import anyio
 from deepseek.auth import LoginRequired
 from deepseek.client import Reply
 from server import api
+from server.openai_format import messages_to_prompt
 from server.schemas import ChatCompletionRequest, ChatMessage
 from tests.test_stream import event, mock_client, snapshot
-from tests.test_tools import block
+from tests.test_tools import block, FLAT_TOOLS
 from tests.support import isolated_access
 from providers.access import ProviderRejected
 
@@ -56,6 +57,162 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
 
+    async def test_final_report_can_mention_tool_markup_without_correction(self):
+        replies = [
+            'Готово. Цель закрыта. Модель возвращает валидный ` ```tool_calls ` блок.\nВсе тесты прошли.',
+            'The literal <｜｜DSML｜｜ calls> is unsupported syntax, not a request.',
+            '```text\nThe tool_calls field was validated.\n```',
+        ]
+        for answer in replies:
+            for stream in (False, True):
+                fake = Mock()
+                fake.chat.return_value = Reply(answer, 'owned:2')
+                with patch.object(api, '_FORMAT_REPAIR', True), patch.object(api, 'get_client', return_value=fake):
+                    response = await self.post(tools=TOOLS, stream=stream)
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn('"error":', response.text)
+                self.assertNotIn('"tool_calls":', response.text)
+                if not stream:
+                    self.assertEqual(response.json()['choices'][0]['message']['content'], answer)
+                fake.chat.assert_called_once()
+
+    async def test_missing_outer_array_closer_is_normalized_without_generation(self):
+        text = '```tool_calls\n' + json.dumps([{"name": "bash", "arguments": {"command": "printf fixture"}}])[:-1] + '\n```'
+        for finish in ('stop', 'length'):
+            for stream in (False, True):
+                fake = Mock()
+                fake.chat.return_value = Reply(text, 'owned:2', finish)
+                with patch.object(api, "get_client", return_value=fake), patch.object(api, "_MAX_CONTINUATIONS", 0):
+                    response = await self.post(tools=TOOLS, stream=stream)
+                fake.chat.assert_called_once()
+                if finish == 'stop':
+                    self.assertIn('"tool_calls":', response.text)
+                    self.assertNotIn('"error":', response.text)
+                else:
+                    self.assertIn('"error":', response.text)
+                    self.assertNotIn('"tool_calls":', response.text)
+
+    async def test_opt_in_format_correction_is_bounded_and_preserves_validated_calls(self):
+        good = block([{"name": "bash", "arguments": {"command": "printf verified"}}])
+        broken = '```tool_calls\n[{"name":"write","arguments":{}},'
+        for first in (broken, 'I will run it.\n' + good,
+                      '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="bash">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'):
+            for stream in (False, True):
+                for corrected in (good, broken, 'Finished without tools.'):
+                    with self.subTest(first=first, stream=stream, corrected=corrected):
+                        fake = Mock()
+                        fake.chat.side_effect = [Reply(first, "owned:2"), Reply(corrected, "owned:4")]
+                        with patch.object(api, "_FORMAT_REPAIR", True), \
+                                patch.object(api, "get_client", return_value=fake), \
+                                patch.object(api, "save_tool_failure"):
+                            response = await self.post(tools=TOOLS, stream=stream)
+                        self.assertEqual(fake.chat.call_count, 2)
+                        self.assertEqual(fake.chat.call_args.args[1:3], ("owned:2", None))
+                        if corrected == good:
+                            self.assertIn('"tool_calls":', response.text)
+                            self.assertNotIn('"error":', response.text)
+                        elif corrected == broken:
+                            self.assertIn('"error":', response.text)
+                            self.assertNotIn('"tool_calls":', response.text)
+                        else:
+                            self.assertIn('Finished without tools.', response.text)
+
+    async def test_format_correction_never_retries_refusals_or_uncertain_outputs(self):
+        broken = '```tool_calls\n[{"name":"write","arguments":{'
+        cases = [Reply(broken, "owned:2", "length"), Reply(broken, ""),
+                 ProviderRejected("account_restricted")]
+        for initial in cases:
+            fake = Mock()
+            fake.chat.side_effect = [initial]
+            with patch.object(api, "_FORMAT_REPAIR", True), \
+                    patch.object(api, "get_client", return_value=fake), \
+                    patch.object(api, "save_tool_failure"):
+                response = await self.post(tools=TOOLS)
+            self.assertIn('"error":', response.text)
+            fake.chat.assert_called_once()
+
+    async def test_format_correction_stops_on_correction_refusal_or_output_limit(self):
+        broken = '```tool_calls\n[{"name":"write","arguments":{'
+        for correction in (Reply(broken, "owned:4", "length"), ProviderRejected("quota_exceeded")):
+            fake = Mock()
+            fake.chat.side_effect = [Reply(broken, "owned:2"), correction]
+            with patch.object(api, "_FORMAT_REPAIR", True), \
+                    patch.object(api, "_MAX_CONTINUATIONS", 3), \
+                    patch.object(api, "get_client", return_value=fake), \
+                    patch.object(api, "save_tool_failure"), \
+                    patch.object(api, "_continue_reply") as continuation:
+                response = await self.post(tools=TOOLS)
+            self.assertIn('"error":', response.text)
+            self.assertNotIn('"tool_calls":', response.text)
+            self.assertEqual(fake.chat.call_count, 2)
+            continuation.assert_not_called()
+
+    async def test_cancelled_normal_reply_never_starts_format_correction(self):
+        entered, release = threading.Event(), threading.Event()
+        def chat(*args):
+            entered.set()
+            release.wait(timeout=2)
+            return Reply('```tool_calls\n[{"name":"write","arguments":{', "owned:2")
+        fake = Mock()
+        fake.chat.side_effect = chat
+        req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user", content="audit")], tools=TOOLS)
+        with patch.object(api, "_FORMAT_REPAIR", True), patch.object(api, "get_client", return_value=fake):
+            task = asyncio.create_task(api._run_tool_chat("fixture", req, "default"))
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            task.cancel()
+            await asyncio.sleep(.01)
+            release.set()
+            result = (await asyncio.gather(task, return_exceptions=True))[0]
+        self.assertIsInstance(result, asyncio.CancelledError)
+        fake.chat.assert_called_once()
+
+    async def test_enabled_format_repair_never_generates_again_for_tool_choice_none(self):
+        # Regression: with TOOLCALL_FORMAT_REPAIR enabled a policy violation is
+        # terminal. tool_choice="none" forbids tool calls outright, so a model
+        # that returns a tool_calls block must produce exactly one generation
+        # in both response modes, and the calls must never reach the client.
+        call = block([{"name": "bash", "arguments": {"command": "printf audit"}}])
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                fake = Mock()
+                fake.chat.return_value = Reply(call, "owned:2", "stop")
+                with patch.object(api, "_FORMAT_REPAIR", True), \
+                        patch.object(api, "get_client", return_value=fake), \
+                        patch.object(api, "save_tool_failure") as diagnostic, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    response = await self.post(tools=TOOLS, tool_choice="none", stream=stream)
+                error = sse_objects(response.text)[0]["error"] if stream else response.json()["error"]
+                self.assertEqual(error["type"], "invalid_tool_response")
+                self.assertEqual(fake.chat.call_args.args[0], messages_to_prompt(
+                    [ChatMessage(role="user", content="audit")], TOOLS, "none"))
+                fake.chat.assert_called_once()
+                self.assertNotIn('"tool_calls":', response.text)
+                self.assertNotIn('"choices":', response.text)
+                self.assertNotIn(api._FORMAT_REPAIR_PROMPT, fake.chat.call_args.args[0])
+                diagnostic.assert_called_once()
+                self.assertEqual(diagnostic.call_args.args[0].text, call)
+
+    async def test_flat_tool_inputs_require_normal_stop_and_respect_tool_choice(self):
+        answer = block([{"name": "read", "file_path": "fixture", "offset": 1, "limit": 60},
+                        {"name": "bash", "command": "printf fixture", "description": "Print fixture"}])
+        for finish in ('stop', 'length'):
+            for policy in ('auto', 'none', {"type": "function", "function": {"name": "read"}}):
+                for stream in (False, True):
+                    with self.subTest(finish=finish, policy=policy, stream=stream):
+                        fake = Mock()
+                        fake.chat.return_value = Reply(answer, 'fixture:2', finish)
+                        with patch.object(api, 'get_client', return_value=fake), \
+                                patch.object(api, '_continue_reply') as continuation:
+                            response = await self.post(tools=FLAT_TOOLS, tool_choice=policy, stream=stream)
+                        if finish == 'stop' and policy == 'auto':
+                            self.assertNotIn('"error":', response.text)
+                            self.assertIn('"tool_calls":', response.text)
+                        else:
+                            self.assertIn('"error":', response.text)
+                            self.assertNotIn('"tool_calls":', response.text)
+                        fake.chat.assert_called_once()
+                        continuation.assert_not_called()
+
     async def test_malformed_json_batch_has_safe_diagnostics_and_no_replay(self):
         # A valid first call must not escape a batch with a malformed second one.
         reply = ('```tool_calls\n[{"name":"bash","arguments":{"command":"echo ok"}},'
@@ -66,6 +223,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 fake.chat.return_value = Reply(reply, "fake:2")
                 with patch.object(api, "get_client", return_value=fake), \
                         patch.object(api, "_continue_reply") as continuation, \
+                        patch.object(api, "save_tool_failure") as diagnostic, \
                         patch.object(api, "_debug_toolcalls", return_value=False), \
                         contextlib.redirect_stdout(io.StringIO()) as log:
                     response = await self.post(tools=TOOLS, stream=stream)
@@ -76,6 +234,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('"tool_calls":', response.text)
                 fake.chat.assert_called_once()
                 continuation.assert_not_called()
+                diagnostic.assert_called_once()
+                self.assertEqual(diagnostic.call_args.args[0].text, reply)
 
     async def test_concurrent_http_requests_queue_behind_a_live_attempt(self):
         entered, release = threading.Event(), threading.Event()
@@ -227,6 +387,46 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             fake.chat.assert_called_once()
             continuation.assert_not_called()
 
+    async def test_observed_redundant_closer_requires_normal_stop_and_tool_policy(self):
+        text = block([{"name": "bash", "arguments": {"command": "echo fixture"}}])[:-4] + '}\n```'
+        for finish in ('stop', 'length'):
+            for policy in ('auto', 'none'):
+                for stream in (False, True):
+                    with self.subTest(finish=finish, policy=policy, stream=stream):
+                        fake = Mock()
+                        fake.chat.return_value = Reply(text, 'fake:2', finish)
+                        with patch.object(api, 'get_client', return_value=fake), \
+                                patch.object(api, '_continue_reply') as continuation:
+                            response = await self.post(tools=TOOLS, tool_choice=policy, stream=stream)
+                        if finish == 'stop' and policy == 'auto':
+                            self.assertNotIn('"error":', response.text)
+                            self.assertIn('"tool_calls":', response.text)
+                        else:
+                            self.assertIn('"error":', response.text)
+                            self.assertNotIn('"tool_calls":', response.text)
+                        fake.chat.assert_called_once()
+                        continuation.assert_not_called()
+
+    async def test_combined_envelope_errors_require_stop_in_both_response_modes(self):
+        answer = '```tool_calls\n' + json.dumps([
+            {"name": "bash", "command": "printf fixture", "description": "Print fixture"}]) + '}'
+        for finish in ('stop', 'length'):
+            for stream in (False, True):
+                with self.subTest(finish=finish, stream=stream):
+                    fake = Mock()
+                    fake.chat.return_value = Reply(answer, 'fixture:2', finish)
+                    with patch.object(api, 'get_client', return_value=fake), \
+                            patch.object(api, '_continue_reply') as continuation:
+                        response = await self.post(tools=FLAT_TOOLS, stream=stream)
+                    if finish == 'stop':
+                        self.assertIn('"tool_calls":', response.text)
+                        self.assertNotIn('"error":', response.text)
+                    else:
+                        self.assertNotIn('"tool_calls":', response.text)
+                        self.assertIn('"error":', response.text)
+                    fake.chat.assert_called_once()
+                    continuation.assert_not_called()
+
     async def test_unfinished_json_after_normal_stop_never_requests_continuation(self):
         fake = Mock()
         fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{', "fake:2")
@@ -295,6 +495,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                             raise auth_error()
                             yield
                     old.stream.return_value = BrokenStream()
+                old.chat.side_effect = lambda *args: list(old.stream())
                 new.stream.return_value = TextStream()
                 with patch.object(api,"get_client",side_effect=[old,new]) as get_client:
                     response = await self.post(stream=True)
@@ -652,7 +853,7 @@ class RefreshAndStartupTests(unittest.TestCase):
     def test_rejected_stale_client_reuses_already_refreshed_client(self):
         old, current = Mock(),Mock()
         current.session.age = 0
-        with patch.object(api,"_client",current), patch.object(api,"_build_client") as build:
+        with patch.object(api.conversation_cache, "account_identity", return_value="isolated"), patch.object(api,"_client",current), patch.object(api,"_client_identity", "isolated"), patch.object(api,"_build_client") as build:
             self.assertIs(api.get_client(True,rejected_client=old),current)
             build.assert_not_called()
 
