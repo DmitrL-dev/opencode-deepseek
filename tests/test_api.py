@@ -16,7 +16,7 @@ from deepseek.client import Reply
 from server import api
 from server.schemas import ChatCompletionRequest, ChatMessage
 from tests.test_stream import event, mock_client, snapshot
-from tests.test_tools import block
+from tests.test_tools import block, FLAT_TOOLS
 from tests.support import isolated_access
 from providers.access import ProviderRejected
 
@@ -55,6 +55,27 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
+
+    async def test_flat_tool_inputs_require_normal_stop_and_respect_tool_choice(self):
+        answer = block([{"name": "read", "file_path": "fixture", "offset": 1, "limit": 60},
+                        {"name": "bash", "command": "printf fixture", "description": "Print fixture"}])
+        for finish in ('stop', 'length'):
+            for policy in ('auto', 'none', {"type": "function", "function": {"name": "read"}}):
+                for stream in (False, True):
+                    with self.subTest(finish=finish, policy=policy, stream=stream):
+                        fake = Mock()
+                        fake.chat.return_value = Reply(answer, 'fixture:2', finish)
+                        with patch.object(api, 'get_client', return_value=fake), \
+                                patch.object(api, '_continue_reply') as continuation:
+                            response = await self.post(tools=FLAT_TOOLS, tool_choice=policy, stream=stream)
+                        if finish == 'stop' and policy == 'auto':
+                            self.assertNotIn('"error":', response.text)
+                            self.assertIn('"tool_calls":', response.text)
+                        else:
+                            self.assertIn('"error":', response.text)
+                            self.assertNotIn('"tool_calls":', response.text)
+                        fake.chat.assert_called_once()
+                        continuation.assert_not_called()
 
     async def test_malformed_json_batch_has_safe_diagnostics_and_no_replay(self):
         # A valid first call must not escape a batch with a malformed second one.

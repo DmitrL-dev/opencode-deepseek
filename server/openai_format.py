@@ -102,7 +102,8 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "- Never describe the action you are about to take — perform it by emitting "
         "the block.\n"
         "- Use the exact tool name and an `arguments` object matching that tool's "
-        "schema. To call several tools, put multiple objects in the array.\n"
+        "schema. Keep all input fields inside `arguments`, never beside `name`. "
+        "To call several tools, put multiple objects in the array.\n"
         "- Emit strict JSON: double-quoted keys and strings, no comments, "
         "trailing commas, Python literals, or string concatenation.\n"
         "- Shell commands, patches, and file contents are JSON string values: "
@@ -219,10 +220,37 @@ def enforce_tool_choice(tool_choice, tool_calls: Optional[List[dict]]) -> None:
         raise ToolCallError(f"The model called a tool other than the required '{forced}'")
 
 
+def _flat_tool_arguments(item: dict, tools: Optional[List[dict]]) -> Optional[dict]:
+    """Move explicitly declared input fields into a missing arguments wrapper.
+
+    This changes only the envelope, never values or field names. The executor
+    remains responsible for validating values against its full input schema.
+    Ambiguous schemas and undeclared fields cannot authorize normalization.
+    """
+    if any(key in item for key in ("arguments", "function", "type", "id")):
+        return None
+    specs = [spec for spec in _tool_specs(tools) if spec["name"] == item.get("name")]
+    if len(specs) != 1:
+        return None
+    schema = specs[0]["parameters"]
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    properties, required = schema.get("properties"), schema.get("required", [])
+    if (not isinstance(properties, dict) or not isinstance(required, list)
+            or not all(isinstance(key, str) for key in required)
+            or set(properties) & {"name", "arguments", "function", "type", "id"}):
+        return None
+    arguments = {key: value for key, value in item.items() if key != "name"}
+    if not arguments or not set(arguments) <= properties.keys() or not set(required) <= arguments.keys():
+        return None
+    return arguments
+
+
 def parse_tool_calls(
     text: str, allowed_names: Optional[Iterable[str]] = None, *,
     allow_unclosed_fence: bool = False,
     allow_redundant_closer: bool = False,
+    flat_argument_tools: Optional[List[dict]] = None,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, never examples embedded in prose.
 
@@ -231,6 +259,8 @@ def parse_tool_calls(
     Optional normal-stop tolerances cover only an absent final Markdown fence
     or one redundant object closer after a complete array, never both at once.
     Invalid JSON values and partial batches fail closed.
+    Normal-stop callers may also supply schemas for an unambiguous flat input
+    envelope in a closed block. No input values or missing fields are inferred.
     """
     stripped = (text or "").strip()
     if not stripped.startswith("```tool_calls"):
@@ -268,10 +298,17 @@ def parse_tool_calls(
         if not isinstance(item, dict):
             raise ToolCallError("Each tool call must be an object")
         fn = item.get("function") if isinstance(item.get("function"), dict) else item
+        if fn is not item:
+            if set(item) - {"id", "type", "function"} or set(fn) - {"name", "arguments"}:
+                raise ToolCallError("Tool call contains ambiguous envelope fields")
+        elif "arguments" in item and set(item) - {"id", "type", "name", "arguments"}:
+            raise ToolCallError("Tool call contains ambiguous envelope fields")
         name = fn.get("name")
         if not isinstance(name, str) or not name or (names is not None and name not in names):
             raise ToolCallError("The model called an unadvertised tool")
         args = fn.get("arguments")
+        if "arguments" not in fn and fn is item and match is not None:
+            args = _flat_tool_arguments(item, flat_argument_tools)
         if isinstance(args, str):
             try:
                 args = json.loads(args)

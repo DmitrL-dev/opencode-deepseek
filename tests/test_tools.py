@@ -13,7 +13,51 @@ def block(calls):
     return "```tool_calls\n" + json.dumps(calls) + "\n```"
 
 
+FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
+    "type": "object", "properties": properties, "required": required}}}
+    for name, properties, required in (
+        ("read", {"file_path": {"type": "string"}, "offset": {"type": "number"},
+                  "limit": {"type": "number"}}, ["file_path"]),
+        ("bash", {"command": {"type": "string"}, "description": {"type": "string"}},
+         ["command", "description"]))]
+
+
 class ToolProtocolTests(unittest.TestCase):
+    def test_flat_inputs_preserve_values_and_batch_order_with_advertised_schemas(self):
+        original = [{"name": "read", "file_path": 'a/"quoted"\\path', "offset": 1, "limit": 60},
+                    {"name": "bash", "command": 'printf "%s\\n" "quoted"\n# literal }]}',
+                     "description": "Read the owned fixture"}]
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block(original), {"read", "bash"})
+        _, calls = parse_tool_calls(block(original), {"read", "bash"}, flat_argument_tools=FLAT_TOOLS)
+        self.assertEqual([c['function']['name'] for c in calls], ['read', 'bash'])
+        self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                         [{k: v for k, v in item.items() if k != 'name'} for item in original])
+
+    def test_flat_inputs_never_infer_missing_fields_or_drop_ambiguous_fields(self):
+        good = {"name": "read", "file_path": "fixture"}
+        bad = [{"name": "read"}, {"name": "read", "offset": 1},
+               {**good, "unexpected": "private"}, {**good, "arguments": None},
+               {**good, "arguments": {}}, {**good, "function": {}},
+               {**good, "id": "private"}, {"name": "unknown", "file_path": "fixture"},
+               {"name": "read", "arguments": [], "file_path": "fixture"},
+               {"function": {"name": "read", "file_path": "fixture"}},
+               {"name": "read", "function": {"name": "read", "arguments": {}}}]
+        for item in bad:
+            with self.subTest(item=item), self.assertRaises(ToolCallError):
+                parse_tool_calls(block([good, item]), {"read", "bash"}, flat_argument_tools=FLAT_TOOLS)
+        for schema in ({}, {"type": "object"}, {"type": "array"},
+                       {"type": "object", "properties": {"name": {}, "file_path": {}}},
+                       {"type": "object", "properties": {"file_path": {}}, "required": "file_path"}):
+            with self.subTest(schema=schema), self.assertRaises(ToolCallError):
+                parse_tool_calls(block([good]), {"read"},
+                                 flat_argument_tools=[{"name": "read", "parameters": schema}])
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block([good]), {"read"}, flat_argument_tools=FLAT_TOOLS * 2)
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block([good])[:-4], {"read"}, allow_unclosed_fence=True,
+                             flat_argument_tools=FLAT_TOOLS)
+
     def test_observed_redundant_closer_preserves_every_call_and_argument(self):
         commands = [
             'printf "%s\\n" "quoted"',
