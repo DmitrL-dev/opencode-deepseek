@@ -96,9 +96,9 @@ def _log_response_shape(value, reason):
     obj = value if isinstance(value, dict) else {}
     data = obj.get("data")
     code = data.get("code") if isinstance(data, dict) else None
-    if isinstance(code, str) and re.fullmatch(r"[0-9]{1,6}", code):
+    if isinstance(code, str) and code in ("401", "403", "429"):
         code = int(code)
-    business_code = code if type(code) is int and 0 <= code <= 999999 else None
+    business_code = code if type(code) is int and code in (401, 403, 429) else None
     if isinstance(code, str):
         business_code = _KNOWN_BUSINESS_CODES.get(code.lower())
     _LOG.warning(

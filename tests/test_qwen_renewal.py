@@ -215,8 +215,11 @@ class QwenRenewalTests(unittest.TestCase):
                     self.assertIn("success_true=", rendered)
                     self.assertNotIn("synthetic", rendered)
 
-    def test_response_diagnostics_only_emit_bounded_numeric_business_codes(self):
-        cases = [(451, "451"), ("403", "403"), (999999, "999999"),
+    def test_response_diagnostics_only_emit_allowlisted_numeric_business_codes(self):
+        cases = [(401, "401"), (403, "403"), (429, "429"),
+                 ("401", "401"), ("403", "403"), ("429", "429"),
+                 (451, "None"), (123456, "None"), ("123456", "None"),
+                 (999999, "None"), ("000403", "None"), (0, "None"),
                  (1000000, "None"), (-1, "None"), (True, "None"),
                  (401.5, "None"), ("synthetic-private-code", "None"),
                  ({"synthetic-private-key": "synthetic-private-value"}, "None")]
@@ -228,7 +231,9 @@ class QwenRenewalTests(unittest.TestCase):
                     self.respond = lambda request, code=code: httpx.Response(200, json={
                         "success": False, "data": {"code": code, "message": "synthetic-private-value"}})
                     with self.assertLogs("qwen.renewal", level="WARNING") as output:
-                        self.assert_post_dispatch_failure("access_denied" if code == "403" else "upstream_failure")
+                        pause = {"401": "session_expired", "403": "access_denied",
+                                 "429": "quota_exceeded"}.get(str(code), "upstream_failure")
+                        self.assert_post_dispatch_failure(pause)
                     shape = next(line for line in output.output if "response rejected:" in line)
                     self.assertTrue(shape.endswith("business_code=" + expected), shape)
                     self.assertNotIn("synthetic", " ".join(output.output))
