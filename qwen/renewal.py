@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import math
 from pathlib import Path
 import re
@@ -19,6 +20,7 @@ AUTH_REFRESH_URL = "https://auth.qwen.ai/api/v2/auths/refresh"
 _AUTH_PATH = "/api/v2/auths/refresh"
 _MAX_TOKEN = 32 * 1024
 _MAX_JSON = 64 * 1024
+_LOG = logging.getLogger(__name__)
 
 
 def _number(value):
@@ -140,6 +142,7 @@ def renew_session(session_file: Path = DEFAULT_SESSION_FILE, transport=None) -> 
             raise ProviderRejected()
 
     with client:
+        phase, status = "dispatch", None
         try:
             attempt.check()
             attempt.dispatch(validate=validate_current)
@@ -151,22 +154,32 @@ def renew_session(session_file: Path = DEFAULT_SESSION_FILE, transport=None) -> 
                     raise ProviderRejected()
 
             with client.stream("GET", AUTH_REFRESH_URL) as response:
+                phase, status = "response", response.status_code
                 data = _response_data(response, check_response)
+            phase = "token_metadata"
             new_token = data.get("access_token")
             new_id, new_type, jwt_exp = _jwt_metadata(new_token)
-            server_exp = _number(data["expires_at"]) if "expires_at" in data else jwt_exp
+            phase = "expiry"
+            # The website falls back to JWT expiry when this optional response
+            # field is absent or null. JWT identity and expiry remain required.
+            server_exp = _number(data["expires_at"]) if data.get("expires_at") is not None else jwt_exp
             expires_at = min(server_exp, jwt_exp)
             if ((new_id, new_type) != (old_id, old_type)
                     or expires_at <= max(time.time() + 60, old_exp, local_exp)):
                 raise ProviderRejected()
             fresh = Session(new_token, _cookie_snapshot(client.cookies.jar),
                             cached.user_agent, time.time(), expires_at)
+            phase = "persist"
             attempt.check()
             if not fresh.save_if_current(cached, session_file, check=attempt.check):
                 raise ProviderRejected()
             attempt.check()
             return fresh
-        except ProviderRejected:
+        except ProviderRejected as error:
+            _LOG.warning("Qwen renewal stopped: phase=%s http_status=%s code=%s", phase, status, error.code)
             raise
-        except Exception:
+        except Exception as error:
+            # Never publish exception text, response bodies, tokens, or cookies.
+            _LOG.warning("Qwen renewal stopped: phase=%s http_status=%s exception=%s",
+                         phase, status, type(error).__name__)
             raise ProviderRejected() from None
