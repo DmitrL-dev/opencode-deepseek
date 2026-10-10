@@ -470,6 +470,34 @@ class QwenStreamTests(unittest.TestCase):
             with self.assertRaises((QwenStreamError, ProviderRejected)):
                 list(_parse_sse(events(answer("partial"), error), {}))
 
+    def test_plain_text_daily_quota_notice_is_never_exposed_as_an_answer(self):
+        notice = ("You've reached today's Qwen3.8-Max limit. Upgrade your membership "
+                  "or switch to another model above to continue.")
+        variants = [notice, "  " + notice.replace(" ", "\n") + "  ", notice.replace("'", "’")]
+        for text in variants:
+            for split in range(len(text) + 1):
+                frames = events(answer(text[:split]), answer(text[split:], status="finished"))
+                received = []
+                with self.subTest(split=split), self.assertRaises(ProviderRejected) as failure:
+                    for part in _parse_sse(frames, {}):
+                        received.append(part)
+                self.assertEqual(failure.exception.code, "quota_exceeded")
+                self.assertEqual(received, [])
+
+    def test_quoting_or_discussing_limits_remains_an_ordinary_answer(self):
+        notice = ("You've reached today's Qwen3.8-Max limit. Upgrade your membership "
+                  "or switch to another model above to continue.")
+        for text in ('The site says: ' + notice, '"' + notice + '"',
+                     notice + ' This is a quoted example.', "You've reached the end.",
+                     'x' * 2048, "You've"):
+            with self.subTest(text=text):
+                self.assertEqual(''.join(_parse_sse(events(answer(text, status='finished')), {})), text)
+
+    def test_ordinary_answer_still_streams_before_the_terminal_marker(self):
+        chunks = iter(_parse_sse(events(answer('normal answer'), answer(' tail', status='finished')), {}))
+        self.assertEqual(next(chunks), 'normal answer')
+        self.assertEqual(''.join(chunks), ' tail')
+
     def test_output_limit_is_reported(self):
         meta = {}
         self.assertEqual("".join(_parse_sse(events({"choices": [{"delta": {"content": "cut"}, "finish_reason": "length"}]}), meta)), "cut")

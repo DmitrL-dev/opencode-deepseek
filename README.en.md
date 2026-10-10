@@ -204,9 +204,14 @@ prepared; token-by-token delivery is not promised for every provider.
   after one successful reply. [Mistral plans](https://mistral.ai/pricing/).
 - **Kimi has frequency and peak-load limits.** Chinese providers are not
   inherently unlimited. [Official chat help](https://www.kimi.com/en/help/others/chat-issues).
-- **DeepSeek, Qwen and GLM did not exhaust their allowance in our tests.** We
-  have not established a fixed current web-chat quota. Paid API/CLI quotas do
-  not describe these connections.
+- **Qwen3.8-Max reached its daily limit on October 10, 2026.** The site sent
+  its quota notice as ordinary answer text. The bridge now recognizes this
+  known notice, returns `quota_exceeded`, and pauses all Qwen requests without
+  retrying or switching to Flash. The allowance, reset timezone and exact
+  reset time are unknown; Flash exhaustion has not been established.
+- **DeepSeek and GLM did not exhaust their allowance in earlier tests.** This
+  does not establish unlimited access. Paid API/CLI quotas do not describe
+  these web connections.
 - **DeepSeek previously rejected the test account:** `biz_code=5`,
   `user is muted`. The response gives no cause; this does not establish a
   service-wide restriction for every user.
