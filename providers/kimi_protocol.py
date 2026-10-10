@@ -1,6 +1,7 @@
 """Bind Kimi's JSON Connect text blocks to a completed assistant turn."""
 
 import struct
+import re
 
 from .browser_protocol import _object, connect_completed
 from .common import ProviderUnavailable
@@ -9,6 +10,13 @@ from .common import ProviderUnavailable
 def kimi_answer(body, prompt, expected_chat):
     if not isinstance(prompt, str) or not isinstance(expected_chat, str):
         raise ProviderUnavailable("Kimi requires request and conversation binding")
+    return kimi_reply(body, prompt, expected_chat)[0]
+
+
+def kimi_reply(body, prompt, expected_chat=None, expected_parent=None):
+    """Return text and identities only after validating the complete Connect turn."""
+    if not isinstance(prompt, str):
+        raise ProviderUnavailable("Kimi requires request binding")
     connect_completed(body)
     user = assistant = None
     blocks, texts = {}, {}
@@ -35,6 +43,11 @@ def kimi_answer(body, prompt, expected_chat):
             raise ProviderUnavailable("Kimi sent events after completion")
         op, mask = frame.get("op"), frame.get("mask", "")
         if kind == "chat":
+            if expected_chat is None and not chat_seen:
+                identity = value.get("id")
+                if not isinstance(identity, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', identity):
+                    raise ProviderUnavailable("Invalid Kimi conversation identity")
+                expected_chat = identity
             if value.get("id") != expected_chat or op != "set" or mask not in ("", "chat.name", "chat.lastRequest"):
                 raise ProviderUnavailable("Kimi response belongs to a different conversation")
             chat_seen = True
@@ -51,6 +64,8 @@ def kimi_answer(body, prompt, expected_chat):
                 if role == "system" and user is None and identity == expected_chat and status == "MESSAGE_STATUS_COMPLETED":
                     continue
                 if role == "user" and user is None and assistant is None:
+                    if expected_parent is not None and value.get('parentId') != expected_parent:
+                        raise ProviderUnavailable("Kimi user turn does not match the resumed parent")
                     parts = value.get("blocks")
                     if (status != "MESSAGE_STATUS_COMPLETED" or not isinstance(parts, list)
                             or any(not isinstance(p, dict) or not isinstance(p.get("text"), dict)
@@ -116,4 +131,4 @@ def kimi_answer(body, prompt, expected_chat):
     text = "".join(texts.values())
     if not done or not completed or not text.strip():
         raise ProviderUnavailable("Kimi returned no completed assistant text")
-    return text
+    return text, expected_chat, assistant

@@ -22,7 +22,9 @@ separate provider API key.
 Setup reads the model catalog, disables retries and model-generated titles, and
 sends no prompts to your accounts.
 This mode needs no tabs while serving requests: Qwen passed with its browser
-closed; GLM, Kimi, Grok, and Mistral are excluded from the bridge group. Initial
+closed; the GLM, `kimi-web`, Grok, and Mistral tab adapters are excluded.
+Kimi also has an experimental [direct HTTP mode](docs/KIMI.md), `kimi-instant`,
+disabled by default; direct completion, token rotation and Harness `read` passed on October 10. Initial
 Qwen sign-in still uses a browser. [Browser requirements](docs/HARNESS.en.md#run-without-an-open-browser).
 
 **Experimental adapters are explicit opt-ins. Read the account restrictions
@@ -66,7 +68,7 @@ session, rather than every future task.
 | **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Chat: Harness + `read` without a browser, October 10; Expert not requalified | [Login and saved session](docs/SETUP.en.md#4-log-in-to-deepseek-once) |
 | **Qwen** | `qwen3.8-omni-flash` / `qwen3.8-max` | Flash and Max verified | [Separate Qwen session](docs/SETUP.en.md#qwen-chat) |
 | **GLM / Z.ai** | `glm-web` | Verified; GLM-5.3-Flash selected in the test | [Your Safari tab](browser/README.md#safari) |
-| **Kimi** | `kimi-web` | Verified, including tools | [Your Safari tab](browser/README.md#safari) |
+| **Kimi** | `kimi-instant` / `kimi-web` | Instant: HTTP, refresh and browserless Harness `read`, October 10; tab mode verified previously | [HTTP session](docs/KIMI.md) / [Safari](browser/README.md#safari) |
 | **Mistral / Vibe** | `mistral-web` | New reply passed; continuation hit `429`. Agent unverified | Experimental, off by default |
 | **Grok** | `grok-web` | Frontend replies; bridge capture does not complete | Experimental, off by default |
 | **Gemini** | Configured from `agy models` | Login passed; completion rejected by region | [Official Antigravity CLI](browser/README.md#gemini), off |
@@ -185,9 +187,10 @@ and permitted tool results. The bridge converts a completed answer into text
 or validated `tool_calls`; incomplete and invalid calls are not returned.
 
 **Connections use different paths.** DeepSeek and Qwen use locally saved
-sessions and the website HTTP protocol. GLM and Kimi send through a normal
-Safari tab paired with a local queue using Userscripts. Their login stays in
-the browser. Gemini uses a separate official CLI.
+sessions and the website HTTP protocol. Kimi Instant also uses HTTP with a
+manually captured access/refresh pair. GLM and the legacy `kimi-web` adapter
+send through a normal Safari tab paired with a local queue using Userscripts.
+Gemini uses a separate official CLI.
 
 Browser answers are checked for request ownership and transport completion
 before release. SSE can send keepalives while the verified answer is being

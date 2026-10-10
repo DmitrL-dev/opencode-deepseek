@@ -40,8 +40,9 @@ To include only adapters that do not need a browser while serving requests:
 python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash
 ```
 
-The filter retains enabled Qwen, DeepSeek, and Gemini models. It excludes GLM,
-Kimi, Grok, and Mistral because their current adapters require a connected tab.
+The filter retains enabled Qwen, DeepSeek, Gemini and the explicitly enabled
+experimental `kimi-instant` model ([HTTP adapter status](KIMI.md)). It excludes
+GLM, `kimi-web`, Grok and Mistral because those adapters require a connected tab.
 It does not move web sessions to another transport, enable providers, or clear
 pauses. This selects the catalog at installation time; pass `--without-browser`
 again when updating the profile. Other Harness providers and existing sessions

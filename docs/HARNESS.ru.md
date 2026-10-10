@@ -43,8 +43,9 @@ GLM, Kimi, Grok, Mistral и настроенные через `GEMINI_MODELS` м
 python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash
 ```
 
-Фильтр оставляет включённые Qwen, DeepSeek и Gemini. GLM, Kimi, Grok и Mistral
-не попадают в эту группу: их текущие адаптеры требуют подключённой вкладки.
+Фильтр оставляет включённые Qwen, DeepSeek, Gemini и явно включённый
+экспериментальный `kimi-instant` ([статус HTTP-адаптера](KIMI.md)). Адаптеры
+GLM, `kimi-web`, Grok и Mistral не попадают в эту группу: им нужна вкладка.
 Флаг не переносит веб-сессии в новый транспорт, не включает провайдеры и не
 меняет сохранённые паузы. Это выбор каталога при установке; при следующем
 обновлении профиля снова укажите `--without-browser`. Другие провайдеры Harness
