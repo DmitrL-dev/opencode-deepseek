@@ -415,6 +415,10 @@ What was done for reliability:
   calls; JSON in prose, XML/DSML, and pseudo-calls remain ordinary text;
 - after a confirmed normal stop, a missing closing Markdown fence is accepted
   only if the entire JSON array validates unchanged, with no trailing text;
+- a closed block may instead contain one redundant `}` after its complete JSON
+  array (an observed DeepSeek response). This requires a normal stop; arguments
+  remain unchanged and all calls must validate. Other suffixes, incomplete
+  arrays, and combining this exception with a missing fence are rejected;
 - the entire array is validated before any call is returned: unknown tools,
   invalid arguments, or a violated `tool_choice` produce `502 invalid_tool_response`;
 - continuations default to off. Explicit opt-in applies only to a provider-confirmed
