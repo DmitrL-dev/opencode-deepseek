@@ -32,6 +32,9 @@ def validate_reference(provider, model, reference):
                 raise ValueError()
         except ValueError:
             raise ValueError("Invalid Gemini conversation reference") from None
+    elif provider == 'kimi' and model == 'k2d6-chat':
+        if not re.fullmatch(r'/chat/[A-Za-z0-9_-]{1,128}/parent/[A-Za-z0-9_-]{1,128}', reference):
+            raise ValueError('Invalid direct Kimi conversation reference')
     elif not _PATHS[provider].fullmatch(reference):
         raise ValueError("Invalid browser conversation path")
 

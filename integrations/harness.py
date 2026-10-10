@@ -29,6 +29,7 @@ LABELS = {
     "qwen3.8-max": "Qwen3.8 Max · web",
     "glm-web": "GLM · selected website model",
     "kimi-web": "Kimi · selected website model",
+    "kimi-instant": "Kimi Instant · web",
     "grok-web": "Grok · experimental",
     "mistral-web": "Mistral · experimental",
 }
@@ -79,7 +80,8 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
     # Validate the entire advertised catalog before excluding any provider.
     if without_browser:
         models = [model for row, model in zip(rows, models)
-                  if row["owned_by"] in BROWSERLESS_PROVIDERS]
+                  if row["owned_by"] in BROWSERLESS_PROVIDERS
+                  or (row['owned_by'] == 'kimi' and row['id'] == 'kimi-instant')]
         if not models:
             raise ValueError("Bridge advertises no browserless models for --without-browser")
     return models
