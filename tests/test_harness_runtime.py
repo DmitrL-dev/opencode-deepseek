@@ -100,7 +100,7 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.prompts.append(prompt)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior in ("flat_tools", "combined_envelopes"):
+        if self.behavior in ("flat_tools", "combined_envelopes", "dsml_closers"):
             if len(self.prompts) == 1:
                 answer = block([
                     {"name": "read", "file_path": str(self.workspace / "fixture.txt"), "offset": 1, "limit": 60},
@@ -108,6 +108,8 @@ class HarnessRuntimeTests(unittest.TestCase):
                      "description": "Print the owned fixture marker"}])
                 if self.behavior == "combined_envelopes":
                     answer = answer[:-4] + '}'
+                elif self.behavior == "dsml_closers":
+                    answer = answer[:-4] + '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
             else:
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
                 self.assertIn("HARNESS_FLAT_COMMAND_29", prompt.rsplit("Tool (bash,", 1)[1])
@@ -199,6 +201,14 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_dsml_closing_artifacts_complete_a_native_tool_round_trip(self):
+        self.behavior = 'dsml_closers'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
         self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
 
     def test_native_write_preserves_quoted_multiline_content_without_closing_wrapper(self):
