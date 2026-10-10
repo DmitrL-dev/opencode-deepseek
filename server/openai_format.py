@@ -26,6 +26,10 @@ _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
 _TOOL_BLOCK_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n(.*?)\r?\n```[ \t]*\Z", re.DOTALL)
 _TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
+# Observed web-model terminators after an otherwise complete JSON array. Only
+# closing syntax is allowed; no opening tag, content, or second call can match.
+_DSML_CLOSERS = r"</｜｜DSML｜｜ parameter>\s*</｜｜DSML｜｜ invoke>\s*</｜｜DSML｜｜ calls>"
+_CLOSING_ARTIFACTS_RE = re.compile(r"\A(?:\}|(?:\}\s*)?" + _DSML_CLOSERS + r")\Z")
 
 
 class ToolCallError(RuntimeError):
@@ -249,7 +253,7 @@ def _flat_tool_arguments(item: dict, tools: Optional[List[dict]]) -> Optional[di
 def parse_tool_calls(
     text: str, allowed_names: Optional[Iterable[str]] = None, *,
     allow_unclosed_fence: bool = False,
-    allow_redundant_closer: bool = False,
+    allow_closing_artifacts: bool = False,
     flat_argument_tools: Optional[List[dict]] = None,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, never examples embedded in prose.
@@ -257,7 +261,7 @@ def parse_tool_calls(
     All calls and their arguments must validate before any call is returned.
     Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text.
     Optional normal-stop tolerances cover an absent final Markdown fence and
-    one redundant object closer after a complete array, independently.
+    known closing-only artifacts after a complete array, independently.
     Invalid JSON values and partial batches fail closed.
     Normal-stop callers may also supply schemas for an unambiguous flat input
     envelope. No input values or missing fields are inferred.
@@ -279,10 +283,11 @@ def parse_tool_calls(
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
-        if (allow_redundant_closer
-                and exc.msg == "Extra data" and payload[exc.pos:].strip() == "}"):
-            # Observed FINISHED reply: a complete array followed by one stray
-            # object closer. The decoder already consumed the full JSON value.
+        if (allow_closing_artifacts
+                and exc.msg == "Extra data"
+                and _CLOSING_ARTIFACTS_RE.fullmatch(payload[exc.pos:].strip())):
+            # Observed FINISHED replies: a complete array followed by a stray
+            # object closer or closing-only DSML. JSON was fully consumed.
             # Never repair strings, add missing delimiters, drop array members,
             # or tolerate any other suffix. Markdown framing is independent.
             data = json.loads(payload[:exc.pos])

@@ -418,7 +418,10 @@ What was done for reliability:
 - a closed block may instead contain one redundant `}` after its complete JSON
   array (an observed DeepSeek response). This requires a normal stop; arguments
   remain unchanged and all calls must validate. Other suffixes and incomplete
-  arrays are rejected. An absent final Markdown fence is handled independently;
+  arrays are rejected. An observed closing-only DSML sequence (`parameter`,
+  `invoke`, `calls`) is also accepted after the full array, with no tag content
+  or further calls. This does not parse native DSML actions. An absent final
+  Markdown fence is handled independently;
 - if a normally completed block puts input fields beside `name` instead
   of inside `arguments`, the bridge wraps them only when one advertised object
   schema declares every supplied field and every required field is present.

@@ -23,6 +23,25 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_observed_dsml_closers_after_json_never_authorize_other_markup(self):
+        arguments = {"command": 'printf "%s\\n" "fixture"', "description": "Print fixture"}
+        payload = json.dumps([{"name": "bash", **arguments}])
+        suffix = '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
+        for closer in ('', '}'):
+            for fence in ('', '\n```'):
+                with self.subTest(closer=closer, fence=fence):
+                    text = '```tool_calls\n' + payload + closer + suffix + fence
+                    with self.assertRaises(ToolCallError):
+                        parse_tool_calls(text, {'bash'}, allow_unclosed_fence=True, flat_argument_tools=FLAT_TOOLS)
+                    _, calls = parse_tool_calls(text, {'bash'}, allow_unclosed_fence=True,
+                                                allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
+                    self.assertEqual(json.loads(calls[0]['function']['arguments']), arguments)
+        for bad in (suffix + ' text', suffix + payload, '<invoke>' + suffix,
+                    suffix.replace('parameter>', 'parameter>private'), suffix.splitlines()[0]):
+            with self.subTest(bad=bad), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + payload + bad, {'bash'}, allow_unclosed_fence=True,
+                                 allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
+
     def test_flat_inputs_preserve_values_and_batch_order_with_advertised_schemas(self):
         original = [{"name": "read", "file_path": 'a/"quoted"\\path', "offset": 1, "limit": 60},
                     {"name": "bash", "command": 'printf "%s\\n" "quoted"\n# literal }]}',
@@ -65,13 +84,13 @@ class ToolProtocolTests(unittest.TestCase):
                     text = '```tool_calls\n' + json.dumps([item]) + ('}' if closer else '') + ('\n```' if fence else '')
                     with self.subTest(flat=flat, fence=fence, closer=closer):
                         _, calls = parse_tool_calls(text, {'bash'}, allow_unclosed_fence=True,
-                                                    allow_redundant_closer=True, flat_argument_tools=FLAT_TOOLS)
+                                                    allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
                         self.assertEqual(len(calls), 1)
                         self.assertEqual(json.loads(calls[0]['function']['arguments']), arguments)
         for tail in ('}}', '} trailing', ']'):
             with self.subTest(tail=tail), self.assertRaises(ToolCallError):
                 parse_tool_calls('```tool_calls\n' + json.dumps([{"name": "bash", **arguments}]) + tail,
-                                 {'bash'}, allow_unclosed_fence=True, allow_redundant_closer=True,
+                                 {'bash'}, allow_unclosed_fence=True, allow_closing_artifacts=True,
                                  flat_argument_tools=FLAT_TOOLS)
 
     def test_observed_redundant_closer_preserves_every_call_and_argument(self):
@@ -85,7 +104,7 @@ class ToolProtocolTests(unittest.TestCase):
         text = '```tool_calls\n' + json.dumps(original) + '}\n```'
         with self.assertRaises(ToolCallError):
             parse_tool_calls(text, {"bash"})
-        _, calls = parse_tool_calls(text, {"bash"}, allow_redundant_closer=True)
+        _, calls = parse_tool_calls(text, {"bash"}, allow_closing_artifacts=True)
         self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
                          [item['arguments'] for item in original])
 
@@ -98,7 +117,7 @@ class ToolProtocolTests(unittest.TestCase):
                      '[{"name":"bash","arguments":{}},{"name":"bash","arguments":[]}]}']
         for body in payloads:
             with self.subTest(body=body), self.assertRaises(ToolCallError):
-                parse_tool_calls('```tool_calls\n' + body + '\n```', {'bash'}, allow_redundant_closer=True)
+                parse_tool_calls('```tool_calls\n' + body + '\n```', {'bash'}, allow_closing_artifacts=True)
 
     def test_confirmed_stop_can_omit_only_the_markdown_closing_fence(self):
         arguments = {"command": 'printf "%s\\n" "quoted"\n# ``` stays data'}
