@@ -32,6 +32,16 @@ All bridge adapters share this protocol: DeepSeek, Qwen Flash/Max, GLM, Kimi,
 Grok, Mistral, and Gemini models configured through `GEMINI_MODELS`. Their actual
 availability and qualification differ: see [provider status](../README.en.md).
 
+### Qwen session
+
+Before use, run `python -m qwen.auth --keep-open` in a separate bridge terminal
+and leave the Qwen window open. Website tokens are short-lived (about 15 minutes
+in the observed session). The command saves changes made by the website; the
+server reads the updated session before the next request. It does not call a
+refresh API or replay rejected messages. Complete any new sign-in manually.
+Closing the window stops the handoff. `login_required` means no usable session
+is available; selecting a model in the menu does not verify authentication.
+
 ## Behavior and limits
 
 - Harness retries are explicitly disabled with `retryPolicy: {mode: normal,
@@ -59,7 +69,7 @@ consume another message.
 
 ## Offline verification
 
-Verified with installed Harness **0.1.7-rc.1**: four real CLI scenarios and setup
+Verified with installed Harness **0.1.7-rc.1** and **0.2.0-rc.2**: four real CLI scenarios and setup
 tests. For an owned HTTP 503 fixture, the default policy made six requests;
 the bridge configuration made one. No real accounts were used.
 

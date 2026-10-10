@@ -513,9 +513,14 @@ It uses your [chat.qwen.ai](https://chat.qwen.ai/) account and its limits;
 this is neither the official Alibaba Cloud API nor Qwen Code authentication.
 The web service determines model access and quotas. Support is disabled by default.
 
-1. Run `python -m qwen.auth` in the active Python environment and sign in manually
+1. Run `python -m qwen.auth --keep-open` in the active Python environment and sign in manually
    in the opened window. If Google rejects the automated browser, use the email-code
    sign-in option available for your account on the login page.
+   Keep the window and terminal open: the token can expire after about 15 minutes.
+   The command reads session changes made by the website and atomically saves
+   them for the next request. It does not call a refresh API, reload the page,
+   or replay model requests. If the website does not renew the session itself,
+   manual sign-in is needed; continuous availability is not guaranteed.
 2. Add `QWEN_ENABLED=1` to `.env` and restart the server.
 3. Add this provider inside your existing opencode `provider` object, restart
    opencode, and select a model with `/models`.
@@ -563,8 +568,10 @@ opencode run --model local-qwen/qwen3.8-max "Explain this project"
 Qwen uses separate private state: `session/qwen/session.json` and
 `session/qwen/profile/`. The server loads a usable cache only. Missing or expired
 sessions return `401 login_required`, or a terminal `login_required` error in an
-already-open SSE stream: run `python -m qwen.auth` manually, then
-restart the server. Upstream rejection persists a pause; no automatic refresh
+already-open SSE stream: run `python -m qwen.auth --keep-open` manually.
+The server picks up the saved session on the next request without a restart.
+Without `--keep-open`, the command saves once and closes the window; this mode
+requires another sign-in after token expiry. Upstream rejection persists a pause; no automatic refresh
 or replay occurs.
 
 Flash and Max share one Qwen account queue, independent of DeepSeek's queue.

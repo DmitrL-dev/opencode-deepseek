@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import math
 import os
 import threading
@@ -24,7 +26,7 @@ _PROFILE_LOCK = threading.RLock()
 
 
 class LoginRequired(DeepSeekLoginRequired):
-    def __init__(self, message: str = "No valid Qwen Chat session. Run python -m qwen.auth to sign in."):
+    def __init__(self, message: str = "No valid Qwen Chat session (missing or expired). Run python -m qwen.auth --keep-open to sign in and keep the website window open; sessions expire."):
         super().__init__(message)
 
 
@@ -129,6 +131,59 @@ def login(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DEFAULT_
         return session
 
 
+def keep_open(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DEFAULT_SESSION_FILE,
+              channel: Optional[str] = "chrome") -> None:
+    """Observe one foreground website window; only the website may renew auth."""
+    with _PROFILE_LOCK, sync_playwright() as p:
+        context = _launch(p, profile_dir, False, channel)
+        closed = False
+
+        def on_close(*_):
+            nonlocal closed
+            closed = True
+
+        page = None
+        try:
+            context.on("close", on_close)
+            page = context.pages[0] if context.pages else context.new_page()
+            page.goto(CHAT_URL + "auth", wait_until="commit", timeout=60000)
+            print("[qwen-auth] Sign in on the website. Keep this window open; Ctrl+C stops capture.", flush=True)
+            last_saved = None
+            ready = False
+            while not closed and not page.is_closed():
+                session = _capture(context, page)
+                if session is not None and session.usable:
+                    # Ignore capture timestamps and cookie ordering, which can
+                    # change every poll without changing the usable session.
+                    state = (session.token, session.expires_at, session.user_agent,
+                             tuple(sorted(json.dumps(cookie, sort_keys=True) for cookie in session.cookies)))
+                    if state != last_saved:
+                        session.save(session_file)
+                        last_saved = state
+                        print("[qwen-auth] Valid session saved. Keep the website window open; sessions expire.", flush=True)
+                    elif not ready:
+                        print("[qwen-auth] Valid session available in this window; sessions expire.", flush=True)
+                    ready = True
+                else:
+                    if ready:
+                        print("[qwen-auth] Website session is missing or expired. Waiting for a valid session.", flush=True)
+                    ready = False
+                page.wait_for_timeout(1000)
+            print("[qwen-auth] Website window closed; capture stopped.", flush=True)
+        except KeyboardInterrupt:
+            print("[qwen-auth] Capture stopped by Ctrl+C.", flush=True)
+        except PlaywrightError:
+            if closed or (page is not None and page.is_closed()):
+                print("[qwen-auth] Website window closed; capture stopped.", flush=True)
+            else:
+                raise RuntimeError("Browser capture failed; stopped without retry.") from None
+        finally:
+            try:
+                context.close()
+            except PlaywrightError:
+                pass  # A manually closed context needs no further cleanup.
+
+
 def get_session(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DEFAULT_SESSION_FILE,
                 allow_interactive: bool = False, force: bool = False,
                 channel: Optional[str] = "chromium-headless-shell",
@@ -153,6 +208,23 @@ def get_session(profile_dir: Path = DEFAULT_PROFILE_DIR, session_file: Path = DE
         raise LoginRequired()
 
 
+def main(argv=None) -> None:
+    parser = argparse.ArgumentParser(description="Sign in to Qwen Chat in a visible website window.")
+    parser.add_argument("--keep-open", action="store_true",
+                        help="Keep the website open and save changed valid sessions until Ctrl+C or window close.")
+    args = parser.parse_args(argv)
+    try:
+        if args.keep_open:
+            keep_open()
+        else:
+            captured = login()
+            print(f"[qwen-auth] Session saved ({len(captured.cookies)} cookies); sessions expire.", flush=True)
+    except KeyboardInterrupt:
+        print("[qwen-auth] Capture stopped by Ctrl+C.", flush=True)
+    except (PlaywrightError, OSError, RuntimeError):
+        print("[qwen-auth] Sign-in capture failed; stopped without retry.", flush=True)
+        raise SystemExit(1) from None
+
+
 if __name__ == "__main__":
-    captured = login()
-    print(f"[qwen-auth] Session saved to {DEFAULT_SESSION_FILE} ({len(captured.cookies)} cookies).")
+    main()

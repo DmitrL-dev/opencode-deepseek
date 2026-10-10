@@ -112,17 +112,23 @@ cp .env.example .env
 **2. Sign in to Qwen and enable it.**
 
 ```bash
-python -m qwen.auth
+python -m qwen.auth --keep-open
 ```
 
-Change `QWEN_ENABLED=0` to `QWEN_ENABLED=1` in `.env`, then:
+Keep the Qwen window and this terminal open: its short-lived token can expire
+after about 15 minutes. The command saves session changes made by the website;
+it sends no refresh requests or messages. Complete any website sign-in manually.
+Closing the window stops the handoff.
+
+Change `QWEN_ENABLED=0` to `QWEN_ENABLED=1` in `.env`, then in another terminal
+with the virtualenv activated:
 
 ```bash
 python app.py
 ```
 
 Complete sign-in yourself in the opened browser. Leave the server running.
-In a second terminal:
+In a separate terminal:
 
 ```bash
 curl http://127.0.0.1:8000/healthz

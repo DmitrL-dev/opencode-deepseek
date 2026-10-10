@@ -16,6 +16,7 @@ from server import api
 from server.config import QWEN_MODEL_MAP
 from server.schemas import ChatCompletionRequest, ChatMessage
 from qwen.client import QwenClient
+from qwen.auth import LoginRequired
 from tests.test_qwen import CHAT, MESSAGE, answer, events, session
 from tests.test_tools import block
 from tests.support import isolated_access
@@ -182,12 +183,46 @@ class QwenClientCacheTests(unittest.TestCase):
         fresh.session.usable = True
         with patch.object(api, "_qwen_client", old), patch.object(api, "get_qwen_session") as capture, patch.object(api, "QwenClient", return_value=fresh), patch.object(api, "get_client") as ds:
             self.assertIs(api.get_qwen_client(), fresh)
-        self.assertFalse(capture.call_args.kwargs["force"])
+        self.assertFalse(capture.call_args.kwargs.get("force", False))
+        self.assertFalse(capture.call_args.kwargs["allow_refresh"])
         ds.assert_not_called()
 
     def test_rejection_of_an_already_replaced_client_reuses_the_refresh(self):
         old, current = Mock(), Mock()
-        current.session.usable = True
-        with patch.object(api, "_qwen_client", current), patch.object(api, "get_qwen_session") as capture:
+        current.session = session()
+        with patch.object(api, "_qwen_client", current), patch.object(api, "get_qwen_session", return_value=current.session) as capture:
             self.assertIs(api.get_qwen_client(True, rejected_client=old), current)
-        capture.assert_not_called()
+        capture.assert_called_once()
+        self.assertFalse(capture.call_args.kwargs["allow_refresh"])
+
+    def test_rotated_local_session_replaces_a_still_usable_cached_client(self):
+        old, fresh = Mock(), Mock()
+        old.session = session()
+        rotated = session()
+        rotated.token = "rotated-fixture-token"
+        self.assertTrue(old.session.usable)
+        with patch.object(api, "_qwen_client", old), patch.object(api, "get_qwen_session", return_value=rotated), patch.object(api, "QwenClient", return_value=fresh) as build:
+            self.assertIs(api.get_qwen_client(), fresh)
+        build.assert_called_once_with(rotated, access_guard=None)
+        old.close.assert_not_called()
+
+    def test_missing_local_session_never_falls_back_to_cached_credentials(self):
+        old = Mock(session=session())
+        with patch.object(api, "_qwen_client", old), patch.object(api, "get_qwen_session", side_effect=LoginRequired), patch.object(api, "QwenClient") as build:
+            with self.assertRaises(LoginRequired):
+                api.get_qwen_client()
+        build.assert_not_called()
+
+    def test_unchanged_local_session_reuses_the_client(self):
+        current = Mock(session=session())
+        with patch.object(api, "_qwen_client", current), patch.object(api, "get_qwen_session", return_value=current.session), patch.object(api, "QwenClient") as build:
+            self.assertIs(api.get_qwen_client(), current)
+        build.assert_not_called()
+
+    def test_explicit_reset_reloads_cache_without_forcing_browser_capture(self):
+        current, fresh = Mock(session=session()), Mock()
+        with patch.object(api, "_qwen_client", current), patch.object(api, "get_qwen_session", return_value=current.session) as capture, patch.object(api, "QwenClient", return_value=fresh):
+            self.assertIs(api.get_qwen_client(True), fresh)
+        self.assertFalse(capture.call_args.kwargs.get("force", False))
+        self.assertFalse(capture.call_args.kwargs["allow_interactive"])
+        self.assertFalse(capture.call_args.kwargs["allow_refresh"])
