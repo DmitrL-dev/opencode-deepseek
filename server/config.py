@@ -6,6 +6,7 @@ import re
 
 from settings import load_environment
 from providers.kimi_http import direct_enabled
+from providers.kimi_models import PUBLIC_MODELS as KIMI_MODELS
 
 load_environment()
 
@@ -53,8 +54,10 @@ for provider in ("grok", "mistral", "kimi", "glm"):
         name = provider + "-web"
         direct_kimi = provider == 'kimi' and direct_enabled()
         if direct_kimi:
-            name = 'kimi-instant'
-        MODEL_MAP[name] = 'k2d6-chat' if direct_kimi else "default"
+            MODEL_MAP.update(KIMI_MODELS)
+            OPTIONAL_MODEL_PROVIDERS.update({key: provider for key in KIMI_MODELS})
+            continue
+        MODEL_MAP[name] = "default"
         OPTIONAL_MODEL_PROVIDERS[name] = provider
 
 # Model availability differs by Google account and region. Require slugs from

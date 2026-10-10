@@ -23,9 +23,11 @@ Setup reads the model catalog, disables retries and model-generated titles, and
 sends no prompts to your accounts.
 This mode needs no tabs while serving requests: Qwen passed with its browser
 closed; the GLM, `kimi-web`, Grok, and Mistral tab adapters are excluded.
-Kimi also has an experimental [direct HTTP mode](docs/KIMI.md), `kimi-instant`,
-disabled by default; direct completion, token rotation and Harness `read` passed on October 10. Initial
-Qwen sign-in still uses a browser. [Browser requirements](docs/HARNESS.en.md#run-without-an-open-browser).
+Kimi also has an experimental [direct HTTP mode](docs/KIMI.md),
+`kimi-instant`, `kimi-k3` and `kimi-k2.8`,
+disabled by default. Instant passed direct completion, token rotation and Harness `read` on October 10.
+K3 was refused because free-account server capacity was unavailable; K2.8 was not
+attempted after that refusal. Initial Qwen sign-in still uses a browser. [Browser requirements](docs/HARNESS.en.md#run-without-an-open-browser).
 
 **Experimental adapters are explicit opt-ins. Read the account restrictions
 and terminal-refusal settings below before running the bridge.**
@@ -68,7 +70,7 @@ session, rather than every future task.
 | **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Chat: Harness + `read` without a browser, October 10; Expert not requalified | [Login and saved session](docs/SETUP.en.md#4-log-in-to-deepseek-once) |
 | **Qwen** | `qwen3.8-omni-flash` / `qwen3.8-max` | Flash and Max verified | [Separate Qwen session](docs/SETUP.en.md#qwen-chat) |
 | **GLM / Z.ai** | `glm-web` | Verified; GLM-5.3-Flash selected in the test | [Your Safari tab](browser/README.md#safari) |
-| **Kimi** | `kimi-instant` / `kimi-web` | Instant: HTTP, refresh and browserless Harness `read`, October 10; tab mode verified previously | [HTTP session](docs/KIMI.md) / [Safari](browser/README.md#safari) |
+| **Kimi** | `kimi-instant`, `kimi-k3`, `kimi-k2.8` / `kimi-web` | Instant: HTTP, refresh and browserless Harness `read`, October 10; K3/K2.8 not qualified end to end; tab mode verified previously | [HTTP session](docs/KIMI.md) / [Safari](browser/README.md#safari) |
 | **Mistral / Vibe** | `mistral-web` | New reply passed; continuation hit `429`. Agent unverified | Experimental, off by default |
 | **Grok** | `grok-web` | Frontend replies; bridge capture does not complete | Experimental, off by default |
 | **Gemini** | Configured from `agy models` | Login passed; completion rejected by region | [Official Antigravity CLI](browser/README.md#gemini), off |

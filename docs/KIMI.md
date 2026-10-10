@@ -1,9 +1,28 @@
 # Kimi direct transport (experimental)
 
 The direct transport uses Kimi's existing account session, without browser tabs
-while answering. It is opt-in and exposes only `kimi-instant` (`k2d6-chat`). The
-separate `kimi-web` adapter continues to use the model selected in a browser tab.
-K3, K2.8 Preview, agent mode and paid capabilities are not qualified here.
+while answering. It is opt-in and exposes explicit model selections:
+
+| Public ID | Account model | Mode | Live qualification, October 10, 2026 |
+| --- | --- | --- | --- |
+| `kimi-instant` | `k2d6-chat` | Instant | Direct answer, token refresh and Harness `read` passed |
+| `kimi-k3` | `k3-agent` | K3, High, standard context | One request refused: free-account server capacity unavailable |
+| `kimi-k2.8` | `k28-agent-preview` | K2.8 Preview, High, standard context | Catalog confirmed; completion not attempted after the K3 refusal |
+
+The separate `kimi-web` adapter uses the model selected in a browser tab.
+K3/K2.8 use the site's normal agent scenario, with an empty optional-tool list
+and plugins disabled. The bridge does not select Swarm, extra-long context or
+paid capabilities. This is not a guarantee about internal provider execution.
+The response must confirm the requested model and scenario before any answer
+is returned; no fallback model is substituted.
+
+**K3/K2.8 are implemented but not qualified end to end.** The account catalog
+advertised both models. The sole K3 probe returned a Connect
+`resource_exhausted` error with reason `SERVER_OVERLOADED_FOR_FREE_USER` (117).
+The bridge reports `capacity_unavailable`, separately from a quota error, and
+pauses the entire Kimi provider. It does not try K2.8 or Instant as a workaround.
+This does not establish that the account's quota is exhausted. A successful
+future completion and Harness tool round trip are still needed for each model.
 
 On 2026-10-10 one direct Instant completion returned the exact synthetic marker
 with the owned Safari tab closed. A subsequent explicit refresh returned HTTP
@@ -43,7 +62,9 @@ must likewise remain private.
 To opt in, enable `KIMI_ENABLED=1`, `KIMI_TRANSPORT=direct` and,
 separately, `KIMI_RENEW_SESSION=1`. Restart the bridge and reinstall the Harness
 catalog with `python -m integrations.harness --install desktop --without-browser`.
-The filter includes the explicitly advertised `kimi-instant` model only.
+The filter includes the three explicitly advertised direct Kimi models.
+A catalog entry is not evidence of current account availability; provider
+pauses remain in force after installation.
 
 Before a new request, a token with less than 60 seconds remaining is renewed
 once through Kimi's normal `AuthService/RefreshToken` endpoint. A local file lock
@@ -61,3 +82,14 @@ Free account quotas and service limits still apply.
 
 The endpoint and protocol come from Kimi's published frontend; this is not an
 official or guaranteed third-party API. Frontend changes can stop the adapter.
+
+
+## Protocol sources
+
+Model IDs and scenarios were read from the signed-in account's normal
+`ConfigService/GetAvailableModels` response on October 10, 2026. Request options
+and typed error reasons were checked against Kimi's published frontend bundle.
+The [official agentic-chat guide](https://www.kimi.ai/help/getting-started/agentic-chat)
+describes the K3 reasoning modes. The account catalog and website protocol can
+change independently of this adapter; unknown models and response shapes fail
+closed.

@@ -41,7 +41,8 @@ python -m integrations.harness --install desktop --without-browser --default-mod
 ```
 
 The filter retains enabled Qwen, DeepSeek, Gemini and the explicitly enabled
-experimental `kimi-instant` model ([HTTP adapter status](KIMI.md)). It excludes
+experimental `kimi-instant`, `kimi-k3` and `kimi-k2.8` models
+([qualification and capacity limits](KIMI.md)). It excludes
 GLM, `kimi-web`, Grok and Mistral because those adapters require a connected tab.
 It does not move web sessions to another transport, enable providers, or clear
 pauses. This selects the catalog at installation time; pass `--without-browser`
@@ -156,3 +157,5 @@ It checks SSE, a native file-read tool round trip, durable refusal handling,
 and no retry after HTTP 503. This does not qualify live accounts.
 
 Reference: [official Harness model configuration](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers).
+
+[GLM browserless access blockers](GLM.md).

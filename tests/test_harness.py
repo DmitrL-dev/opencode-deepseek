@@ -88,12 +88,14 @@ class HarnessSetupTests(unittest.TestCase):
             with self.subTest(rows=rows), self.assertRaises(ValueError):
                 harness.catalog_models({"data": [valid] + rows}, without_browser=True)
 
-    def test_without_browser_keeps_only_the_explicit_direct_kimi_model(self):
+    def test_without_browser_keeps_only_the_explicit_direct_kimi_models(self):
         rows = [{'id': 'kimi-web', 'owned_by': 'kimi'},
                 {'id': 'kimi-instant', 'owned_by': 'kimi'},
+                {'id': 'kimi-k3', 'owned_by': 'kimi'},
+                {'id': 'kimi-k2.8', 'owned_by': 'kimi'},
                 {'id': 'unknown-kimi', 'owned_by': 'kimi'}]
         models = harness.catalog_models({'data': rows}, without_browser=True)
-        self.assertEqual([m['id'] for m in models], ['kimi-instant'])
+        self.assertEqual([m['id'] for m in models], ['kimi-instant', 'kimi-k3', 'kimi-k2.8'])
         self.assertEqual(models[0]['name'], 'Kimi Instant · web')
 
     def run_cli_catalog(self, catalog, *args):

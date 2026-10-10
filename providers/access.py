@@ -23,6 +23,7 @@ PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'ge
 MESSAGES = {
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
     'quota_exceeded': 'The provider rejected the request because of a quota or usage limit.',
+    'capacity_unavailable': 'The provider has no capacity for this free account right now. Automatic retries are disabled.',
     'access_denied': 'The provider denied access. Inspect sign-in, security and regional restrictions manually.',
     'session_expired': 'The provider rejected the session. Sign in manually before resuming.',
     'upstream_failure': 'The provider request failed or its outcome is uncertain. Automatic replay is disabled.',

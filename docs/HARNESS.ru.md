@@ -44,7 +44,8 @@ python -m integrations.harness --install desktop --without-browser --default-mod
 ```
 
 Фильтр оставляет включённые Qwen, DeepSeek, Gemini и явно включённый
-экспериментальный `kimi-instant` ([статус HTTP-адаптера](KIMI.md)). Адаптеры
+экспериментальные `kimi-instant`, `kimi-k3` и `kimi-k2.8`
+([проверки и ограничения доступа](KIMI.md)). Адаптеры
 GLM, `kimi-web`, Grok и Mistral не попадают в эту группу: им нужна вкладка.
 Флаг не переносит веб-сессии в новый транспорт, не включает провайдеры и не
 меняет сохранённые паузы. Это выбор каталога при установке; при следующем
@@ -168,3 +169,5 @@ workspace, настоящий локальный FastAPI и подменённы
 интеграции, а не живая квалификация аккаунтов.
 
 Основание: [официальная конфигурация моделей Harness](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers).
+
+[Ограничения подключения GLM без браузера](GLM.md).
