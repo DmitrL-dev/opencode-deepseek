@@ -7,11 +7,13 @@ from chat_protocol import sse_events
 from .common import ProviderUnavailable
 
 
-def _object(payload):
+def _object(payload, on_error=None):
     try:
         value = json.loads(payload)
     except (ValueError, UnicodeError):
         raise ProviderUnavailable("Unsupported browser response JSON") from None
+    if isinstance(value, dict) and value.get('error') and on_error is not None:
+        raise on_error(value['error'])
     if not isinstance(value, dict) or value.get("error"):
         raise ProviderUnavailable("Browser provider rejected the completion")
     return value
@@ -89,7 +91,7 @@ def glm_answer(body):
     return text
 
 
-def connect_completed(body):
+def connect_completed(body, on_error=None):
     """Connect RPC EOF alone is not success: require its end-stream envelope."""
     offset, messages, ended = 0, 0, False
     while offset < len(body):
@@ -102,7 +104,7 @@ def connect_completed(body):
         payload = body[offset:offset + length]
         offset += length
         if flags == 2:
-            _object(payload)
+            _object(payload, on_error=on_error)
             ended = True
         elif flags == 0:
             messages += 1

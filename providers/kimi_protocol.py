@@ -5,6 +5,7 @@ import re
 
 from .browser_protocol import _object, connect_completed
 from .common import ProviderUnavailable
+from .kimi_errors import connect_rejection
 
 
 def kimi_answer(body, prompt, expected_chat):
@@ -13,14 +14,16 @@ def kimi_answer(body, prompt, expected_chat):
     return kimi_reply(body, prompt, expected_chat)[0]
 
 
-def kimi_reply(body, prompt, expected_chat=None, expected_parent=None):
+def kimi_reply(body, prompt, expected_chat=None, expected_parent=None,
+               expected_model=None, expected_scenario=None):
     """Return text and identities only after validating the complete Connect turn."""
     if not isinstance(prompt, str):
         raise ProviderUnavailable("Kimi requires request binding")
-    connect_completed(body)
+    connect_completed(body, on_error=connect_rejection)
     user = assistant = None
     blocks, texts = {}, {}
     completed = done = chat_seen = False
+    model_confirmed = expected_model is None
     offset = 0
     while offset < len(body):
         flags, length = body[offset], struct.unpack_from(">I", body, offset + 1)[0]
@@ -51,6 +54,15 @@ def kimi_reply(body, prompt, expected_chat=None, expected_parent=None):
             if value.get("id") != expected_chat or op != "set" or mask not in ("", "chat.name", "chat.lastRequest"):
                 raise ProviderUnavailable("Kimi response belongs to a different conversation")
             chat_seen = True
+            if mask == 'chat.lastRequest' and expected_model is not None:
+                request = value.get('lastRequest')
+                options = request.get('options') if isinstance(request, dict) else None
+                if (model_confirmed or not isinstance(options, dict)
+                        or options.get('model') != expected_model
+                        or request.get('scenario') != expected_scenario
+                        or options.get('enablePlugin') is not False):
+                    raise ProviderUnavailable('Kimi did not confirm the requested model and mode')
+                model_confirmed = True
         elif kind == "message":
             identity = value.get("id")
             if not chat_seen or not isinstance(identity, str) or not identity or op != "set":
@@ -61,6 +73,8 @@ def kimi_reply(body, prompt, expected_chat=None, expected_parent=None):
                     raise ProviderUnavailable("Kimi assistant did not complete successfully")
                 completed = True
             elif mask in ("", "message"):
+                if expected_scenario is not None and value.get('scenario') != expected_scenario:
+                    raise ProviderUnavailable('Kimi changed the requested message scenario')
                 if role == "system" and user is None and identity == expected_chat and status == "MESSAGE_STATUS_COMPLETED":
                     continue
                 if role == "user" and user is None and assistant is None:
@@ -129,6 +143,6 @@ def kimi_reply(body, prompt, expected_chat=None, expected_parent=None):
         else:
             raise ProviderUnavailable("Kimi returned an unsupported notification")
     text = "".join(texts.values())
-    if not done or not completed or not text.strip():
+    if not done or not completed or not model_confirmed or not text.strip():
         raise ProviderUnavailable("Kimi returned no completed assistant text")
     return text, expected_chat, assistant

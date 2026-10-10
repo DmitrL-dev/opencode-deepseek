@@ -1,3 +1,5 @@
+import base64
+import copy
 import json
 import os
 from pathlib import Path
@@ -15,7 +17,19 @@ from providers.conversations import encode, decode
 from providers.kimi_auth import save_capture, validate_session
 from providers.kimi_http import KimiClient, MODEL, CHAT_PATH
 from tests.test_kimi_auth import session
-from tests.test_kimi_protocol import fixture, wire
+from tests.test_kimi_protocol import fixture, wire, envelope
+from providers.kimi_models import MODELS, PUBLIC_MODELS
+
+
+def model_fixture(model=MODEL):
+    frames = fixture()
+    for frame in frames:
+        if frame.get('mask') == 'message':
+            frame['message']['scenario'] = MODELS[model]['scenario']
+    frames.insert(2, {'op': 'set', 'mask': 'chat.lastRequest', 'chat': {
+        'id': 'owned-chat', 'lastRequest': {'scenario': MODELS[model]['scenario'],
+        'options': {'model': model, 'enablePlugin': False}}}})
+    return frames
 
 
 class KimiHttpTests(unittest.TestCase):
@@ -39,7 +53,7 @@ class KimiHttpTests(unittest.TestCase):
 
     def run_chat(self, client, **kwargs):
         with self.guard.attempt('kimi') as attempt, attempt.bind():
-            return client.chat('owned prompt', model=MODEL, **kwargs)
+            return client.chat('owned prompt', model=kwargs.pop('model', MODEL), **kwargs)
 
     def test_direct_request_is_bound_and_completed_before_exposing_text(self):
         def handler(request):
@@ -49,17 +63,72 @@ class KimiHttpTests(unittest.TestCase):
             self.assertEqual(body['options']['model'], MODEL)
             self.assertEqual(body['options']['reasoning_effort'], 'REASONING_EFFORT_NONE')
             self.assertEqual(body['chat_id'], '')
-            return httpx.Response(200, content=wire(fixture()), headers={'Content-Type': 'application/connect+json'})
+            return httpx.Response(200, content=wire(model_fixture()), headers={'Content-Type': 'application/connect+json'})
         result = self.run_chat(self.client(handler))
         self.assertEqual(result.text, 'answer')
         self.assertEqual(decode(result.conversation_id, 'kimi'), (MODEL, '/chat/owned-chat/parent/assistant'))
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(self.guard.status(), {})
 
+    def test_each_model_preserves_selection_and_disables_optional_cloud_tools(self):
+        for model, spec in MODELS.items():
+            with self.subTest(model=model):
+                self.guard = AccessGuard(None, interval=0)
+                def handler(request):
+                    body = json.loads(request.content[5:])
+                    self.assertEqual(body['options']['model'], model)
+                    self.assertEqual(body['scenario'], spec['scenario'])
+                    self.assertEqual(body['message']['scenario'], spec['scenario'])
+                    self.assertEqual(body['options']['reasoning_effort'], spec['effort'])
+                    self.assertIs(body['options']['enable_plugin'], False)
+                    self.assertEqual(body['tools'], [])
+                    self.assertNotIn('SWARM', request.content.decode(errors='replace'))
+                    if model != MODEL:
+                        self.assertEqual(body['kimiplus_id'], 'ok-computer')
+                        self.assertEqual(body['options']['context_length'], 'CONTEXT_LENGTH_L')
+                    return httpx.Response(200, content=wire(model_fixture(model)),
+                                          headers={'Content-Type': 'application/connect+json'})
+                reply = self.run_chat(self.client(handler), model=model)
+                self.assertEqual(decode(reply.conversation_id, 'kimi')[0], model)
+                self.assertEqual(reply.text, 'answer')
+
+    def test_missing_or_changed_model_echo_cannot_silently_fallback(self):
+        base = model_fixture('k3-agent')
+        missing = copy.deepcopy(base); del missing[2]
+        changed = copy.deepcopy(base); changed[2]['chat']['lastRequest']['options']['model'] = MODEL
+        plugins = copy.deepcopy(base); plugins[2]['chat']['lastRequest']['options']['enablePlugin'] = True
+        scenario = copy.deepcopy(base); scenario[3]['message']['scenario'] = 'SCENARIO_CHAT'
+        duplicate = copy.deepcopy(base); duplicate.insert(3, copy.deepcopy(duplicate[2]))
+        for frames in (missing, changed, plugins, scenario, duplicate):
+            with self.subTest(frames=frames):
+                self.guard = AccessGuard(None, interval=0)
+                before = len(self.requests)
+                with self.assertRaises(RuntimeError):
+                    self.run_chat(self.client(lambda request: httpx.Response(200,
+                        content=wire(frames), headers={'Content-Type': 'application/connect+json'})), model='k3-agent')
+                self.assertEqual(len(self.requests), before + 1)
+                self.assertEqual(self.guard.status()['kimi'], 'upstream_failure')
+
+    def test_capacity_refusal_is_durable_without_replay_or_account_details(self):
+        error = {'code': 'resource_exhausted', 'message': 'private account detail', 'details': [{
+            'type': 'common.error.v1.ErrorDetail', 'value': base64.b64encode(bytes([8, 117])).decode()}]}
+        self.guard = AccessGuard(self.path.parent / 'pauses.json', interval=0)
+        client = self.client(lambda request: httpx.Response(200, content=envelope({'error': error}, 2),
+            headers={'Content-Type': 'application/connect+json'}))
+        with self.assertRaises(ProviderRejected) as failure:
+            self.run_chat(client, model='k3-agent')
+        self.assertEqual(failure.exception.code, 'capacity_unavailable')
+        self.assertNotIn('private account', str(failure.exception))
+        self.guard = AccessGuard(self.path.parent / 'pauses.json', interval=0)
+        with self.assertRaises(ProviderRejected):
+            self.run_chat(client, model='k28-agent-preview')
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(self.guard.status()['kimi'], 'capacity_unavailable')
+
     def test_resumed_parent_must_match_and_browser_token_cannot_cross_transport(self):
         token = encode('kimi', MODEL, '/chat/owned-chat/parent/previous')
-        frames = fixture()
-        frames[2]['message']['parentId'] = 'previous'
+        frames = model_fixture()
+        frames[3]['message']['parentId'] = 'previous'
         def handler(request):
             body = json.loads(request.content[5:])
             self.assertEqual(body['chat_id'], 'owned-chat')
@@ -70,7 +139,7 @@ class KimiHttpTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.run_chat(client, conversation_id=encode('kimi', 'default', '/chat/owned-chat'))
         self.assertEqual(len(self.requests), 1)
-        frames[2]['message']['parentId'] = 'other'
+        frames[3]['message']['parentId'] = 'other'
         with self.assertRaises(RuntimeError):
             self.run_chat(client, conversation_id=token)
         self.assertEqual(self.guard.status()['kimi'], 'upstream_failure')
@@ -102,7 +171,7 @@ class KimiHttpTests(unittest.TestCase):
 
     def test_partial_disconnect_and_redirect_never_return_answer_or_retry(self):
         for response in (httpx.Response(302, headers={'Location': 'https://evil.invalid'}),
-                         httpx.Response(200, content=wire(fixture())[:-1], headers={'Content-Type': 'application/connect+json'}),
+                         httpx.Response(200, content=wire(model_fixture())[:-1], headers={'Content-Type': 'application/connect+json'}),
                          httpx.Response(200, content=b'answer', headers={'Content-Type': 'text/html'})):
             self.guard = AccessGuard(None, interval=0)
             count = len(self.requests)
@@ -117,7 +186,7 @@ class KimiHttpTests(unittest.TestCase):
             'import json; from server.config import MODEL_MAP, model_provider; '
             'print(json.dumps({k:[v,model_provider(k)] for k,v in MODEL_MAP.items() if k.startswith("kimi-")}))'],
             env=env, capture_output=True, text=True, check=True, timeout=10)
-        self.assertEqual(json.loads(result.stdout), {'kimi-instant': [MODEL, 'kimi']})
+        self.assertEqual(json.loads(result.stdout), {public: [model, 'kimi'] for public, model in PUBLIC_MODELS.items()})
         from providers.registry import build_client
         with patch.dict(os.environ, env):
             self.assertIsInstance(build_client('kimi', lambda: None), KimiClient)

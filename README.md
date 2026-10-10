@@ -24,7 +24,7 @@
 В этом режиме вкладки для запросов не нужны: Qwen проверен с закрытым браузером,
 а адаптеры вкладок GLM, `kimi-web`, Grok и Mistral исключены из группы моста.
 Для Kimi добавлен отдельный экспериментальный [HTTP-режим](docs/KIMI.md):
-`kimi-instant`, выключен по умолчанию; прямой ответ, обмен токенов и Harness с `read` проверены 10 октября. Первоначальный вход Qwen
+`kimi-instant`, `kimi-k3` и `kimi-k2.8`, выключен по умолчанию. Instant: ответ, обмен токенов и Harness с `read` проверены 10 октября. K3: сервер отказал из-за перегрузки бесплатного доступа; K2.8 после отказа не запускали. Первоначальный вход Qwen
 по-прежнему проходит в браузере. [Что доступно без вкладок](docs/HARNESS.ru.md#работа-без-открытого-браузера).
 
 **Это форк с исправлениями и новыми адаптерами. Всё опубликованное ниже уже в
@@ -67,7 +67,7 @@
 | **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Chat: Harness + `read` без браузера, 10 октября; Expert повторно не проверен | [Вход + сохранённая сессия](docs/SETUP.ru.md#4-вход-в-deepseek-один-раз) |
 | **Qwen** | `qwen3.8-omni-flash` / `qwen3.8-max` | Flash и Max проверены | [Отдельная сессия Qwen](docs/SETUP.ru.md#qwen-chat) |
 | **GLM / Z.ai** | `glm-web` | Проверено; в тесте GLM-5.3-Flash | [Ваша вкладка Safari](browser/README.md#safari) |
-| **Kimi** | `kimi-instant` / `kimi-web` | Instant: HTTP, refresh и Harness + `read` без браузера, 10 октября; вкладочный режим проверен ранее | [HTTP-сессия](docs/KIMI.md) / [Safari](browser/README.md#safari) |
+| **Kimi** | `kimi-instant`, `kimi-k3`, `kimi-k2.8` / `kimi-web` | Instant: HTTP, refresh и Harness + `read` без браузера, 10 октября; K3/K2.8 ещё не прошли сквозную проверку; вкладочный режим проверен ранее | [HTTP-сессия](docs/KIMI.md) / [Safari](browser/README.md#safari) |
 | **Mistral / Vibe** | `mistral-web` | Один ответ прошёл; продолжение — `429`. Агент не проверен | Эксперимент, выключен по умолчанию |
 | **Grok** | `grok-web` | Сайт отвечает; мост не захватывает завершённый ответ | Эксперимент, выключен по умолчанию |
 | **Gemini** | Задаются из `agy models` | Вход прошёл; запрос отклонён по региону | [Официальный Antigravity CLI](browser/README.md#gemini), выключен |

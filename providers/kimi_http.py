@@ -1,4 +1,4 @@
-"""One guarded Kimi Instant completion, using an explicitly captured session."""
+"""One guarded Kimi completion, using an explicitly captured session."""
 
 import json
 import os
@@ -13,6 +13,7 @@ from .common import BufferedStream, ProviderUnavailable, completion_timeout
 from .conversations import decode, encode
 from .kimi_auth import SESSION_FILE, request_headers, usable_session
 from .kimi_protocol import kimi_reply
+from .kimi_models import MODELS, request_payload
 
 MODEL = 'k2d6-chat'
 CHAT_PATH = '/apiv2/kimi.gateway.chat.v1.ChatService/Chat'
@@ -37,26 +38,21 @@ class KimiClient:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 1024 * 1024:
             raise ValueError('Kimi requires a nonempty text prompt up to 1 MiB')
         if thinking or search:
-            raise ValueError('Kimi Instant does not support thinking/search switches')
+            raise ValueError('Direct Kimi uses fixed model modes; thinking/search switches are unsupported')
         chat = parent = None
         if conversation_id:
             model, reference = decode(conversation_id, 'kimi')
-            if model != MODEL:
+            if model not in MODELS:
                 raise ValueError('A browser conversation cannot be resumed through direct Kimi')
             _, _, chat, _, parent = reference.split('/')
-        if model != MODEL:
-            raise ValueError('Direct Kimi supports only the verified Instant model')
+        if model not in MODELS:
+            raise ValueError('Unsupported direct Kimi model')
         timeout = completion_timeout()
         with provider_attempt('kimi', self.check_cancelled) as attempt:
             session = usable_session(attempt, self.session_file, self.renew, self.client_factory)
             headers = {**request_headers(session), 'Authorization': 'Bearer ' + session['token'],
                        'Content-Type': 'application/connect+json', 'Accept': 'application/connect+json'}
-            message = {'role': 'user', 'blocks': [{'text': {'content': prompt}}], 'scenario': 'SCENARIO_CHAT'}
-            if parent:
-                message['parent_id'] = parent
-            payload = {'chat_id': chat or '', 'scenario': 'SCENARIO_CHAT', 'tools': [],
-                       'message': message, 'options': {'model': MODEL, 'thinking': True,
-                       'reasoning_effort': 'REASONING_EFFORT_NONE', 'enable_plugin': False}}
+            payload = request_payload(prompt, model, chat, parent)
             data = json.dumps(payload, separators=(',', ':')).encode()
             wire = b'\0' + struct.pack('>I', len(data)) + data
             with self.client_factory(trust_env=False, follow_redirects=False, timeout=min(timeout, 30)) as client:
@@ -77,8 +73,9 @@ class KimiClient:
                 except httpx.HTTPError:
                     raise rejection() from None
             attempt.check()
-            text, chat, assistant = kimi_reply(body, prompt, chat, parent)
-            token = encode('kimi', MODEL, '/chat/' + chat + '/parent/' + assistant)
+            text, chat, assistant = kimi_reply(body, prompt, chat, parent,
+                                               model, MODELS[model]['scenario'])
+            token = encode('kimi', model, '/chat/' + chat + '/parent/' + assistant)
             return Reply(text, token)
 
     def stream(self, *args, **kwargs):

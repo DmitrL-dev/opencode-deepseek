@@ -4,6 +4,7 @@ import base64
 import json
 import re
 from uuid import UUID
+from .kimi_models import MODELS as KIMI_MODELS
 
 PROVIDERS = frozenset(("gemini", "grok", "mistral", "kimi", "glm"))
 _MODEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
@@ -32,7 +33,7 @@ def validate_reference(provider, model, reference):
                 raise ValueError()
         except ValueError:
             raise ValueError("Invalid Gemini conversation reference") from None
-    elif provider == 'kimi' and model == 'k2d6-chat':
+    elif provider == 'kimi' and model in KIMI_MODELS:
         if not re.fullmatch(r'/chat/[A-Za-z0-9_-]{1,128}/parent/[A-Za-z0-9_-]{1,128}', reference):
             raise ValueError('Invalid direct Kimi conversation reference')
     elif not _PATHS[provider].fullmatch(reference):

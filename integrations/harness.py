@@ -17,6 +17,7 @@ import uuid
 import httpx
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+from providers.kimi_models import MODELS as KIMI_MODELS, PUBLIC_MODELS as KIMI_PUBLIC_MODELS
 
 
 ROUTE = "local-browser-bridge"
@@ -33,6 +34,7 @@ LABELS = {
     "grok-web": "Grok · experimental",
     "mistral-web": "Mistral · experimental",
 }
+LABELS.update({spec['public_id']: spec['label'] for spec in KIMI_MODELS.values()})
 
 
 def local_url(value: str) -> str:
@@ -81,7 +83,7 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
     if without_browser:
         models = [model for row, model in zip(rows, models)
                   if row["owned_by"] in BROWSERLESS_PROVIDERS
-                  or (row['owned_by'] == 'kimi' and row['id'] == 'kimi-instant')]
+                  or (row['owned_by'] == 'kimi' and row['id'] in KIMI_PUBLIC_MODELS)]
         if not models:
             raise ValueError("Bridge advertises no browserless models for --without-browser")
     return models
