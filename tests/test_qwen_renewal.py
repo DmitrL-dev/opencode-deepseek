@@ -197,7 +197,7 @@ class QwenRenewalTests(unittest.TestCase):
                success(access_token=jwt(type="refresh", exp=NOW + 900)),
                success(access_token="malformed"), success(access_token="x" * 32769),
                success(access_token=jwt(exp=NOW + 30)), success(expires_at=NOW + 60),
-               success(expires_at=NOW - 20), success(expires_at=0), success(expires_at=None),
+               success(expires_at=NOW - 20), success(expires_at=0),
                success(expires_at=True),
                success(expires_at=float("nan")), success(expires_at="invalid"),
                {"success": 1, "data": success()["data"]}, {"success": True, "data": []}]
@@ -222,6 +222,20 @@ class QwenRenewalTests(unittest.TestCase):
     def test_response_and_jwt_expiry_use_the_safe_minimum(self):
         self.respond = lambda request: httpx.Response(200, json=success(expires_at=NOW + 800))
         self.assertEqual(self.run_renewal().expires_at, NOW + 800)
+
+    def test_null_response_expiry_uses_validated_jwt_expiry_like_the_website(self):
+        self.respond = lambda request: httpx.Response(200, json=success(expires_at=None))
+        self.assertEqual(self.run_renewal().expires_at, NOW + 900)
+
+    def test_failure_diagnostics_omit_exception_details_and_credentials(self):
+        def fail(request):
+            raise httpx.ReadTimeout("synthetic-private-cookie-and-token", request=request)
+        self.respond = fail
+        with self.assertLogs("qwen.renewal", level="WARNING") as output:
+            self.assert_post_dispatch_failure()
+        rendered = " ".join(output.output)
+        self.assertIn("exception=ReadTimeout", rendered)
+        self.assertNotIn("synthetic", rendered)
 
     def test_missing_server_expiry_uses_the_validated_fresh_jwt_expiry(self):
         payload = success()
