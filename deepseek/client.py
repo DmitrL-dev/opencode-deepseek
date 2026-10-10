@@ -156,7 +156,7 @@ class DeepSeekClient:
                 return self.create_chat_session(attempt)
         self._diagnostic_phase, self._diagnostic_status = "create_chat", None
         if access_attempt is not None:
-            access_attempt.dispatch()
+            access_attempt.dispatch(kind="chat")
         r = self._http.post("/api/v0/chat_session/create", json={})
         self._diagnostic_status = r.status_code
         r.raise_for_status()
@@ -272,9 +272,11 @@ class _Stream:
 
     def _dispatch(self):
         if self.access_attempt is not None:
-            self.access_attempt.dispatch()
+            self.access_attempt.dispatch(kind="generation")
 
     def _generate(self) -> Iterator[str]:
+        if self.access_attempt is not None:
+            self.access_attempt.preflight_generation(self._session_id is None)
         if self._session_id is None:
             self._session_id = self._client.create_chat_session(access_attempt=self.access_attempt)
         body = {

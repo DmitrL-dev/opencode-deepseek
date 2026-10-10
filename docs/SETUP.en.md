@@ -18,7 +18,7 @@ request in response to refusal. The separate Qwen renewal option is described
 under Qwen Chat. Inspect: `python -m providers.access status`. After manually confirming
 normal website access: `python -m providers.access resume qwen` (choose the
 actual provider). Sign-in does not clear a pause. Provider attempts, including
-tool continuations, are spaced by 10 seconds by default.
+tool continuations, are spaced by 30 seconds by default.
 
 ## Requirements
 
@@ -637,7 +637,7 @@ variables take precedence.
 | `RATE_LIMIT_PER_MINUTE` | `30` | Requests/min per client IP (`/healthz` not counted) |
 | `DEEPSEEK_PROFILE_DIR` | — | Reuse an existing Chrome profile with an active session |
 | `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
-| `PROVIDER_MIN_INTERVAL` | `10` | Seconds between provider attempts/continuations; not a quota guarantee |
+| `PROVIDER_MIN_INTERVAL` | `30` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
 | `TOOLCALL_MAX_CONTINUATIONS` | `0` | Explicit opt-in continuation budget for provider-confirmed output limits; normal stops never trigger continuation |

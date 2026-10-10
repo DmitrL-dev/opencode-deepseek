@@ -495,6 +495,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                             raise auth_error()
                             yield
                     old.stream.return_value = BrokenStream()
+                old.chat.side_effect = lambda *args: list(old.stream())
                 new.stream.return_value = TextStream()
                 with patch.object(api,"get_client",side_effect=[old,new]) as get_client:
                     response = await self.post(stream=True)
@@ -852,7 +853,7 @@ class RefreshAndStartupTests(unittest.TestCase):
     def test_rejected_stale_client_reuses_already_refreshed_client(self):
         old, current = Mock(),Mock()
         current.session.age = 0
-        with patch.object(api,"_client",current), patch.object(api,"_build_client") as build:
+        with patch.object(api.conversation_cache, "account_identity", return_value="isolated"), patch.object(api,"_client",current), patch.object(api,"_client_identity", "isolated"), patch.object(api,"_build_client") as build:
             self.assertIs(api.get_client(True,rejected_client=old),current)
             build.assert_not_called()
 

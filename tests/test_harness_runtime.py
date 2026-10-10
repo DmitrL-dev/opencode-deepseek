@@ -23,6 +23,7 @@ from integrations.harness import ROUTE, catalog_models, patch_document, render, 
 from providers import access
 from providers.access import AccessGuard, ProviderRejected
 from server import api
+from server.conversation_cache import ConversationCache
 from tests.test_tools import block
 
 FILE_PAYLOAD = 'line 1\n"quoted" and \\backslash\n```python\nprint("fixture")\n```\n'
@@ -38,9 +39,10 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.workspace.mkdir()
         (self.workspace / "fixture.txt").write_text("HARNESS_OWNED_FILE_73\n")
         self.guard = AccessGuard(self.root / "pauses.json", interval=0)
-        self.calls, self.prompts = [], []
+        self.calls, self.prompts, self.conversation_args = [], [], []
         self.behavior = "text"
         self.addCleanup(patch.stopall)
+        patch.object(api, "conversation_cache", ConversationCache(self.root / "conversations.sqlite3")).start()
         patch.object(api, "guard", self.guard).start()
         patch.object(access, "guard", self.guard).start()
         patch.dict(api.MODEL_MAP, {"deepseek-chat": "default"}, clear=True).start()
@@ -98,6 +100,7 @@ class HarnessRuntimeTests(unittest.TestCase):
         attempt = access.current_attempt("deepseek")
         attempt.dispatch()
         self.prompts.append(prompt)
+        self.conversation_args.append(args)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
         if self.behavior in ("format_correction", "dsml_correction"):
@@ -152,14 +155,14 @@ class HarnessRuntimeTests(unittest.TestCase):
         attempt.complete()
         return Reply(answer, "owned-fixture:2")
 
-    def run_harness(self):
+    def run_harness(self, prompt="Run the owned bridge fixture."):
         # Do not inherit account credentials, proxies, a user's DSH_HOME, or a
         # user's workspace .env. HOME is isolated as well as Harness storage.
         env = {key: os.environ[key] for key in ("PATH", "TMPDIR", "SYSTEMROOT", "ELECTRON_RUN_AS_NODE") if key in os.environ}
         env.update(HOME=str(self.root), DSH_HOME=str(self.root / "dsh"),
                    DSH_TELEMETRY_MODE="DISABLED", NO_PROXY="127.0.0.1,::1")
         result = subprocess.run(self.command + ["--profile", "headless", "--patch", str(self.overlay),
-                                               "--json", "Run the owned bridge fixture."],
+                                               "--json", prompt],
                                 cwd=self.workspace, env=env, capture_output=True, text=True, timeout=90)
         # Only owned synthetic messages can enter this transcript.
         self.assertNotIn("MISSING_CREDENTIAL", result.stdout + result.stderr)
@@ -231,6 +234,17 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.prompts), 2)
         self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_native_followup_reuses_chat_and_omits_old_prompt(self):
+        self.behavior = 'tools'
+        result = self.run_harness('Explore fixture. INITIAL_CONTEXT_SENT_ONCE_84')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.conversation_args), 2)
+        self.assertEqual(self.conversation_args[0][:2], (None, 'default'))
+        self.assertEqual(self.conversation_args[1][:2], ('owned-fixture:2', None))
+        self.assertIn('INITIAL_CONTEXT_SENT_ONCE_84', self.prompts[0])
+        self.assertNotIn('INITIAL_CONTEXT_SENT_ONCE_84', self.prompts[1])
+        self.assertIn('HARNESS_OWNED_FILE_73', self.prompts[1])
 
     def test_combined_envelope_errors_complete_a_native_tool_round_trip(self):
         self.behavior = 'combined_envelopes'

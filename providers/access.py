@@ -21,6 +21,7 @@ else:
 
 PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini'))
 MESSAGES = {
+    'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
     'quota_exceeded': 'The provider rejected the request because of a quota or usage limit.',
     'capacity_unavailable': 'The provider has no capacity for this free account right now. Automatic retries are disabled.',
@@ -67,7 +68,7 @@ def _file_lock(file, unlock=False):
 class AccessGuard:
     def __init__(self, path=ROOT / 'session' / 'provider-pauses.json', interval=None):
         self.path = Path(path) if path is not None else None
-        self.interval = float(os.getenv('PROVIDER_MIN_INTERVAL', '10') if interval is None else interval)
+        self.interval = float(os.getenv('PROVIDER_MIN_INTERVAL', '30') if interval is None else interval)
         if not math.isfinite(self.interval) or not 0 <= self.interval <= 3600:
             raise ValueError('PROVIDER_MIN_INTERVAL must be between 0 and 3600 seconds')
         self._lock = threading.RLock()
@@ -86,7 +87,7 @@ class AccessGuard:
             # Upgrade the initial flat pause format without losing restrictions.
             if isinstance(item, str) and item in MESSAGES:
                 item = {'pause': item}
-            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at'}:
+            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at', 'next_http_at', 'usage'}:
                 raise ValueError('Invalid provider record')
             pause, pending, dispatched, next_at = item.get('pause'), item.get('pending'), item.get('dispatched', False), item.get('next_at', 0)
             if (pause is not None and (not isinstance(pause, str) or pause not in MESSAGES)
@@ -97,6 +98,17 @@ class AccessGuard:
                 raise ValueError('Invalid provider state')
             if dispatched and pending is None:
                 raise ValueError('Dispatch record lacks an attempt owner')
+            next_http_at = item.get('next_http_at', 0)
+            if (isinstance(next_http_at, bool) or not isinstance(next_http_at, (int, float))
+                    or not math.isfinite(next_http_at) or next_http_at < 0):
+                raise ValueError('Invalid HTTP pacing state')
+            usage = item.get('usage', [])
+            if (not isinstance(usage, list) or len(usage) > 1000
+                    or any(not isinstance(entry, list) or len(entry) != 2
+                           or entry[1] not in ('http', 'chat', 'generation')
+                           or isinstance(entry[0], bool) or not isinstance(entry[0], (int, float))
+                           or not math.isfinite(entry[0]) or entry[0] < 0 for entry in usage)):
+                raise ValueError('Invalid usage ledger')
             records[provider] = dict(item)
         return records
 
@@ -223,6 +235,23 @@ class AccessGuard:
                     for name, record in state.items() if name in self._failed or record.get('pause') or record.get('pending')}
 
 
+def _budget_usage(record, kind, now, http_cost=1):
+    usage = [entry for entry in record.get('usage', []) if entry[0] > now - 86400]
+    # Local ceilings only, not provider-approved quotas.
+    limits = [(3600, None, 40), (86400, None, 200),
+              (3600, 'chat', 3), (86400, 'chat', 6),
+              (3600, 'generation', 12), (86400, 'generation', 60)]
+    for window, category, maximum in limits:
+        if category is None or category == kind:
+            count = sum(t > now - window and (category is None or k == category)
+                        for t, k in usage)
+            if count + (http_cost if category is None else 1) > maximum:
+                error = ProviderRejected('local_budget_exceeded')
+                error.before_dispatch = True
+                raise error
+    return usage
+
+
 class Attempt:
     def __init__(self, guard, provider, cancelled):
         self.guard, self.provider, self.cancelled = guard, provider, cancelled
@@ -245,7 +274,19 @@ class Attempt:
         if self.cancelled:
             self.cancelled()
 
-    def dispatch(self, validate=None):
+    def preflight_generation(self, new_chat):
+        """Check the whole HTTP sequence before creating a chat or challenge."""
+        self.check()
+        if self.provider == 'deepseek':
+            with self.guard._state() as state:
+                record = state[self.provider]
+                _budget_usage(record, 'generation', time.time(), 3 if new_chat else 2)
+                if new_chat:
+                    _budget_usage(record, 'chat', time.time(), 3)
+
+    def dispatch(self, validate=None, kind="http"):
+        if kind not in ('http', 'chat', 'generation'):
+            raise ValueError('Unknown dispatch kind')
         while True:
             self.check()
             if validate is not None:
@@ -255,13 +296,22 @@ class Attempt:
                 if record.get('pending') != self.id or record.get('pause'):
                     raise ProviderRejected(record.get('pause') or 'upstream_failure')
                 delay = 0 if self.dispatched else record.get('next_at', 0) - time.time()
+                if self.provider == 'deepseek':
+                    delay = max(delay, record.get('next_http_at', 0) - time.time())
                 if delay <= 0:
+                    if self.provider == 'deepseek':
+                        now = time.time()
+                        usage = _budget_usage(record, kind, now)
+                        record['usage'] = [*usage, [now, kind]]
+                        record['next_http_at'] = now + min(self.guard.interval, 3)
                     if validate is not None:
                         validate()
                     if not self.dispatched:
                         record.update(dispatched=True, next_at=time.time() + self.guard.interval)
                         self.guard._save(state)
                         self.dispatched = True
+                    else:
+                        self.guard._save(state)
             if delay <= 0:
                 # Saving/fsync and lock acquisition can block. Revoke the
                 # authorization if cancellation or resume happened meanwhile.
