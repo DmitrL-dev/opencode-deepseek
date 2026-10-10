@@ -26,6 +26,10 @@ _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
 _TOOL_BLOCK_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n(.*?)\r?\n```[ \t]*\Z", re.DOTALL)
 _TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
+_TOOL_MARKUP_RE = re.compile(
+    r"(?m)^[ \t]*```tool_calls[ \t]*\r?$"
+    r"|^[ \t]*<｜｜DSML｜｜ calls>(?=\s*<｜｜DSML｜｜ invoke\b)"
+)
 # Observed web-model terminators after an otherwise complete JSON array. Only
 # closing syntax is allowed; no opening tag, content, or second call can match.
 _DSML_CLOSERS = r"</｜｜DSML｜｜ parameter>\s*</｜｜DSML｜｜ invoke>\s*</｜｜DSML｜｜ calls>"
@@ -34,6 +38,15 @@ _CLOSING_ARTIFACTS_RE = re.compile(r"\A(?:\}|(?:\}\s*)?" + _DSML_CLOSERS + r")\Z
 
 class ToolCallError(RuntimeError):
     """The model emitted an invalid or disallowed explicit tool reply."""
+
+
+def has_tool_call_markup(text: str) -> bool:
+    """Recognize call framing, not inline protocol names in a final report.
+
+    Detection alone never authorizes execution: callers may request one fresh
+    formatted response, which must pass the full parser and tool-choice policy.
+    """
+    return bool(_TOOL_MARKUP_RE.search(text))
 
 
 def _text_of(content) -> str:
