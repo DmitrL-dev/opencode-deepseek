@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import tempfile
@@ -105,13 +106,31 @@ class QwenRenewalTests(unittest.TestCase):
         self.assertEqual(request.headers["source"], "web")
         self.assertEqual(uuid.UUID(request.headers["x-request-id"]).version, 4)
         self.assertNotIn("sec-fetch-site", request.headers)
-        self.assertNotIn("timezone", request.headers)
+        self.assertEqual(request.headers["accept-language"], "en-US,en;q=0.9")
+        self.assertRegex(request.headers["timezone"],
+                         r"^[A-Za-z]{3} [A-Za-z]{3} [0-9]{2} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT[+-][0-9]{4}$")
         self.assertEqual(request.headers["cookie"], "refresh_token=synthetic-refresh")
         self.assertNotIn("authorization", request.headers)
         self.assertTrue(renewed.usable)
         self.assertEqual(renewed.user_agent, self.original.user_agent)
         self.assertEqual(Session.load(self.path), renewed)
         self.assertEqual(self.guard.status(), {})
+
+    def test_timezone_header_uses_current_host_local_datetime_and_offset(self):
+        for minutes, suffix in ((570, "+0930"), (-210, "-0330")):
+            with self.subTest(offset=suffix):
+                self.original.save(self.path)
+                self.requests.clear()
+                local = datetime(2026, 10, 10, 13, 14, 15,
+                                 tzinfo=timezone(timedelta(minutes=minutes)))
+                with patch("qwen.renewal.datetime") as clock:
+                    clock.now.return_value.astimezone.return_value = local
+                    self.run_renewal()
+                    clock.now.assert_called_once_with()
+                    clock.now.return_value.astimezone.assert_called_once_with()
+                self.assertEqual(self.requests[0].headers["timezone"],
+                                 "Sat Oct 10 2026 13:14:15 GMT" + suffix)
+                self.assertEqual(self.requests[0].headers["accept-language"], "en-US,en;q=0.9")
 
     def test_reloads_disk_and_returns_already_usable_session_without_http(self):
         valid = cached()
@@ -171,6 +190,70 @@ class QwenRenewalTests(unittest.TestCase):
         self.respond = lambda request: httpx.Response(200, json={"success": False,
             "data": {"code": "muted", "message": "synthetic-secret"}})
         self.assert_post_dispatch_failure("account_restricted")
+
+    def test_response_shape_diagnostics_distinguish_envelope_failures_without_secrets(self):
+        cases = [
+            ({"synthetic-private-key": "synthetic-private-value"}, "missing_success", "null"),
+            ({"success": False, "data": None}, "success_false", "null"),
+            ({"success": True, "data": "synthetic-private-value"}, "invalid_data", "string"),
+            ({"success": "synthetic-private-value", "data": []}, "invalid_success", "array"),
+            (["synthetic-private-key", "synthetic-private-value"], "missing_success", "null"),
+        ]
+        for index, (payload, reason, data_type) in enumerate(cases):
+            with self.subTest(reason=reason, index=index):
+                isolated = AccessGuard(Path(self.temp.name) / f"shape-{index}.json", interval=0)
+                with patch.object(self, "guard", isolated):
+                    self.requests.clear()
+                    self.respond = lambda request, payload=payload: httpx.Response(200, json=payload,
+                        headers={"synthetic-private-header": "synthetic-private-value"})
+                    with self.assertLogs("qwen.renewal", level="WARNING") as output:
+                        self.assert_post_dispatch_failure()
+                    rendered = " ".join(output.output)
+                    self.assertIn("reason=" + reason, rendered)
+                    self.assertIn("data_type=" + data_type, rendered)
+                    self.assertIn("success_present=", rendered)
+                    self.assertIn("success_true=", rendered)
+                    self.assertNotIn("synthetic", rendered)
+
+    def test_response_diagnostics_only_emit_bounded_numeric_business_codes(self):
+        cases = [(451, "451"), ("403", "403"), (999999, "999999"),
+                 (1000000, "None"), (-1, "None"), (True, "None"),
+                 (401.5, "None"), ("synthetic-private-code", "None"),
+                 ({"synthetic-private-key": "synthetic-private-value"}, "None")]
+        for index, (code, expected) in enumerate(cases):
+            with self.subTest(index=index):
+                isolated = AccessGuard(Path(self.temp.name) / f"shape-code-{index}.json", interval=0)
+                with patch.object(self, "guard", isolated):
+                    self.requests.clear()
+                    self.respond = lambda request, code=code: httpx.Response(200, json={
+                        "success": False, "data": {"code": code, "message": "synthetic-private-value"}})
+                    with self.assertLogs("qwen.renewal", level="WARNING") as output:
+                        self.assert_post_dispatch_failure("access_denied" if code == "403" else "upstream_failure")
+                    shape = next(line for line in output.output if "response rejected:" in line)
+                    self.assertTrue(shape.endswith("business_code=" + expected), shape)
+                    self.assertNotIn("synthetic", " ".join(output.output))
+
+    def test_known_business_codes_are_logged_canonically_without_changing_rejections(self):
+        cases = [("Unauthorized", "unauthorized", "session_expired"),
+                 ("invalid token", "invalid token", "upstream_failure"),
+                 ("FORBIDDEN", "forbidden", "access_denied"),
+                 ("access_prohibited", "access_prohibited", "upstream_failure"),
+                 ("account_pending", "ACCOUNT_PENDING", "upstream_failure"),
+                 ("data_inspection_failed", "data_inspection_failed", "upstream_failure"),
+                 ("Bad_Request", "Bad_Request", "upstream_failure"),
+                 ("Bad_Request synthetic-private-value", "None", "upstream_failure")]
+        for index, (code, expected, pause) in enumerate(cases):
+            with self.subTest(index=index):
+                isolated = AccessGuard(Path(self.temp.name) / f"known-code-{index}.json", interval=0)
+                with patch.object(self, "guard", isolated):
+                    self.requests.clear()
+                    self.respond = lambda request, code=code: httpx.Response(200, json={
+                        "success": False, "data": {"code": code, "message": "synthetic-private-value"}})
+                    with self.assertLogs("qwen.renewal", level="WARNING") as output:
+                        self.assert_post_dispatch_failure(pause)
+                    shape = next(line for line in output.output if "response rejected:" in line)
+                    self.assertTrue(shape.endswith("business_code=" + expected), shape)
+                    self.assertNotIn("synthetic", " ".join(output.output))
 
     def test_numeric_business_codes_map_to_the_same_guard_pause(self):
         for status, code in ((401, "session_expired"), ("403", "access_denied"), (429, "quota_exceeded")):
