@@ -14,6 +14,35 @@ def block(calls):
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_observed_redundant_closer_preserves_every_call_and_argument(self):
+        commands = [
+            'printf "%s\\n" "quoted"',
+            'echo "literal }]}"\nprintf "second line"',
+            'python -m unittest tests.test_tools',
+        ]
+        original = [{"name": "bash", "arguments": {"command": command, "description": "fixture"}}
+                    for command in commands]
+        text = '```tool_calls\n' + json.dumps(original) + '}\n```'
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(text, {"bash"})
+        _, calls = parse_tool_calls(text, {"bash"}, allow_redundant_closer=True)
+        self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                         [item['arguments'] for item in original])
+
+    def test_redundant_closer_does_not_enable_general_json_repair(self):
+        good = '[{"name":"bash","arguments":{"command":"echo fixture"}}]'
+        payloads = [good + tail for tail in (']', '}}', '} prose', '}{}', ',{}', '{}', '\n' + good)]
+        payloads += [good[:-1] + ',{"name":"bash","arguments":{}}',
+                     '[{"name":"unknown","arguments":{}}]}',
+                     '[{"name":"bash","arguments":{"command":"raw\nnewline"}}]}',
+                     '[{"name":"bash","arguments":{}},{"name":"bash","arguments":[]}]}']
+        for body in payloads:
+            with self.subTest(body=body), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + body + '\n```', {'bash'}, allow_redundant_closer=True)
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls('```tool_calls\n' + good + '}', {'bash'},
+                             allow_unclosed_fence=True, allow_redundant_closer=True)
+
     def test_confirmed_stop_can_omit_only_the_markdown_closing_fence(self):
         arguments = {"command": 'printf "%s\\n" "quoted"\n# ``` stays data'}
         text = block([{"name": "bash", "arguments": arguments}])[:-4]

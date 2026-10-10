@@ -227,6 +227,26 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             fake.chat.assert_called_once()
             continuation.assert_not_called()
 
+    async def test_observed_redundant_closer_requires_normal_stop_and_tool_policy(self):
+        text = block([{"name": "bash", "arguments": {"command": "echo fixture"}}])[:-4] + '}\n```'
+        for finish in ('stop', 'length'):
+            for policy in ('auto', 'none'):
+                for stream in (False, True):
+                    with self.subTest(finish=finish, policy=policy, stream=stream):
+                        fake = Mock()
+                        fake.chat.return_value = Reply(text, 'fake:2', finish)
+                        with patch.object(api, 'get_client', return_value=fake), \
+                                patch.object(api, '_continue_reply') as continuation:
+                            response = await self.post(tools=TOOLS, tool_choice=policy, stream=stream)
+                        if finish == 'stop' and policy == 'auto':
+                            self.assertNotIn('"error":', response.text)
+                            self.assertIn('"tool_calls":', response.text)
+                        else:
+                            self.assertIn('"error":', response.text)
+                            self.assertNotIn('"tool_calls":', response.text)
+                        fake.chat.assert_called_once()
+                        continuation.assert_not_called()
+
     async def test_unfinished_json_after_normal_stop_never_requests_continuation(self):
         fake = Mock()
         fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{', "fake:2")
