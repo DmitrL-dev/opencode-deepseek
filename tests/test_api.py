@@ -201,7 +201,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             Reply('```tool_calls\n[{"name":"write","arguments":{}},{"name":"bash","arguments":{"command":"echo',"fake:2","length"),
             Reply(' audit"}}]\n```',"fake:4"),
         ]
-        with patch.object(api,"get_client",return_value=fake), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(api,"get_client",return_value=fake), patch.object(api,"_MAX_CONTINUATIONS",1), contextlib.redirect_stdout(io.StringIO()):
             response = await self.post(tools=TOOLS)
         self.assertEqual(response.status_code,200)
         body = response.json()
@@ -211,6 +211,47 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(calls[1]["function"]["arguments"]),{"command":"echo audit"})
         self.assertEqual(fake.chat.call_count,2)
         self.assertEqual(fake.chat.call_args_list[1].args[1:3],("fake:2",None))
+
+    async def test_normal_stop_with_complete_json_needs_no_fence_continuation(self):
+        text = block([{"name": "write", "arguments": {"content": "line 1\nline 2"}}])[:-4]
+        for stream in (False, True):
+            fake = Mock()
+            fake.chat.return_value = Reply(text, "fake:2", "stop")
+            with patch.object(api, "get_client", return_value=fake), \
+                    patch.object(api, "_MAX_CONTINUATIONS", 3), \
+                    patch.object(api, "_continue_reply") as continuation:
+                response = await self.post(tools=TOOLS, stream=stream)
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn('"error":', response.text)
+            self.assertIn('"tool_calls":', response.text)
+            fake.chat.assert_called_once()
+            continuation.assert_not_called()
+
+    async def test_unfinished_json_after_normal_stop_never_requests_continuation(self):
+        fake = Mock()
+        fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{', "fake:2")
+        with patch.object(api, "get_client", return_value=fake), \
+                patch.object(api, "_MAX_CONTINUATIONS", 3), \
+                patch.object(api, "_continue_reply") as continuation:
+            response = await self.post(tools=TOOLS)
+        self.assertEqual(response.status_code, 400)
+        fake.chat.assert_called_once()
+        continuation.assert_not_called()
+
+    async def test_output_limit_never_executes_even_a_complete_tool_array(self):
+        text = block([{"name": "write", "arguments": {}}])
+        for body in (text, text[:-4]):
+            for stream in (False, True):
+                fake = Mock()
+                fake.chat.return_value = Reply(body, "fake:2", "length")
+                with patch.object(api, "get_client", return_value=fake), \
+                        patch.object(api, "_MAX_CONTINUATIONS", 0), \
+                        patch.object(api, "_continue_reply") as continuation:
+                    response = await self.post(tools=TOOLS, stream=stream)
+                self.assertIn('"error":', response.text)
+                self.assertNotIn('"tool_calls":', response.text)
+                fake.chat.assert_called_once()
+                continuation.assert_not_called()
 
     async def test_exhausted_continuation_returns_error_instead_of_partial_write(self):
         fake = Mock()
@@ -223,9 +264,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_continuation_never_returns_partial_calls(self):
         fake = Mock()
-        fake.chat.side_effect = [Reply('```tool_calls\n[{"name":"write","arguments":{}},{',"fake:2"),
+        fake.chat.side_effect = [Reply('```tool_calls\n[{"name":"write","arguments":{}},{',"fake:2","length"),
                                  RuntimeError("network down")]
-        with patch.object(api,"get_client",return_value=fake), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(api,"get_client",return_value=fake), patch.object(api,"_MAX_CONTINUATIONS",1), contextlib.redirect_stdout(io.StringIO()):
             response = await self.post(tools=TOOLS)
         self.assertEqual(response.status_code,403)
 
@@ -558,7 +599,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         fake = Mock()
         fake.chat.side_effect = chat
         req = ChatCompletionRequest(model="deepseek-chat", messages=[ChatMessage(role="user",content="audit")],tools=TOOLS)
-        with patch.object(api,"get_client",return_value=fake), contextlib.redirect_stdout(io.StringIO()):
+        with patch.object(api,"get_client",return_value=fake), patch.object(api,"_MAX_CONTINUATIONS",1), contextlib.redirect_stdout(io.StringIO()):
             first = asyncio.create_task(api._run_tool_chat("first",req,"default"))
             self.assertTrue(await asyncio.to_thread(entered.wait,1))
             second = asyncio.create_task(api._run_chat_with_retry("second",req,"default"))

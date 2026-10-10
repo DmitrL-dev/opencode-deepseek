@@ -220,7 +220,8 @@ def enforce_tool_choice(tool_choice, tool_calls: Optional[List[dict]]) -> None:
 
 
 def parse_tool_calls(
-    text: str, allowed_names: Optional[Iterable[str]] = None
+    text: str, allowed_names: Optional[Iterable[str]] = None, *,
+    allow_unclosed_fence: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, never examples embedded in prose.
 
@@ -232,10 +233,18 @@ def parse_tool_calls(
     if not stripped.startswith("```tool_calls"):
         return text, None
     match = _TOOL_BLOCK_RE.fullmatch(stripped)
-    if not match:
+    start = _TOOL_START_RE.match(stripped)
+    if match:
+        payload = match.group(1)
+    elif allow_unclosed_fence and start and not _CLOSING_TOOL_FENCE_RE.search(stripped):
+        # Only the Markdown wrapper may be missing after a confirmed normal
+        # stop. json.loads still requires the entire array and rejects trailing
+        # text, a second block, and every partial/ambiguous argument unchanged.
+        payload = stripped[start.end():]
+    else:
         raise ToolCallError("Expected one complete fenced tool_calls block")
     try:
-        data = json.loads(match.group(1))
+        data = json.loads(payload)
     except json.JSONDecodeError as exc:
         raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
     except ValueError as exc:

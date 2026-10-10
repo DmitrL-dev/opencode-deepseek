@@ -64,7 +64,7 @@
 
 | Провайдер | Модели в локальном API | Состояние | Подключение |
 | --- | --- | --- | --- |
-| **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Chat: Harness + `read` без браузера, 10 октября; Expert повторно не проверен | [Вход + сохранённая сессия](docs/SETUP.ru.md#4-вход-в-deepseek-один-раз) |
+| **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Harness без браузера, 10 октября: Chat `read`; Expert `read` → `write` → ответ, 3 генерации без повторов | [Вход + сохранённая сессия](docs/SETUP.ru.md#4-вход-в-deepseek-один-раз) |
 | **Qwen** | `qwen3.8-omni-flash` / `qwen3.8-max` | Flash и Max проверены | [Отдельная сессия Qwen](docs/SETUP.ru.md#qwen-chat) |
 | **GLM / Z.ai** | `glm-web` | Проверено; в тесте GLM-5.3-Flash | [Ваша вкладка Safari](browser/README.md#safari) |
 | **Kimi** | `kimi-instant`, `kimi-k3`, `kimi-k2.8` / `kimi-web` | Instant: HTTP, refresh и Harness + `read` без браузера, 10 октября; K3/K2.8 ещё не прошли сквозную проверку; вкладочный режим проверен ранее | [HTTP-сессия](docs/KIMI.md) / [Safari](browser/README.md#safari) |

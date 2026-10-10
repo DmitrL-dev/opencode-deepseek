@@ -413,9 +413,12 @@ What was done for reliability:
 
 - only one complete `tool_calls` block occupying the entire reply becomes
   calls; JSON in prose, XML/DSML, and pseudo-calls remain ordinary text;
+- after a confirmed normal stop, a missing closing Markdown fence is accepted
+  only if the entire JSON array validates unchanged, with no trailing text;
 - the entire array is validated before any call is returned: unknown tools,
   invalid arguments, or a violated `tool_choice` produce `502 invalid_tool_response`;
-- truncated blocks are continued in the same conversation; partial calls are never returned;
+- continuations default to off. Explicit opt-in applies only to a provider-confirmed
+  output limit, never a missing wrapper alone; partial calls are never returned;
 - the instruction was hardened (no prose + an example + a reminder at the end);
 - a discipline plugin adds a late system instruction.
 
@@ -605,7 +608,7 @@ variables take precedence.
 | `PROVIDER_MIN_INTERVAL` | `10` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
-| `TOOLCALL_MAX_CONTINUATIONS` | `3` | How many times to ask the model to "continue" when a tool call is cut off by the output limit |
+| `TOOLCALL_MAX_CONTINUATIONS` | `0` | Explicit opt-in continuation budget for provider-confirmed output limits; normal stops never trigger continuation |
 | `DEBUG_TOOLCALLS` | — | `1` — log the raw model reply when a call can't be parsed |
 
 Example:

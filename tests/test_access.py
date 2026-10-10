@@ -300,7 +300,7 @@ class SafetySdkTests(unittest.TestCase):
         client = Mock()
         from chat_protocol import Reply
         client.chat.side_effect = [Reply('```tool_calls\n[{"name":"write","arguments":{"content":"', "fixture:2", "length"), ProviderRejected("quota_exceeded")]
-        with patch.object(api, "get_client", return_value=client):
+        with patch.object(api, "get_client", return_value=client), patch.object(api, "_MAX_CONTINUATIONS", 1):
             with self.assertRaises(PermissionDeniedError) as error:
                 self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages, tools=TOOLS)
         self.assertEqual(error.exception.body["code"], "quota_exceeded")

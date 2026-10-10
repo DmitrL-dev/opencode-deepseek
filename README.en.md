@@ -67,7 +67,7 @@ session, rather than every future task.
 
 | Provider | Local API model ids | Status | Connection |
 | --- | --- | --- | --- |
-| **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Chat: Harness + `read` without a browser, October 10; Expert not requalified | [Login and saved session](docs/SETUP.en.md#4-log-in-to-deepseek-once) |
+| **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Browserless Harness, October 10: Chat `read`; Expert `read` → `write` → answer, 3 generations without retries | [Login and saved session](docs/SETUP.en.md#4-log-in-to-deepseek-once) |
 | **Qwen** | `qwen3.8-omni-flash` / `qwen3.8-max` | Flash and Max verified | [Separate Qwen session](docs/SETUP.en.md#qwen-chat) |
 | **GLM / Z.ai** | `glm-web` | Verified; GLM-5.3-Flash selected in the test | [Your Safari tab](browser/README.md#safari) |
 | **Kimi** | `kimi-instant`, `kimi-k3`, `kimi-k2.8` / `kimi-web` | Instant: HTTP, refresh and browserless Harness `read`, October 10; K3/K2.8 not qualified end to end; tab mode verified previously | [HTTP session](docs/KIMI.md) / [Safari](browser/README.md#safari) |

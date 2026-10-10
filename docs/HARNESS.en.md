@@ -54,8 +54,12 @@ Qwen passed live Harness verification with the browser closed. Initial sign-in
 and sign-in after the refresh cookie expires still need a browser. On October 10,
 2026, DeepSeek Chat completed a `read` and answer task in Harness 0.2.0-rc.2 in
 12 seconds with its browser closed. Normal website access was checked first;
-the client was fixed to accept both create-chat response shapes. Expert was
-not requalified. Gemini uses the official CLI, which rejected our test by
+the client was fixed to accept both create-chat response shapes. Expert later
+passed a bounded native Harness task: `read`, `write`, and a final answer in
+three generations / 24.5 seconds, with the browser closed. Written multiline
+text, quotes and backslashes matched byte for byte. No automatic continuation
+or retry was used. This qualifies that small file task, not an unrestricted
+long-running goal. Gemini uses the official CLI, which rejected our test by
 region. Not needing a tab does not establish account availability.
 
 Mistral hit its quota during continuation, and Grok's response capture did not
