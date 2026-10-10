@@ -62,6 +62,25 @@ class ToolProtocolTests(unittest.TestCase):
                 parse_tool_calls('```tool_calls\n' + payload + bad, {'bash'}, allow_unclosed_fence=True,
                                  allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
 
+    def test_dsml_tool_calls_closer_preserves_complete_batch_only(self):
+        items = [{"name": "bash", "command": "pwd && ls -la", "description": "List files"},
+                 {"name": "bash", "command": "git status --short", "description": "Status"}]
+        payload = json.dumps(items)
+        suffix = "</｜｜DSML｜｜tool_calls>"
+        for fence in ("", "\n```"):
+            _, calls = parse_tool_calls("```tool_calls\n" + payload + suffix + fence,
+                                       {"bash"}, allow_unclosed_fence=True,
+                                       allow_closing_artifacts=True, flat_argument_tools=FLAT_TOOLS)
+            self.assertEqual([json.loads(c["function"]["arguments"]) for c in calls],
+                             [{k: v for k, v in item.items() if k != "name"} for item in items])
+        for body in (payload[:-1] + suffix, payload + suffix + " prose",
+                     payload + suffix + payload, payload + suffix * 2,
+                     payload + "<｜｜DSML｜｜tool_calls>" + suffix):
+            with self.subTest(body=body), self.assertRaises(ToolCallError):
+                parse_tool_calls("```tool_calls\n" + body, {"bash"},
+                                 allow_unclosed_fence=True, allow_closing_artifacts=True,
+                                 flat_argument_tools=FLAT_TOOLS)
+
     def test_flat_inputs_preserve_values_and_batch_order_with_advertised_schemas(self):
         original = [{"name": "read", "file_path": 'a/"quoted"\\path', "offset": 1, "limit": 60},
                     {"name": "bash", "command": 'printf "%s\\n" "quoted"\n# literal }]}',
