@@ -25,6 +25,7 @@ from providers.access import AccessGuard, ProviderRejected
 from server import api
 from tests.test_tools import block
 
+FILE_PAYLOAD = 'line 1\n"quoted" and \\backslash\n```python\nprint("fixture")\n```\n'
 
 @unittest.skipUnless(os.getenv("RUN_HARNESS_FIXTURES") == "1", "opt-in installed Harness fixture")
 class HarnessRuntimeTests(unittest.TestCase):
@@ -99,14 +100,19 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.prompts.append(prompt)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior == "tools" and len(self.prompts) == 1:
+        if self.behavior in ("tools", "tools_without_fence", "write_without_fence") and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
+            if self.behavior == "tools_without_fence":
+                answer = answer[:-4]
         elif self.behavior == "malformed_tools":
             answer = ('```tool_calls\n[{"name":"read","arguments":'
                       '{"file_path":"CONFIDENTIAL_TOOL_PAYLOAD_927\npath"}}]\n```')
+        elif self.behavior == "write_without_fence" and len(self.prompts) == 2:
+            answer = block([{"name": "write", "arguments": {
+                "file_path": str(self.workspace / "fixture.txt"), "content": FILE_PAYLOAD}}])[:-4]
         else:
-            if self.behavior == "tools":
+            if self.behavior in ("tools", "tools_without_fence"):
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
             answer = "HARNESS_BRIDGE_OK"
         attempt.complete()
@@ -142,6 +148,24 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.prompts), 2)
         self.assertTrue(any(message["role"] == "tool" for message in self.calls[1]["messages"]))
+
+    def test_complete_json_without_closing_wrapper_executes_without_continuations(self):
+        self.behavior = "tools_without_fence"
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("HARNESS_BRIDGE_OK", result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_native_write_preserves_quoted_multiline_content_without_closing_wrapper(self):
+        self.behavior = "write_without_fence"
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.workspace / "fixture.txt").read_text(), FILE_PAYLOAD)
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(len(self.prompts), 3)
+        self.assertTrue(any(message["role"] == "tool" for message in self.calls[2]["messages"]))
 
     def test_streamed_refusal_stops_and_remains_paused_on_next_run(self):
         self.behavior = "refused"

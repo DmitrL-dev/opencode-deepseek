@@ -271,7 +271,7 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
 
 # A truncated tool reply is continued this many times before giving up. Each
 # round-trip resumes the same provider conversation and appends the next slice.
-_MAX_CONTINUATIONS = int(os.getenv("TOOLCALL_MAX_CONTINUATIONS", "3"))
+_MAX_CONTINUATIONS = int(os.getenv("TOOLCALL_MAX_CONTINUATIONS", "0"))
 if _MAX_CONTINUATIONS < 0:
     raise ValueError("TOOLCALL_MAX_CONTINUATIONS must be non-negative")
 
@@ -300,22 +300,27 @@ async def _run_tool_chat(prompt: str, req: ChatCompletionRequest, model_type):
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
-    """Full completion for a tool request, transparently continuing truncations.
+    """Validate the whole reply; continuation requires opt-in and an output limit.
 
-    A web chat's output limit can cut a large `write`/`edit` tool call off
-    mid-JSON. Rather than hand opencode a `finish_reason: "stop"` — which ends
-    the agent's turn mid-task — we detect the cut and ask the model to continue
-    from where it stopped, concatenating slices until the call parses. Returns
-    `(reply, content, tool_calls)`."""
+    A missing Markdown fence alone is not evidence of an output limit. A
+    normally completed response can omit that wrapper only if its entire JSON
+    payload validates, without adding or repairing any JSON characters.
+    """
     names = _tool_names(req.tools)
     reply = _chat_with_retry(prompt, req, model_type)
 
     for attempt in range(_MAX_CONTINUATIONS + 1):
         _check_cancelled()
-        if not looks_truncated(reply.text, names):
+        can_continue = (reply.finish_reason == "length"
+                        and looks_truncated(reply.text, names))
+        if not can_continue:
             try:
-                content, tool_calls = parse_tool_calls(reply.text, allowed_names=names)
+                content, tool_calls = parse_tool_calls(
+                    reply.text, allowed_names=names,
+                    allow_unclosed_fence=reply.finish_reason == "stop")
                 enforce_tool_choice(req.tool_choice, tool_calls)
+                if tool_calls and reply.finish_reason != "stop":
+                    raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")
             except ToolCallError:
                 if _debug_toolcalls():
                     print(f"[toolcalls] invalid explicit reply:\n{reply.text}\n", flush=True)
@@ -326,7 +331,8 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         if req.tool_choice == "none":
             raise ToolCallError("The model started a tool call while tool_choice='none'")
         if attempt == _MAX_CONTINUATIONS:
-            raise ToolCallError("The tool reply is still incomplete after the continuation limit")
+            raise ToolCallError("The provider reached its output limit before completing the tool reply; "
+                                "no calls were returned and no further continuation is allowed")
         print(
             f"[toolcalls] reply truncated (attempt {attempt + 1}/"
             f"{_MAX_CONTINUATIONS}); requesting continuation...",

@@ -14,6 +14,25 @@ def block(calls):
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_confirmed_stop_can_omit_only_the_markdown_closing_fence(self):
+        arguments = {"command": 'printf "%s\\n" "quoted"\n# ``` stays data'}
+        text = block([{"name": "bash", "arguments": arguments}])[:-4]
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(text, {"bash"})
+        content, calls = parse_tool_calls(text, {"bash"}, allow_unclosed_fence=True)
+        self.assertEqual(content, "")
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]), arguments)
+
+    def test_missing_wrapper_never_repairs_json_or_accepts_a_partial_batch(self):
+        good = '[{"name":"bash","arguments":{}}]'
+        payloads = [good[:-1] + ',{"name":"bash","arguments":{',
+                    good + '\nextra', good + '\n' + good, good + '\n```json\n{}\n```',
+                    '[{"name":"unknown","arguments":{}}]',
+                    '[{"name":"bash","arguments":{"command":"raw\nnewline"}}]']
+        for payload in payloads:
+            with self.subTest(payload=payload), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + payload, {"bash"}, allow_unclosed_fence=True)
+
     def test_prompt_examples_are_valid_json_and_require_real_schema_arguments(self):
         prompt = messages_to_prompt([ChatMessage(role="user", content="edit a file")], tools=[{
             "type": "function", "function": {"name": "write", "parameters": {
