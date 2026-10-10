@@ -55,8 +55,15 @@ not verify authentication.
 
 On October 10, 2026, live requests in Harness **0.2.0-rc.2** passed after the
 safety changes: Max returned a control answer; Flash executed `read` on a small
-owned fixture and returned its contents. This qualifies that session. An open
-window alone does not guarantee token renewal while idle.
+owned fixture and returned its contents. A later Flash test started with a
+genuinely expired cached session and the browser closed. One guarded HTTP renewal
+advanced the expiry, then Flash read `probe.txt` and returned its exact contents
+in two steps over 15 seconds; the Qwen guard remained clear. The renewal used the
+normal frontend `Timezone` header derived from actual host time and UTC offset.
+Max then returned `QWEN_MAX_READY` in five seconds using the renewed session.
+These results qualify the tested account and session only; they do not guarantee
+future renewal or access. An open window alone does not guarantee renewal while
+idle.
 
 ## Behavior and limits
 
