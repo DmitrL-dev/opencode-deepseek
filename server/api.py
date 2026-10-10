@@ -48,6 +48,7 @@ from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
 from providers.access import guard, ProviderRejected, rejection
+from .diagnostics import save_tool_failure
 
 from .config import (
     MODEL_MAP,
@@ -324,6 +325,7 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
                 if tool_calls and reply.finish_reason != "stop":
                     raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")
             except ToolCallError:
+                save_tool_failure(reply, req)
                 if _debug_toolcalls():
                     print(f"[toolcalls] invalid explicit reply:\n{reply.text}\n", flush=True)
                 raise

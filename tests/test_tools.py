@@ -54,9 +54,25 @@ class ToolProtocolTests(unittest.TestCase):
                                  flat_argument_tools=[{"name": "read", "parameters": schema}])
         with self.assertRaises(ToolCallError):
             parse_tool_calls(block([good]), {"read"}, flat_argument_tools=FLAT_TOOLS * 2)
-        with self.assertRaises(ToolCallError):
-            parse_tool_calls(block([good])[:-4], {"read"}, allow_unclosed_fence=True,
-                             flat_argument_tools=FLAT_TOOLS)
+
+    def test_normal_stop_envelope_tolerances_compose_without_changing_arguments(self):
+        arguments = {"command": 'printf "%s\\n" "quoted"\n# literal }]}',
+                     "description": "Print fixture"}
+        for flat in (False, True):
+            item = {"name": "bash", **arguments} if flat else {"name": "bash", "arguments": arguments}
+            for fence in (False, True):
+                for closer in (False, True):
+                    text = '```tool_calls\n' + json.dumps([item]) + ('}' if closer else '') + ('\n```' if fence else '')
+                    with self.subTest(flat=flat, fence=fence, closer=closer):
+                        _, calls = parse_tool_calls(text, {'bash'}, allow_unclosed_fence=True,
+                                                    allow_redundant_closer=True, flat_argument_tools=FLAT_TOOLS)
+                        self.assertEqual(len(calls), 1)
+                        self.assertEqual(json.loads(calls[0]['function']['arguments']), arguments)
+        for tail in ('}}', '} trailing', ']'):
+            with self.subTest(tail=tail), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + json.dumps([{"name": "bash", **arguments}]) + tail,
+                                 {'bash'}, allow_unclosed_fence=True, allow_redundant_closer=True,
+                                 flat_argument_tools=FLAT_TOOLS)
 
     def test_observed_redundant_closer_preserves_every_call_and_argument(self):
         commands = [
@@ -83,9 +99,6 @@ class ToolProtocolTests(unittest.TestCase):
         for body in payloads:
             with self.subTest(body=body), self.assertRaises(ToolCallError):
                 parse_tool_calls('```tool_calls\n' + body + '\n```', {'bash'}, allow_redundant_closer=True)
-        with self.assertRaises(ToolCallError):
-            parse_tool_calls('```tool_calls\n' + good + '}', {'bash'},
-                             allow_unclosed_fence=True, allow_redundant_closer=True)
 
     def test_confirmed_stop_can_omit_only_the_markdown_closing_fence(self):
         arguments = {"command": 'printf "%s\\n" "quoted"\n# ``` stays data'}
