@@ -100,12 +100,14 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.prompts.append(prompt)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior == "flat_tools":
+        if self.behavior in ("flat_tools", "combined_envelopes"):
             if len(self.prompts) == 1:
                 answer = block([
                     {"name": "read", "file_path": str(self.workspace / "fixture.txt"), "offset": 1, "limit": 60},
                     {"name": "bash", "command": "printf HARNESS_FLAT_COMMAND_29",
                      "description": "Print the owned fixture marker"}])
+                if self.behavior == "combined_envelopes":
+                    answer = answer[:-4] + '}'
             else:
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
                 self.assertIn("HARNESS_FLAT_COMMAND_29", prompt.rsplit("Tool (bash,", 1)[1])
@@ -183,6 +185,15 @@ class HarnessRuntimeTests(unittest.TestCase):
 
     def test_flat_read_and_bash_batch_round_trip_without_replay(self):
         self.behavior = 'flat_tools'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_combined_envelope_errors_complete_a_native_tool_round_trip(self):
+        self.behavior = 'combined_envelopes'
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('HARNESS_BRIDGE_OK', result.stdout)

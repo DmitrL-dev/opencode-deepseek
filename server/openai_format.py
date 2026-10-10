@@ -256,11 +256,11 @@ def parse_tool_calls(
 
     All calls and their arguments must validate before any call is returned.
     Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text.
-    Optional normal-stop tolerances cover only an absent final Markdown fence
-    or one redundant object closer after a complete array, never both at once.
+    Optional normal-stop tolerances cover an absent final Markdown fence and
+    one redundant object closer after a complete array, independently.
     Invalid JSON values and partial batches fail closed.
     Normal-stop callers may also supply schemas for an unambiguous flat input
-    envelope in a closed block. No input values or missing fields are inferred.
+    envelope. No input values or missing fields are inferred.
     """
     stripped = (text or "").strip()
     if not stripped.startswith("```tool_calls"):
@@ -279,12 +279,12 @@ def parse_tool_calls(
     try:
         data = json.loads(payload)
     except json.JSONDecodeError as exc:
-        if (allow_redundant_closer and match is not None
+        if (allow_redundant_closer
                 and exc.msg == "Extra data" and payload[exc.pos:].strip() == "}"):
             # Observed FINISHED reply: a complete array followed by one stray
             # object closer. The decoder already consumed the full JSON value.
             # Never repair strings, add missing delimiters, drop array members,
-            # tolerate any other suffix, or combine this with an absent fence.
+            # or tolerate any other suffix. Markdown framing is independent.
             data = json.loads(payload[:exc.pos])
         else:
             raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
@@ -307,7 +307,7 @@ def parse_tool_calls(
         if not isinstance(name, str) or not name or (names is not None and name not in names):
             raise ToolCallError("The model called an unadvertised tool")
         args = fn.get("arguments")
-        if "arguments" not in fn and fn is item and match is not None:
+        if "arguments" not in fn and fn is item:
             args = _flat_tool_arguments(item, flat_argument_tools)
         if isinstance(args, str):
             try:

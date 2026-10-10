@@ -417,9 +417,9 @@ What was done for reliability:
   only if the entire JSON array validates unchanged, with no trailing text;
 - a closed block may instead contain one redundant `}` after its complete JSON
   array (an observed DeepSeek response). This requires a normal stop; arguments
-  remain unchanged and all calls must validate. Other suffixes, incomplete
-  arrays, and combining this exception with a missing fence are rejected;
-- if a normally completed closed block puts input fields beside `name` instead
+  remain unchanged and all calls must validate. Other suffixes and incomplete
+  arrays are rejected. An absent final Markdown fence is handled independently;
+- if a normally completed block puts input fields beside `name` instead
   of inside `arguments`, the bridge wraps them only when one advertised object
   schema declares every supplied field and every required field is present.
   Values stay unchanged; the executor validates their full schema. Missing,
@@ -437,7 +437,15 @@ the malformed response is not automatically repaired or replayed. The prompt
 uses a valid JSON example and explicit escaping rules; this reduces ambiguity
 but cannot guarantee that every model response follows the protocol.
 
-Optional diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
+For private reproduction of invalid tool replies, set `TOOLCALL_DIAGNOSTICS=1`.
+The last failed reply and advertised tool schemas are saved atomically to
+`session/last-toolcall-error.json` (directory 0700, file 0600, maximum 4 MiB).
+No additional provider request is made. Prompts, conversation IDs and account
+credentials are not added, but the response itself may contain private code or
+secrets. Capture is off by default; the last file remains until replaced or
+manually removed. Do not publish it. Capture failures do not mask the tool error.
+
+Legacy diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
 the raw model reply is written to the log (`logs/server.log` or stdout).
 This can include file contents and secrets; leave it disabled for normal use.
 

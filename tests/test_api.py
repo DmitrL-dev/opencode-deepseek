@@ -87,6 +87,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 fake.chat.return_value = Reply(reply, "fake:2")
                 with patch.object(api, "get_client", return_value=fake), \
                         patch.object(api, "_continue_reply") as continuation, \
+                        patch.object(api, "save_tool_failure") as diagnostic, \
                         patch.object(api, "_debug_toolcalls", return_value=False), \
                         contextlib.redirect_stdout(io.StringIO()) as log:
                     response = await self.post(tools=TOOLS, stream=stream)
@@ -97,6 +98,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('"tool_calls":', response.text)
                 fake.chat.assert_called_once()
                 continuation.assert_not_called()
+                diagnostic.assert_called_once()
+                self.assertEqual(diagnostic.call_args.args[0].text, reply)
 
     async def test_concurrent_http_requests_queue_behind_a_live_attempt(self):
         entered, release = threading.Event(), threading.Event()
@@ -267,6 +270,26 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                             self.assertNotIn('"tool_calls":', response.text)
                         fake.chat.assert_called_once()
                         continuation.assert_not_called()
+
+    async def test_combined_envelope_errors_require_stop_in_both_response_modes(self):
+        answer = '```tool_calls\n' + json.dumps([
+            {"name": "bash", "command": "printf fixture", "description": "Print fixture"}]) + '}'
+        for finish in ('stop', 'length'):
+            for stream in (False, True):
+                with self.subTest(finish=finish, stream=stream):
+                    fake = Mock()
+                    fake.chat.return_value = Reply(answer, 'fixture:2', finish)
+                    with patch.object(api, 'get_client', return_value=fake), \
+                            patch.object(api, '_continue_reply') as continuation:
+                        response = await self.post(tools=FLAT_TOOLS, stream=stream)
+                    if finish == 'stop':
+                        self.assertIn('"tool_calls":', response.text)
+                        self.assertNotIn('"error":', response.text)
+                    else:
+                        self.assertNotIn('"tool_calls":', response.text)
+                        self.assertIn('"error":', response.text)
+                    fake.chat.assert_called_once()
+                    continuation.assert_not_called()
 
     async def test_unfinished_json_after_normal_stop_never_requests_continuation(self):
         fake = Mock()
