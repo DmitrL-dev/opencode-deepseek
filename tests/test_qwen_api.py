@@ -142,6 +142,38 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
         finally:
             old.close()
 
+    async def test_plain_text_quota_stops_goal_continuations_in_all_response_modes(self):
+        notice = ("You've reached today's Qwen3.8-Max limit. Upgrade your membership "
+                  "or switch to another model above to continue.")
+        tool = {"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}
+        for extra in ({}, {"stream": True}, {"stream": True, "tools": [tool], "tool_choice": "required"}):
+            with self.subTest(mode=extra):
+                api.guard.resume('qwen')
+                client = qwen_with_sse(events(answer(notice[:37]), answer(notice[37:], status='finished')))
+                try:
+                    with patch.object(api, 'get_qwen_client', return_value=client) as get_client, patch.object(api, 'renew_qwen_session') as renew:
+                        response = await self.http.post('/v1/chat/completions', json={**self.body, **extra})
+                        if extra.get('stream'):
+                            errors = [json.loads(line[6:])['error'] for line in response.text.splitlines()
+                                      if line.startswith('data: {') and '"error"' in line]
+                            self.assertEqual(len(errors), 1)
+                            error = errors[0]
+                            self.assertNotIn('finish_reason', response.text)
+                        else:
+                            self.assertEqual(response.status_code, 403)
+                            error = response.json()['error']
+                        self.assertEqual(error['code'], 'quota_exceeded')
+                        self.assertFalse(error['retryable'])
+                        self.assertNotIn(notice, response.text)
+                        self.assertEqual(api.guard.status()['qwen'], 'quota_exceeded')
+                        # A later goal turn must stop before session lookup/renewal.
+                        again = await self.http.post('/v1/chat/completions', json=self.body)
+                        self.assertEqual(again.status_code, 403)
+                        self.assertEqual(get_client.call_count, 1)
+                        renew.assert_not_called()
+                finally:
+                    client.close()
+
     async def test_waiting_qwen_request_does_not_block_deepseek(self):
         started, release = threading.Event(), threading.Event()
         qwen, ds = Mock(), Mock()

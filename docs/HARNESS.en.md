@@ -61,8 +61,12 @@ region. Not needing a tab does not establish account availability.
 Mistral hit its quota during continuation, and Grok's response capture did not
 complete; neither belongs in a verified working set. Kimi has frequency limits
 and a [shared credit pool](https://www.kimi.ai/help/membership/membership-overview),
-but this account's allowance has not been established. No observed quota refusal
-for Qwen or GLM proves unlimited access. The official Z.ai API is a separate,
+but this account's allowance has not been established. On October 10, 2026,
+Qwen3.8-Max returned a daily-limit notice as normal answer text, allowing Harness
+to continue its goal repeatedly. The bridge now classifies this known notice as
+`quota_exceeded` and durably pauses all Qwen requests instead of reporting success.
+Resume only after manually checking access; Flash limits and the exact reset
+time remain unknown. A lack of quota refusals from GLM does not prove unlimited access. The official Z.ai API is a separate,
 key-based access method: its [pricing](https://docs.z.ai/guides/overview/pricing)
 distinguishes free GLM-4.7-Flash / GLM-4.5-Flash from paid GLM-5.3-Flash.
 Setup never substitutes another model or paid API for the selected web model.

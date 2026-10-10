@@ -11,7 +11,7 @@ from typing import Iterator, Optional
 import httpx
 
 from chat_protocol import Reply, sse_events
-from providers.access import rejection, guard, current_attempt
+from providers.access import ProviderRejected, rejection, guard, current_attempt
 from .auth import Session, get_session
 
 BASE = "https://chat.qwen.ai"
@@ -75,6 +75,30 @@ def _validate_choices(choices):
 
 
 def _parse_sse(lines, meta: dict) -> Iterator[str]:
+    # Qwen can return its quota notice as a normal, successful answer delta.
+    # Hold only a possible notice prefix; ordinary answers still stream.
+    notices = tuple(
+        f"you've reached today's {model} limit. upgrade your membership or switch "
+        "to another model above to continue." for model in MODEL_IDS
+    )
+    pending, checking = "", True
+    for content in _parse_sse_events(lines, meta):
+        if not checking:
+            yield content
+            continue
+        pending += content
+        normalized = " ".join(pending.replace("’", "'").split()).casefold()
+        if len(pending) <= 1024 and any(notice.startswith(normalized) for notice in notices):
+            continue
+        yield pending
+        pending, checking = "", False
+    if checking and pending:
+        if " ".join(pending.replace("’", "'").split()).casefold() in notices:
+            raise ProviderRejected("quota_exceeded")
+        yield pending
+
+
+def _parse_sse_events(lines, meta: dict) -> Iterator[str]:
     terminal = False
     primary_id = None
     active_id = None
