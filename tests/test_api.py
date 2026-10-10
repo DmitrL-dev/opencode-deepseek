@@ -56,6 +56,27 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
 
+    async def test_malformed_json_batch_has_safe_diagnostics_and_no_replay(self):
+        # A valid first call must not escape a batch with a malformed second one.
+        reply = ('```tool_calls\n[{"name":"bash","arguments":{"command":"echo ok"}},'
+                 '{"name":"write","arguments":{"content":"private\npayload"}}]\n```')
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                fake = Mock()
+                fake.chat.return_value = Reply(reply, "fake:2")
+                with patch.object(api, "get_client", return_value=fake), \
+                        patch.object(api, "_continue_reply") as continuation, \
+                        patch.object(api, "_debug_toolcalls", return_value=False), \
+                        contextlib.redirect_stdout(io.StringIO()) as log:
+                    response = await self.post(tools=TOOLS, stream=stream)
+                error = sse_objects(response.text)[0]["error"] if stream else response.json()["error"]
+                self.assertEqual(error["type"], "invalid_tool_response")
+                self.assertIn("unescaped_control_character", error["message"])
+                self.assertNotIn("private", response.text + log.getvalue())
+                self.assertNotIn('"tool_calls":', response.text)
+                fake.chat.assert_called_once()
+                continuation.assert_not_called()
+
     async def test_concurrent_http_requests_queue_behind_a_live_attempt(self):
         entered, release = threading.Event(), threading.Event()
         calls = []

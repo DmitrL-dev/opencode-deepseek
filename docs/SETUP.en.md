@@ -419,8 +419,15 @@ What was done for reliability:
 - the instruction was hardened (no prose + an example + a reminder at the end);
 - a discipline plugin adds a late system instruction.
 
-Diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
+Malformed JSON errors report a fixed category and a line/column within the JSON
+payload, without exposing arguments. No calls from that reply are returned and
+the malformed response is not automatically repaired or replayed. The prompt
+uses a valid JSON example and explicit escaping rules; this reduces ambiguity
+but cannot guarantee that every model response follows the protocol.
+
+Optional diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
 the raw model reply is written to the log (`logs/server.log` or stdout).
+This can include file contents and secrets; leave it disabled for normal use.
 
 ```bash
 DEBUG_TOOLCALLS=1 python app.py

@@ -102,6 +102,9 @@ class HarnessRuntimeTests(unittest.TestCase):
         if self.behavior == "tools" and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
+        elif self.behavior == "malformed_tools":
+            answer = ('```tool_calls\n[{"name":"read","arguments":'
+                      '{"file_path":"CONFIDENTIAL_TOOL_PAYLOAD_927\npath"}}]\n```')
         else:
             if self.behavior == "tools":
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
@@ -152,6 +155,15 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(second.returncode, 1, second.stdout + second.stderr)
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(len(self.prompts), 1, "paused provider must not dispatch again")
+
+    def test_malformed_tool_json_stops_once_with_safe_diagnostics(self):
+        self.behavior = "malformed_tools"
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("unescaped_control_character", result.stdout + result.stderr)
+        self.assertNotIn("CONFIDENTIAL_TOOL_PAYLOAD_927", result.stdout + result.stderr)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(len(self.prompts), 1)
 
     def test_transient_http_failure_is_not_retried(self):
         self.behavior = "503"
