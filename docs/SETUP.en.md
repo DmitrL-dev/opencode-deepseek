@@ -419,6 +419,11 @@ What was done for reliability:
   array (an observed DeepSeek response). This requires a normal stop; arguments
   remain unchanged and all calls must validate. Other suffixes, incomplete
   arrays, and combining this exception with a missing fence are rejected;
+- if a normally completed closed block puts input fields beside `name` instead
+  of inside `arguments`, the bridge wraps them only when one advertised object
+  schema declares every supplied field and every required field is present.
+  Values stay unchanged; the executor validates their full schema. Missing,
+  unknown, conflicting or ambiguous fields still fail the entire batch;
 - the entire array is validated before any call is returned: unknown tools,
   invalid arguments, or a violated `tool_choice` produce `502 invalid_tool_response`;
 - continuations default to off. Explicit opt-in applies only to a provider-confirmed

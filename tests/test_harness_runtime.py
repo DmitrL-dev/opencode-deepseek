@@ -100,6 +100,18 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.prompts.append(prompt)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
+        if self.behavior == "flat_tools":
+            if len(self.prompts) == 1:
+                answer = block([
+                    {"name": "read", "file_path": str(self.workspace / "fixture.txt"), "offset": 1, "limit": 60},
+                    {"name": "bash", "command": "printf HARNESS_FLAT_COMMAND_29",
+                     "description": "Print the owned fixture marker"}])
+            else:
+                self.assertIn("HARNESS_OWNED_FILE_73", prompt)
+                self.assertIn("HARNESS_FLAT_COMMAND_29", prompt.rsplit("Tool (bash,", 1)[1])
+                answer = "HARNESS_BRIDGE_OK"
+            attempt.complete()
+            return Reply(answer, "owned-fixture:2")
         if self.behavior in ("tools", "tools_without_fence", "write_without_fence", "redundant_closer") and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
@@ -162,6 +174,15 @@ class HarnessRuntimeTests(unittest.TestCase):
 
     def test_redundant_object_closer_round_trip_without_replay(self):
         self.behavior = 'redundant_closer'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+        self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
+
+    def test_flat_read_and_bash_batch_round_trip_without_replay(self):
+        self.behavior = 'flat_tools'
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('HARNESS_BRIDGE_OK', result.stdout)

@@ -318,7 +318,8 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
                 content, tool_calls = parse_tool_calls(
                     reply.text, allowed_names=names,
                     allow_unclosed_fence=reply.finish_reason == "stop",
-                    allow_redundant_closer=reply.finish_reason == "stop")
+                    allow_redundant_closer=reply.finish_reason == "stop",
+                    flat_argument_tools=req.tools if reply.finish_reason == "stop" else None)
                 enforce_tool_choice(req.tool_choice, tool_calls)
                 if tool_calls and reply.finish_reason != "stop":
                     raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")
