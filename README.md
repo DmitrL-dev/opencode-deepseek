@@ -18,9 +18,12 @@
 для этих подключений не нужен.
 
 **Уже установлен DeepSeek Harness?** [Подключить мост](docs/HARNESS.ru.md):
-`python -m integrations.harness --install desktop --default-model qwen3.8-omni-flash`.
+`python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash`.
 Команда читает каталог моделей, отключает повторы и генерацию заголовков моделью;
 сообщения аккаунтам при настройке не отправляются.
+В этом режиме вкладки для запросов не нужны: Qwen проверен с закрытым браузером,
+а GLM, Kimi, Grok и Mistral исключены из группы моста. Первоначальный вход Qwen
+по-прежнему проходит в браузере. [Что доступно без вкладок](docs/HARNESS.ru.md#работа-без-открытого-браузера).
 
 **Это форк с исправлениями и новыми адаптерами. Всё опубликованное ниже уже в
 `main` [DmitrL-dev/opencode-deepseek](https://github.com/DmitrL-dev/opencode-deepseek).**

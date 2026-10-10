@@ -32,6 +32,37 @@ All bridge adapters share this protocol: DeepSeek, Qwen Flash/Max, GLM, Kimi,
 Grok, Mistral, and Gemini models configured through `GEMINI_MODELS`. Their actual
 availability and qualification differ: see [provider status](../README.en.md).
 
+### Run without an open browser
+
+To include only adapters that do not need a browser while serving requests:
+
+```bash
+python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash
+```
+
+The filter retains enabled Qwen, DeepSeek, and Gemini models. It excludes GLM,
+Kimi, Grok, and Mistral because their current adapters require a connected tab.
+It does not move web sessions to another transport, enable providers, or clear
+pauses. This selects the catalog at installation time; pass `--without-browser`
+again when updating the profile. Other Harness providers and existing sessions
+are preserved. If the previous default is excluded, supply a new
+`--default-model`; setup refuses to write until you choose one.
+
+Qwen passed live Harness verification with the browser closed. Initial sign-in
+and sign-in after the refresh cookie expires still need a browser. DeepSeek
+also uses a saved session, but restored access to the restricted account has
+not been confirmed. Gemini uses the official CLI, which rejected our test by
+region. Not needing a tab does not establish account availability.
+
+Mistral hit its quota during continuation, and Grok's response capture did not
+complete; neither belongs in a verified working set. Kimi has frequency limits
+and a [shared credit pool](https://www.kimi.ai/help/membership/membership-overview),
+but this account's allowance has not been established. No observed quota refusal
+for Qwen or GLM proves unlimited access. The official Z.ai API is a separate,
+key-based access method: its [pricing](https://docs.z.ai/guides/overview/pricing)
+distinguishes free GLM-4.7-Flash / GLM-4.5-Flash from paid GLM-5.3-Flash.
+Setup never substitutes another model or paid API for the selected web model.
+
 ### Qwen session
 
 Sign in with `python -m qwen.auth`. Website tokens are short-lived (about 15

@@ -1,3 +1,5 @@
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -64,6 +66,152 @@ class HarnessSetupTests(unittest.TestCase):
                         {"data": [{"id": "x", "owned_by": "unexpected"}]}):
             with self.subTest(catalog=catalog), self.assertRaises(ValueError):
                 harness.catalog_models(catalog)
+
+    def test_without_browser_filters_all_providers_and_preserves_advertised_order(self):
+        rows = [{"id": provider + "-test", "owned_by": provider}
+                for provider in ("glm", "deepseek", "kimi", "qwen", "grok", "gemini", "mistral")]
+        catalog = {"data": rows}
+        self.assertEqual([model["id"] for model in harness.catalog_models(catalog)],
+                         [row["id"] for row in rows])
+        self.assertEqual([model["id"] for model in harness.catalog_models(catalog, without_browser=True)],
+                         ["deepseek-test", "qwen-test", "gemini-test"])
+        self.assertEqual(harness.catalog_models(CATALOG, without_browser=True), self.models[:1])
+
+    def test_without_browser_validates_excluded_rows_and_duplicates(self):
+        valid = CATALOG["data"][0]
+        excluded = CATALOG["data"][1]
+        invalid_rows = [[None], [{"id": "invalid\nmodel", "owned_by": "glm"}],
+                        [{"id": "unknown", "owned_by": "unknown"}],
+                        [{"id": "invalid-owner", "owned_by": []}],
+                        [excluded, excluded], [{"id": valid["id"], "owned_by": "glm"}]]
+        for rows in invalid_rows:
+            with self.subTest(rows=rows), self.assertRaises(ValueError):
+                harness.catalog_models({"data": [valid] + rows}, without_browser=True)
+
+    def run_cli_catalog(self, catalog, *args):
+        requests = []
+        real_client = httpx.Client
+
+        def respond(request):
+            requests.append((request.method, str(request.url)))
+            return httpx.Response(200, json=catalog)
+
+        def client(**kwargs):
+            self.assertFalse(kwargs["trust_env"])
+            self.assertFalse(kwargs["follow_redirects"])
+            return real_client(transport=httpx.MockTransport(respond), **kwargs)
+
+        output, errors = io.StringIO(), io.StringIO()
+        try:
+            with patch.object(harness.httpx, "Client", side_effect=client), \
+                    redirect_stdout(output), redirect_stderr(errors):
+                harness.main(["--install", "desktop", "--home", str(self.home), *args])
+        finally:
+            self.assertEqual(requests, [("GET", BASE + "/models")])
+
+    def test_cli_without_browser_threads_discovery_and_leaves_default_cli_unchanged(self):
+        self.run_cli_catalog(CATALOG)
+        rows = harness.yaml_codec().load(self.path)
+        route = next(row for row in rows if row["id"] == "llm-pi-ai")["config"]["providers"][harness.ROUTE]
+        self.assertEqual(route["models"], self.models)
+        self.run_cli_catalog(CATALOG, "--without-browser")
+        rows = harness.yaml_codec().load(self.path)
+        route = next(row for row in rows if row["id"] == "llm-pi-ai")["config"]["providers"][harness.ROUTE]
+        self.assertEqual(route["models"], self.models[:1])
+        self.assertNotIn("agent-default-model", [row["id"] for row in rows])
+
+    def test_without_browser_empty_catalog_refuses_before_any_write(self):
+        before = self.path.read_bytes()
+        files = set(self.directory.iterdir())
+        with patch.object(harness, "write_private", wraps=harness.write_private) as writer:
+            with self.assertRaises(SystemExit) as caught:
+                self.run_cli_catalog({"data": [CATALOG["data"][1]]}, "--without-browser")
+            self.assertEqual(caught.exception.code, 1)
+            writer.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+        self.assertEqual(set(self.directory.iterdir()), files)
+        with self.assertRaisesRegex(ValueError, "No browserless models"):
+            harness.install(self.home, "desktop", BASE, [], without_browser=True)
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_without_browser_removed_owned_default_requires_explicit_valid_selection(self):
+        original = harness.render([{"id": "agent-default-model", "config": {
+            "provider": harness.ROUTE, "model": "glm-web"}}])
+        self.path.write_bytes(original)
+        selected = harness.catalog_models(CATALOG, without_browser=True)
+        for default, message in ((None, "--default-model"), ("glm-web", "advertised")):
+            with self.subTest(default=default), \
+                    patch.object(harness, "write_private", wraps=harness.write_private) as writer:
+                with self.assertRaisesRegex(ValueError, message):
+                    harness.install(self.home, "desktop", BASE, selected, default, without_browser=True)
+                writer.assert_not_called()
+            self.assertEqual(self.path.read_bytes(), original)
+            self.assertFalse(list(self.directory.glob("*.bridge-backup-*")))
+        path, backup = harness.install(self.home, "desktop", BASE, selected,
+                                       "qwen3.8-omni-flash", without_browser=True)
+        self.assertEqual(backup.read_bytes(), original)
+        rows = harness.yaml_codec().load(path)
+        self.assertEqual(rows[0]["config"], {"provider": harness.ROUTE, "model": "qwen3.8-omni-flash"})
+
+    def test_cli_without_browser_checks_existing_default_before_write(self):
+        original = harness.render([{"id": "agent-default-model", "config": {
+            "provider": harness.ROUTE, "model": "glm-web"}}])
+        self.path.write_bytes(original)
+        with patch.object(harness, "write_private", wraps=harness.write_private) as writer:
+            with self.assertRaises(SystemExit) as caught:
+                self.run_cli_catalog(CATALOG, "--without-browser")
+            self.assertEqual(caught.exception.code, 1)
+            writer.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), original)
+        self.run_cli_catalog(CATALOG, "--without-browser", "--default-model", "qwen3.8-omni-flash")
+        self.assertEqual(harness.yaml_codec().load(self.path)[0]["config"]["model"], "qwen3.8-omni-flash")
+
+    def test_without_browser_dynamic_selectors_refuse_without_write_and_allow_explicit_override(self):
+        selected = harness.catalog_models(CATALOG, without_browser=True)
+        configurations = [
+            'provider: !!js \'"local-browser-bridge"\'\n    model: glm-web',
+            'provider: []\n    model: glm-web',
+            'provider: null\n    model: glm-web',
+            'provider: false\n    model: glm-web',
+            'provider: local-browser-bridge\n    model: !!js \'"qwen3.8-omni-flash"\'',
+            'provider: local-browser-bridge\n    model: []',
+            'provider: local-browser-bridge\n    model: null',
+            'provider: local-browser-bridge\n    model: false',
+        ]
+        for configuration in configurations:
+            with self.subTest(configuration=configuration):
+                original = ('# Preserve on refusal\n- id: agent-default-model\n  config:\n    '
+                            + configuration + '\n').encode()
+                self.path.write_bytes(original)
+                files = set(self.directory.iterdir())
+                with patch.object(harness, "write_private", wraps=harness.write_private) as writer:
+                    with self.assertRaisesRegex(ValueError, "Dynamic or non-string.*--default-model"):
+                        harness.install(self.home, "desktop", BASE, selected, without_browser=True)
+                    writer.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), original)
+                self.assertEqual(set(self.directory.iterdir()), files)
+                path, backup = harness.install(self.home, "desktop", BASE, selected,
+                                               "qwen3.8-omni-flash", without_browser=True)
+                self.assertEqual(backup.read_bytes(), original)
+                self.assertEqual(harness.yaml_codec().load(path)[0]["config"],
+                                 {"provider": harness.ROUTE, "model": "qwen3.8-omni-flash"})
+
+    def test_without_browser_preserves_unrelated_routes_and_existing_defaults(self):
+        selected = harness.catalog_models(CATALOG, without_browser=True)
+        for provider, model in (("deepseek-account", "native"), (harness.ROUTE, "qwen3.8-omni-flash")):
+            document = [{"id": "agent-default-model", "config": {
+                "provider": provider, "model": model, "extra": "preserved"}},
+                {"id": "llm-pi-ai", "config": {"providers": {
+                    "other": {"models": [{"id": "other-model"}]}}}},
+                {"id": "native-account", "disabled": False}]
+            with self.subTest(provider=provider):
+                self.path.write_bytes(harness.render(document))
+                harness.install(self.home, "desktop", BASE, selected, without_browser=True)
+                rows = harness.yaml_codec().load(self.path)
+                self.assertEqual(rows[0], document[0])
+                self.assertEqual(rows[1]["config"]["providers"]["other"],
+                                 document[1]["config"]["providers"]["other"])
+                self.assertEqual(rows[2], document[2])
 
     def test_install_preserves_unrelated_routes_comments_and_js_without_execution(self):
         original = """# Keep this comment
