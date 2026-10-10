@@ -111,7 +111,7 @@ class HarnessRuntimeTests(unittest.TestCase):
                 self.assertEqual(args[:2], ("owned-fixture:2", None))
             else:
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
-                answer = "HARNESS_BRIDGE_OK"
+                answer = "HARNESS_BRIDGE_OK. Validated the ` ```tool_calls ` format."
             attempt.complete()
             return Reply(answer, "owned-fixture:2")
         if self.behavior in ("flat_tools", "combined_envelopes", "dsml_closers"):

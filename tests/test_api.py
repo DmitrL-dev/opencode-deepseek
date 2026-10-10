@@ -14,6 +14,7 @@ import anyio
 from deepseek.auth import LoginRequired
 from deepseek.client import Reply
 from server import api
+from server.openai_format import messages_to_prompt
 from server.schemas import ChatCompletionRequest, ChatMessage
 from tests.test_stream import event, mock_client, snapshot
 from tests.test_tools import block, FLAT_TOOLS
@@ -55,6 +56,25 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
 
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
+
+    async def test_final_report_can_mention_tool_markup_without_correction(self):
+        replies = [
+            'Готово. Цель закрыта. Модель возвращает валидный ` ```tool_calls ` блок.\nВсе тесты прошли.',
+            'The literal <｜｜DSML｜｜ calls> is unsupported syntax, not a request.',
+            '```text\nThe tool_calls field was validated.\n```',
+        ]
+        for answer in replies:
+            for stream in (False, True):
+                fake = Mock()
+                fake.chat.return_value = Reply(answer, 'owned:2')
+                with patch.object(api, '_FORMAT_REPAIR', True), patch.object(api, 'get_client', return_value=fake):
+                    response = await self.post(tools=TOOLS, stream=stream)
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn('"error":', response.text)
+                self.assertNotIn('"tool_calls":', response.text)
+                if not stream:
+                    self.assertEqual(response.json()['choices'][0]['message']['content'], answer)
+                fake.chat.assert_called_once()
 
     async def test_missing_outer_array_closer_is_normalized_without_generation(self):
         text = '```tool_calls\n' + json.dumps([{"name": "bash", "arguments": {"command": "printf fixture"}}])[:-1] + '\n```'
@@ -145,6 +165,32 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             result = (await asyncio.gather(task, return_exceptions=True))[0]
         self.assertIsInstance(result, asyncio.CancelledError)
         fake.chat.assert_called_once()
+
+    async def test_enabled_format_repair_never_generates_again_for_tool_choice_none(self):
+        # Regression: with TOOLCALL_FORMAT_REPAIR enabled a policy violation is
+        # terminal. tool_choice="none" forbids tool calls outright, so a model
+        # that returns a tool_calls block must produce exactly one generation
+        # in both response modes, and the calls must never reach the client.
+        call = block([{"name": "bash", "arguments": {"command": "printf audit"}}])
+        for stream in (False, True):
+            with self.subTest(stream=stream):
+                fake = Mock()
+                fake.chat.return_value = Reply(call, "owned:2", "stop")
+                with patch.object(api, "_FORMAT_REPAIR", True), \
+                        patch.object(api, "get_client", return_value=fake), \
+                        patch.object(api, "save_tool_failure") as diagnostic, \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    response = await self.post(tools=TOOLS, tool_choice="none", stream=stream)
+                error = sse_objects(response.text)[0]["error"] if stream else response.json()["error"]
+                self.assertEqual(error["type"], "invalid_tool_response")
+                self.assertEqual(fake.chat.call_args.args[0], messages_to_prompt(
+                    [ChatMessage(role="user", content="audit")], TOOLS, "none"))
+                fake.chat.assert_called_once()
+                self.assertNotIn('"tool_calls":', response.text)
+                self.assertNotIn('"choices":', response.text)
+                self.assertNotIn(api._FORMAT_REPAIR_PROMPT, fake.chat.call_args.args[0])
+                diagnostic.assert_called_once()
+                self.assertEqual(diagnostic.call_args.args[0].text, call)
 
     async def test_flat_tool_inputs_require_normal_stop_and_respect_tool_choice(self):
         answer = block([{"name": "read", "file_path": "fixture", "offset": 1, "limit": 60},
