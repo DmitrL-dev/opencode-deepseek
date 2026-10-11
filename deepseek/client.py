@@ -36,6 +36,7 @@ from providers.access import ProviderRejected, rejection, guard, current_attempt
 
 from .auth import Session, get_session
 from .pow import DeepSeekPow
+from .stream_diagnostics import StreamCapture
 
 BASE = "https://chat.deepseek.com"
 COMPLETION_PATH = "/api/v0/chat/completion"
@@ -273,6 +274,7 @@ class _Stream:
         self._search = search
         self._message_id: Optional[int] = parent_id
         self.finish_reason = "stop"
+        self._capture = StreamCapture()
 
     def __iter__(self):
         with self._client._request_lock:
@@ -291,6 +293,8 @@ class _Stream:
                 status = getattr(self._client, "_diagnostic_status", None)
                 _log.warning("DeepSeek request stopped: phase=%s http_status=%s reason=%s",
                              phase, status, _failure_kind(exc))
+                self._capture.save(reason=_failure_kind(exc), session_id=self._session_id,
+                                   parent_id=self._parent_id)
                 if attempt is not None:
                     attempt.abort(exc)
                 raise
@@ -336,7 +340,8 @@ class _Stream:
                     raise ProviderRejected() from exc
                 raise ProviderRejected()
             self._client._diagnostic_phase = "parse_stream"
-            yield from _parse_sse(bounded_lines(resp, self.access_attempt, started=stream_started), meta)
+            observed = self._capture.wrap(resp)
+            yield from _parse_sse(bounded_lines(observed, self.access_attempt, started=stream_started), meta)
             if self.access_attempt is not None:
                 self.access_attempt.check()
             if time.monotonic() - stream_started >= MAX_SECONDS:

@@ -42,6 +42,14 @@ class BudgetControls(unittest.IsolatedAsyncioTestCase):
             for method,path in (('GET','/admin/budget'),('POST','/admin/budget/reset')):
                 self.assertEqual((await self.client.request(method,path,headers=headers)).status_code,403)
 
+    async def test_stream_capture_configuration_is_reported_without_mutation(self):
+        before = self.guard.path.read_bytes()
+        for setting, expected in [('1', True), ('0', False)]:
+            with patch.dict(os.environ, DEEPSEEK_STREAM_DIAGNOSTICS=setting):
+                data = (await self.client.get('/admin/budget')).json()
+            self.assertEqual(data['stream_diagnostics'], {'enabled': expected})
+        self.assertEqual(before, self.guard.path.read_bytes())
+
     async def test_reset_requires_confirmation_and_current_revision(self):
         self.assertEqual((await self.client.post('/admin/budget/reset',json={})).status_code,400)
         d=(await self.client.get('/admin/budget')).json()

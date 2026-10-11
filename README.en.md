@@ -164,6 +164,21 @@ transfers compare its saved identifier. This is manual session recovery, not
 background renewal. Offline checks passed; this new flow has not yet been
 verified end to end with a live account.
 
+### Diagnose interrupted DeepSeek responses
+
+Set `DEEPSEEK_STREAM_DIAGNOSTICS=1` and restart the bridge to save failed SSE
+streams privately in `session/failed-streams/` (mode `0600`). Storage is limited
+to four captures and 8 MiB of received bytes each. Responses may contain private
+source code; do not publish these files. Successful responses are not saved.
+
+Offline inspection: `python -m deepseek.stream_diagnostics session/failed-streams/<id>.json`.
+Only a complete capture with a recognized completion marker and valid response
+identity can produce a private `.review.json` **review candidate**. It is not
+permission to execute tools: inspection never changes history, counters or pauses,
+and never resumes goals. Missing completion markers or interrupted captures are
+refused. An old failure without captured bytes cannot be reconstructed this way.
+[Details](docs/HARNESS.en.md#private-stream-diagnostics).
+
 ### If Harness stops
 
 | Message / symptom | Check |

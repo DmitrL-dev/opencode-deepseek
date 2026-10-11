@@ -324,3 +324,37 @@ If local state changes during sign-in, start a new transfer.
 The script sends the token, account id, User-Agent and page-visible cookies only
 to loopback. Userscripts cannot read HttpOnly cookies; local save success does
 not verify upstream acceptance. An ordinary unarmed tab never transfers credentials.
+
+### Private stream diagnostics
+
+Enable `DEEPSEEK_STREAM_DIAGNOSTICS=1` in the bridge environment and restart it.
+Authenticated local `GET /admin/budget` reports `stream_diagnostics.enabled`.
+`TOOLCALL_DIAGNOSTICS` independently controls failed tool-call reply capture.
+
+On SSE failure, diagnostics save received decoded HTTP bytes, EOF/truncation
+flags, an internal error code and the conversation/parent response binding.
+HTTP headers, cookies, tokens and the outgoing prompt are not separately captured;
+provider output may still contain sensitive data. Files have mode `0600`; a newly
+created directory has mode `0700`. Storage stops at four files of up to 8 MiB raw
+stream bytes each (about 11 MiB base64 JSON). Existing evidence is never deleted
+automatically. Oversize streams retain a prefix marked truncated and cannot recover.
+
+```bash
+python -m deepseek.stream_diagnostics session/failed-streams/<id>.json
+```
+
+This command uses no network. It verifies integrity, EOF, no truncation, then
+reparses the stream and requires normal completion, nonempty text and a fresh
+response ID. Success creates a private `.review.json` beside the capture;
+existing output is not overwritten. Invalid JSON, unknown completion markers,
+incomplete replies, stale IDs and data after `[DONE]` are refused.
+
+This reconstructs text for review; it **does not deliver a reply to Harness**.
+A checksum proves byte integrity, not provenance or lack of previous delivery.
+History repair still requires checking request ownership, tool schemas and
+whether any tools already ran. Pauses, history, counters and goals stay unchanged.
+Missing bytes from past failures cannot be reconstructed offline. Checking provider
+history would require a separately authorized request; no new generation is used.
+
+Offline checks: `python -m unittest tests.test_stream_capture tests.test_deepseek_protocol tests.test_stream`.
+This feature has not been tested against a live account.
