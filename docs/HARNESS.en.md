@@ -292,3 +292,10 @@ The accepted-reply cap per conversation is displayed separately from rolling
 budgets. `/bridge-budget-reset` does not reset it. The command does not show
 the current conversation count; reaching the cap reports it in the error.
 The bridge never creates a replacement conversation automatically.
+
+An explicit `40002/40003` challenge response before generation preserves the
+continuation for manual session recovery. The provider pause and all request
+charges remain; there is no automatic retry. Timeouts, ambiguous failures and
+failures after generation dispatch do not release history. Transferring history
+to a new token requires explicit confirmation of the same account; ordinary
+session capture never does this automatically.

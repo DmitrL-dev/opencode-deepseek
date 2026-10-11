@@ -188,7 +188,18 @@ class DeepSeekClient:
         )
         self._diagnostic_status = r.status_code
         r.raise_for_status()
-        challenge = _biz(r.json())["challenge"]
+        data = r.json()
+        try:
+            challenge = _biz(data)["challenge"]
+        except ProviderRejected:
+            # Only an explicit protocol auth rejection proves this challenge
+            # failed before generation. Timeouts/HTTP errors remain ambiguous.
+            if (r.status_code == 200 and isinstance(data, dict)
+                    and data.get("code") in (40002, 40003, "40002", "40003")
+                    and access_attempt is not None
+                    and not access_attempt.generation_dispatched):
+                access_attempt.challenge_auth_rejected = True
+            raise
         self._diagnostic_phase = "solve_challenge"
         with self._pow_lock:
             return self._pow.make_header(challenge)

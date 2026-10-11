@@ -184,6 +184,65 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(results.count('owned:2'), 1)
         self.assertEqual(results.count(None), 1)
 
+    def test_challenge_auth_recovery_is_pre_generation_only(self):
+        from deepseek.client import DeepSeekClient
+        from tests.test_stream import snapshot
+        for mode in ('40002', '40003', 'string_code', 'timeout', 'http401',
+                     'malformed', 'generic_auth', 'completion_auth', 'correction_auth'):
+            with self.subTest(mode=mode):
+                cache = ConversationCache(self.cache.path.with_name(mode + '.sqlite3'))
+                cache.remember(self.req, self.reply, '', self.calls, 0)
+                req = self.req.model_copy(update={'messages': self.history()})
+                guard = AccessGuard(cache.path.with_suffix('.json'), interval=0)
+                paths, bodies = [], []
+                recovering = False
+                def handler(request):
+                    paths.append(request.url.path)
+                    if request.url.path.endswith('create_pow_challenge'):
+                        if recovering or mode == 'completion_auth' or mode == 'correction_auth' and not bodies:
+                            return httpx.Response(200, json={'code':0,'data':{'biz_data':{'challenge':{}}}})
+                        if mode == 'timeout':
+                            raise httpx.ReadTimeout('offline', request=request)
+                        if mode == 'http401':
+                            return httpx.Response(401)
+                        if mode == 'malformed':
+                            return httpx.Response(200, text='invalid')
+                        if mode == 'generic_auth':
+                            return httpx.Response(200, json={'code':999,'msg':'invalid_token'})
+                        return httpx.Response(200, json={'code':'40003' if mode == 'string_code' else 40002 if mode == '40002' else 40003})
+                    self.assertTrue(request.url.path.endswith('/completion'))
+                    bodies.append(json.loads(request.content))
+                    if mode == 'completion_auth':
+                        return httpx.Response(200, json={'code':40003})
+                    answer = 'Recovered' if recovering else '```tool_calls\nnot-json\n```'
+                    return httpx.Response(200, text=snapshot(answer, 'FINISHED').replace('"message_id": 2', '"message_id": 4'), headers={'content-type':'text/event-stream'})
+                client = DeepSeekClient.__new__(DeepSeekClient)
+                client.access_guard = None
+                client._request_lock, client._pow_lock = threading.Lock(), threading.Lock()
+                client._pow = Mock(); client._pow.make_header.return_value = 'offline'
+                client._http = httpx.Client(base_url='https://offline.invalid', transport=httpx.MockTransport(handler))
+                self.addCleanup(client.close)
+                with patch.object(api, 'conversation_cache', cache), patch.object(api, 'guard', guard), patch.object(api, 'get_client', return_value=client), patch.object(api, '_FORMAT_REPAIR', True):
+                    with self.assertRaises(Exception):
+                        api._conversation_tool_chat('unused', req, None)
+                    safe = mode in ('40002', '40003', 'string_code')
+                    with cache.connection() as db:
+                        self.assertEqual(db.execute('SELECT used,steps FROM links').fetchone(), (0 if safe else 1, 1))
+                    charged = json.loads(guard.path.read_text())['deepseek']['usage']
+                    count = len(paths)
+                    with self.assertRaises(ProviderRejected):
+                        api._conversation_tool_chat('unused', req, None)
+                    self.assertEqual(len(paths), count)
+                    if safe:
+                        self.assertEqual([kind for _,kind in charged], ['http'])
+                        # Simulate explicit manual recovery; no counters reset.
+                        guard.resume('deepseek')
+                        self.assertEqual(json.loads(guard.path.read_text())['deepseek']['usage'], charged)
+                        recovering = True
+                        api._conversation_tool_chat('unused', req, None)
+                        self.assertEqual(len(bodies), 1)
+                        self.assertEqual((bodies[0]['chat_session_id'], bodies[0]['parent_message_id']), ('owned', 2))
+
     def test_account_change_does_not_reuse_previous_chat(self):
         account = self.cache.path.parent / 'synthetic-account.json'
         account.write_text('synthetic account A')
@@ -192,6 +251,26 @@ class ConversationTests(unittest.TestCase):
         account.write_text('synthetic account B')
         with self.assertRaises(ConversationStateError):
             cache.prepare(self.req.model_copy(update={'messages': self.history()}))
+
+    def test_confirmed_rotation_resumes_exact_history_without_reset(self):
+        from deepseek.auth import Session
+        old = Session('old', [], 'fixture', 1)
+        fresh = Session('new', [], 'fixture', 2)
+        cache = ConversationCache(self.cache.path, self.cache.path.parent/'account.json')
+        cache.remember(self.req, self.reply, '', self.calls, 0,
+                       scope='session-v2:' + old.identity())
+        req = self.req.model_copy(update={'messages': self.history()})
+        with self.assertRaises(ConversationStateError):
+            cache.prepare(req, scope='session-v2:' + fresh.identity())
+        fresh.preserve_history_from(old, same_account_confirmed=True)
+        fake = Mock(); fake.session = fresh
+        fake.chat.return_value = Reply('Done', 'owned:4')
+        with patch.object(api, 'conversation_cache', cache), patch.object(api, 'get_client', return_value=fake):
+            api._conversation_tool_chat('unused', req, None)
+            self.assertEqual(fake.chat.call_args.args[1], 'owned:2')
+            with self.assertRaises(api.ToolCallError):
+                api._conversation_tool_chat('unused', req, None)
+        self.assertEqual(fake.chat.call_count, 1)
 
     def test_oversized_input_does_not_build_client(self):
         with patch.object(api, 'get_client') as factory, self.assertRaises(ProviderRejected):

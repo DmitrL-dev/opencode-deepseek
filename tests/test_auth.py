@@ -22,6 +22,33 @@ def session():
 
 
 class SessionTests(unittest.TestCase):
+    def test_explicit_history_transfer_preserves_legacy_scope_without_saving(self):
+        import hashlib
+        old = session()
+        expected = hashlib.sha256(json.dumps({
+            'token': old.token, 'cookies': old.cookies,
+            'user_agent': old.user_agent, 'captured_at': old.captured_at,
+        }, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        self.assertEqual(old.identity(), expected)
+        fresh = session(); fresh.token = 'new-token'
+        self.assertIsNone(fresh.continuation_scope)
+        with self.assertRaises(ValueError):
+            fresh.preserve_history_from(old)
+        fresh.preserve_history_from(old, same_account_confirmed=True)
+        self.assertEqual(fresh.continuation_scope, expected)
+        self.assertNotEqual(fresh.identity(), old.identity())
+        again = session()
+        again.preserve_history_from(fresh, same_account_confirmed=True)
+        self.assertEqual(again.continuation_scope, expected)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'session.json'
+            fresh.save(path)
+            self.assertEqual(auth.Session.load(path).continuation_scope, expected)
+            for invalid in ('', 'x'*64, [], 1):
+                data = json.loads(path.read_text()); data['continuation_scope'] = invalid
+                path.write_text(json.dumps(data))
+                self.assertIsNone(auth.Session.load(path))
+
     def test_only_scoped_deepseek_cookies_are_captured_and_sent(self):
         page = Mock()
         page.url = auth.CHAT_URL

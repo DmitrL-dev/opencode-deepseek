@@ -17,6 +17,7 @@ the local cache only by default; authentication cannot clear an account pause.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import tempfile
@@ -108,6 +109,9 @@ class Session:
     cookies: list[dict]
     user_agent: str
     captured_at: float
+    # Set only by an explicit same-account local session transfer, never by
+    # browser capture. Keeps already delivered history bound across rotation.
+    continuation_scope: Optional[str] = None
 
     @property
     def age(self) -> float:
@@ -115,6 +119,23 @@ class Session:
 
     def save(self, path: Path = DEFAULT_SESSION_FILE) -> None:
         write_private_json(path, asdict(self))
+
+    def identity(self) -> str:
+        value = asdict(self)
+        if value.get('continuation_scope') is None:
+            value.pop('continuation_scope', None)
+        return hashlib.sha256(json.dumps(value, sort_keys=True,
+                                        separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+    def preserve_history_from(self, previous: "Session", *, same_account_confirmed=False):
+        """Explicit local transfer only; caller must verify the same account.
+
+        Does not save credentials, clear provider pauses, or unconsume history.
+        Browser capture must never call this automatically.
+        """
+        if same_account_confirmed is not True:
+            raise ValueError('Same-account confirmation required for history transfer')
+        self.continuation_scope = previous.continuation_scope or previous.identity()
 
     def cookie_jar(self) -> CookieJar:
         """Keep domain, path, expiry and secure restrictions in HTTP requests."""
@@ -153,6 +174,12 @@ class Session:
             if not isinstance(data.get("cookies"), list):
                 return None
             session = cls(**data)
+            if session.continuation_scope is not None and (
+                not isinstance(session.continuation_scope, str)
+                or len(session.continuation_scope) != 64
+                or any(c not in '0123456789abcdef' for c in session.continuation_scope)
+            ):
+                return None
             if not isinstance(session.token, str) or not session.token.strip() or any(c in session.token for c in "\r\n"):
                 return None
             session.cookie_jar()

@@ -315,6 +315,8 @@ class Attempt:
         self.id = uuid.uuid4().hex
         self.completed = False
         self.dispatched = False
+        self.generation_dispatched = False
+        self.challenge_auth_rejected = False
 
     @contextlib.contextmanager
     def bind(self):
@@ -356,6 +358,9 @@ class Attempt:
                 if self.provider == 'deepseek':
                     delay = max(delay, record.get('next_http_at', 0) - time.time())
                 if delay <= 0:
+                    # Conservative even if persisting the dispatch later fails.
+                    if kind == 'generation':
+                        self.generation_dispatched = True
                     if self.provider == 'deepseek':
                         now = time.time()
                         usage = _budget_usage(record, kind, now, limits=self.guard.budget_limits)

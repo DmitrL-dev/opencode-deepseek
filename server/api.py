@@ -32,7 +32,6 @@ import os
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 import hashlib
 from contextvars import ContextVar
 
@@ -154,8 +153,7 @@ def get_client(force_refresh: bool = False, rejected_client=None) -> DeepSeekCli
 
 
 def _session_identity(session):
-    return hashlib.sha256(json.dumps(asdict(session), sort_keys=True,
-                                    separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+    return session.identity()
 
 
 def reset_client() -> None:
@@ -357,7 +355,7 @@ def _conversation_tool_chat(prompt, req, model_type):
         # Test caches deliberately have no account file. Production scopes
         # derive only from this pinned client's Session, never a later file.
         scope = ('isolated' if conversation_cache.account_file is None else
-                 'session-v2:' + _session_identity(client.session))
+                 'session-v2:' + (client.session.continuation_scope or _session_identity(client.session)))
         binding['client'] = client
         token = _bound_deepseek.set(binding)
         req, steps = conversation_cache.prepare(req, scope=scope, claim=claim)
@@ -374,9 +372,13 @@ def _conversation_tool_chat(prompt, req, model_type):
     finally:
         if token is not None:
             _bound_deepseek.reset(token)
-        # Only a positively pre-dispatch failure may release our reservation.
-        # Any HTTP dispatch, even a failed challenge, leaves it consumed.
-        if not succeeded and not any(a.dispatched for a in binding['attempts']):
+        # An explicit challenge auth rejection is also pre-generation, but an
+        # earlier generation (e.g. format correction) must keep the claim used.
+        # The provider pause/pending state and all charges remain unchanged.
+        if not succeeded and all(
+            not a.dispatched or (a.challenge_auth_rejected and not a.generation_dispatched)
+            for a in binding['attempts']
+        ):
             conversation_cache.release(claim)
 
 
