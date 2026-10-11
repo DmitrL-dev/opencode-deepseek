@@ -78,6 +78,7 @@ class Job:
     result: dict | None = None
     document: str | None = None
     submitted: bool = False
+    submitting: bool = False
     deadline: float = 0
     check_cancelled: Callable[[], None] | None = field(default=None, repr=False)
     access_attempt: object = field(default=None, repr=False)
@@ -160,29 +161,41 @@ class Broker:
     def begin(self, provider, job_id, owner, lease, document):
         with self.condition:
             job = self._owned(provider, job_id, owner, lease, document)
-            if job.submitted:
+            if job.submitted or job.submitting:
                 raise ValueError("The browser prompt has already been authorized")
-            def validate():
-                if time.monotonic() >= job.deadline or job.result is not None:
-                    raise ValueError("The browser lease expired before submission")
-                try:
-                    if job.check_cancelled is not None:
-                        job.check_cancelled()
-                except asyncio.CancelledError:
-                    raise ValueError("The browser lease was cancelled") from None
+            job.submitting = True
+        def validate():
+            # Never acquire condition here: dispatch also invokes this callback
+            # while holding the durable guard lock. Final ownership validation
+            # under condition below closes the race after pacing.
+            if (self.pending.get(provider) is not job or job.document != document
+                    or time.monotonic() >= job.deadline or job.result is not None):
+                raise ValueError("The browser lease expired before submission")
+            try:
+                if job.check_cancelled is not None:
+                    job.check_cancelled()
+            except asyncio.CancelledError:
+                raise ValueError("The browser lease was cancelled") from None
+        try:
             if job.access_attempt is not None:
                 try:
                     job.access_attempt.dispatch(validate)
                     job.access_attempt.check()
                 except (asyncio.CancelledError, ProviderRejected):
                     raise ValueError("The browser lease was revoked before submission") from None
-            validate()
-            job.submitted = True
+            with self.condition:
+                if self._owned(provider, job_id, owner, lease, document) is not job:
+                    raise ValueError("The browser job changed before submission")
+                validate()
+                job.submitted = True
+        finally:
+            with self.condition:
+                job.submitting = False
 
     def navigate(self, provider, job_id, owner, lease, document):
         with self.condition:
             job = self._owned(provider, job_id, owner, lease, document)
-            if job.submitted:
+            if job.submitted or job.submitting:
                 raise ValueError("A submitted job cannot transfer documents")
             # Only an explicit navigation releases the old document. The first
             # successor claim binds a fresh instance; other copies stay blocked.
@@ -218,10 +231,27 @@ def parse_browser_result(provider, result, path=None, prompt=None):
         raise ProviderUnavailable("Invalid browser response encoding") from None
     if len(body) > 8 * 1024 * 1024:
         raise ProviderUnavailable("Browser response exceeded the size limit")
+    if provider in ("glm", "grok"):
+        turn = result.get("request_turn")
+        if (not isinstance(turn, dict) or set(turn) != {"chat_id", "prompt", "endpoint"}
+                or not isinstance(prompt, str) or turn["prompt"] != prompt):
+            raise ProviderUnavailable("Browser response lacks exact request binding")
+        chat_id = turn["chat_id"]
+        if chat_id is not None and (not isinstance(chat_id, str) or reference != "/c/" + chat_id):
+            raise ProviderUnavailable("Browser request belongs to a different conversation")
+        if path is not None and chat_id is None:
+            raise ProviderUnavailable("Resumed browser request lacks conversation binding")
+        if provider == "grok":
+            endpoint = ("/rest/app-chat/conversations/new" if chat_id is None else
+                        "/rest/app-chat/conversations/" + chat_id + "/responses")
+            if turn["endpoint"] != endpoint:
+                raise ProviderUnavailable("Unexpected Grok request endpoint")
+        elif turn["endpoint"] not in ("/api/chat/completions", "/api/v2/chat/completions"):
+            raise ProviderUnavailable("Unexpected GLM request endpoint")
     if provider == "glm":
         text = glm_answer(body)
     elif provider == "grok":
-        text = grok_answer(body)
+        text = grok_answer(body, reference.rsplit("/", 1)[-1])
     elif provider == "mistral":
         if not body.lstrip().startswith(b"15:"):
             raise ProviderUnavailable("Mistral browser response lacks verifiable turn binding")

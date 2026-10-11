@@ -3,6 +3,7 @@ import argparse
 import contextlib
 from contextvars import ContextVar
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -19,11 +20,14 @@ if os.name == 'nt':
 else:
     import fcntl
 
+MAX_BUDGET = 2000
+
 PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini'))
 MESSAGES = {
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
     'quota_exceeded': 'The provider rejected the request because of a quota or usage limit.',
+    'conversation_context_exceeded': 'DeepSeek conversation context limit reached. This is not a local budget or session expiry. No automatic new chat or replay; preserve the goal before manually migrating to a new conversation.',
     'capacity_unavailable': 'The provider has no capacity for this free account right now. Automatic retries are disabled.',
     'access_denied': 'The provider denied access. Inspect sign-in, security and regional restrictions manually.',
     'session_expired': 'The provider rejected the session. Sign in manually before resuming.',
@@ -65,12 +69,34 @@ def _file_lock(file, unlock=False):
         fcntl.flock(file, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
 
 
+def _configured_budgets():
+    """Bounded rolling ceilings; MAX_BUDGET is also the persisted ledger size limit."""
+    limits = []
+    for name, category, defaults in (
+        ('HTTP', None, (40, 200)), ('CHATS', 'chat', (3, 6)),
+        ('GENERATIONS', 'generation', (12, 60)),
+    ):
+        values = []
+        for suffix, default in zip(('HOUR', 'DAY'), defaults):
+            key = f'DEEPSEEK_MAX_{name}_PER_{suffix}'
+            raw = os.getenv(key, str(default))
+            if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= MAX_BUDGET:
+                raise ValueError(f'{key} must be an integer between 1 and {MAX_BUDGET}')
+            values.append(int(raw))
+        if values[0] > values[1]:
+            raise ValueError(f'DEEPSEEK_MAX_{name}_PER_DAY must be >= PER_HOUR')
+        limits.extend((window, category, value)
+                      for window, value in zip((3600, 86400), values))
+    return tuple(limits)
+
+
 class AccessGuard:
     def __init__(self, path=ROOT / 'session' / 'provider-pauses.json', interval=None):
         self.path = Path(path) if path is not None else None
         self.interval = float(os.getenv('PROVIDER_MIN_INTERVAL', '30') if interval is None else interval)
         if not math.isfinite(self.interval) or not 0 <= self.interval <= 3600:
             raise ValueError('PROVIDER_MIN_INTERVAL must be between 0 and 3600 seconds')
+        self.budget_limits = _configured_budgets()
         self._lock = threading.RLock()
         self._memory = {}
         self._failed = set()
@@ -87,8 +113,12 @@ class AccessGuard:
             # Upgrade the initial flat pause format without losing restrictions.
             if isinstance(item, str) and item in MESSAGES:
                 item = {'pause': item}
-            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at', 'next_http_at', 'usage'}:
+            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at', 'next_http_at', 'usage', 'recoverable_auth'}:
                 raise ValueError('Invalid provider record')
+            if 'recoverable_auth' in item and (item['recoverable_auth'] is not True
+                    or provider != 'deepseek' or item.get('pause') != 'session_expired'
+                    or not item.get('pending') or item.get('dispatched') is not True):
+                raise ValueError('Invalid auth recovery evidence')
             pause, pending, dispatched, next_at = item.get('pause'), item.get('pending'), item.get('dispatched', False), item.get('next_at', 0)
             if (pause is not None and (not isinstance(pause, str) or pause not in MESSAGES)
                     or pending is not None and (not isinstance(pending, str) or len(pending) != 32)
@@ -103,7 +133,7 @@ class AccessGuard:
                     or not math.isfinite(next_http_at) or next_http_at < 0):
                 raise ValueError('Invalid HTTP pacing state')
             usage = item.get('usage', [])
-            if (not isinstance(usage, list) or len(usage) > 1000
+            if (not isinstance(usage, list) or len(usage) > MAX_BUDGET
                     or any(not isinstance(entry, list) or len(entry) != 2
                            or entry[1] not in ('http', 'chat', 'generation')
                            or isinstance(entry[0], bool) or not isinstance(entry[0], (int, float))
@@ -226,8 +256,43 @@ class AccessGuard:
             record.pop('pause', None)
             record.pop('pending', None)
             record.pop('dispatched', None)
+            record.pop('recoverable_auth', None)
             self._save(state)
             self._failed.discard(provider)
+
+    @staticmethod
+    def _usage_revision(record):
+        return hashlib.sha256(json.dumps(record.get('usage', []), separators=(',', ':')).encode()).hexdigest()
+
+    def budget_status(self):
+        now = time.time()
+        with self._state() as state:
+            record = state.get('deepseek', {})
+            usage = record.get('usage', [])
+            rows = []
+            for window, category, limit in self.budget_limits:
+                entries = sorted(t for t, kind in usage if t > now - window
+                                 and (category is None or kind == category))
+                needed = max(0, len(entries) + 1 - limit)
+                rows.append({'category': category or 'http', 'window_seconds': window,
+                             'used': len(entries), 'limit': limit,
+                             'remaining': max(0, limit - len(entries)),
+                             'next_available_at': entries[needed - 1] + window if needed else now})
+            return {'provider': 'deepseek', 'at': now, 'budgets': rows,
+                    'revision': self._usage_revision(record),
+                    'paused': record.get('pause'), 'busy': bool(record.get('pending')),
+                    'min_interval_seconds': self.interval}
+
+    def reset_budget(self, revision):
+        with self._state() as state:
+            record = state.setdefault('deepseek', {})
+            if record.get('pending'):
+                raise RuntimeError('A request is active or unresolved; counters were not reset')
+            if self._usage_revision(record) != revision:
+                raise RuntimeError('Counters changed; inspect them again before resetting')
+            # Only usage changes. Provider pauses and pacing survive this operation.
+            record['usage'] = []
+            self._save(state)
 
     def status(self):
         with self._state() as state:
@@ -235,12 +300,10 @@ class AccessGuard:
                     for name, record in state.items() if name in self._failed or record.get('pause') or record.get('pending')}
 
 
-def _budget_usage(record, kind, now, http_cost=1):
+def _budget_usage(record, kind, now, http_cost=1, limits=None):
     usage = [entry for entry in record.get('usage', []) if entry[0] > now - 86400]
     # Local ceilings only, not provider-approved quotas.
-    limits = [(3600, None, 40), (86400, None, 200),
-              (3600, 'chat', 3), (86400, 'chat', 6),
-              (3600, 'generation', 12), (86400, 'generation', 60)]
+    limits = _configured_budgets() if limits is None else limits
     for window, category, maximum in limits:
         if category is None or category == kind:
             count = sum(t > now - window and (category is None or k == category)
@@ -258,6 +321,8 @@ class Attempt:
         self.id = uuid.uuid4().hex
         self.completed = False
         self.dispatched = False
+        self.generation_dispatched = False
+        self.challenge_auth_rejected = False
 
     @contextlib.contextmanager
     def bind(self):
@@ -280,9 +345,9 @@ class Attempt:
         if self.provider == 'deepseek':
             with self.guard._state() as state:
                 record = state[self.provider]
-                _budget_usage(record, 'generation', time.time(), 3 if new_chat else 2)
+                _budget_usage(record, 'generation', time.time(), 3 if new_chat else 2, self.guard.budget_limits)
                 if new_chat:
-                    _budget_usage(record, 'chat', time.time(), 3)
+                    _budget_usage(record, 'chat', time.time(), 3, self.guard.budget_limits)
 
     def dispatch(self, validate=None, kind="http"):
         if kind not in ('http', 'chat', 'generation'):
@@ -299,9 +364,12 @@ class Attempt:
                 if self.provider == 'deepseek':
                     delay = max(delay, record.get('next_http_at', 0) - time.time())
                 if delay <= 0:
+                    # Conservative even if persisting the dispatch later fails.
+                    if kind == 'generation':
+                        self.generation_dispatched = True
                     if self.provider == 'deepseek':
                         now = time.time()
-                        usage = _budget_usage(record, kind, now)
+                        usage = _budget_usage(record, kind, now, limits=self.guard.budget_limits)
                         record['usage'] = [*usage, [now, kind]]
                         record['next_http_at'] = now + min(self.guard.interval, 3)
                     if validate is not None:
@@ -343,6 +411,13 @@ class Attempt:
         # outcome remains durably pending even if writing the pause fails.
         if self.dispatched or isinstance(exc, Exception) and not isinstance(exc, ValueError) and not getattr(exc, 'before_dispatch', False):
             self.guard.reject(self.provider, exc or ProviderRejected(), owner=self.id)
+            if (self.provider == 'deepseek' and self.challenge_auth_rejected
+                    and not self.generation_dispatched):
+                with self.guard._state() as state:
+                    record = state[self.provider]
+                    if record.get('pending') == self.id and record.get('pause') == 'session_expired':
+                        record['recoverable_auth'] = True
+                        self.guard._save(state)
         else:
             try:
                 self.complete()

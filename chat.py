@@ -8,8 +8,8 @@
 Type /help inside the chat for the list of commands.
 
 It talks to chat.deepseek.com directly through `DeepSeekClient` — no separate
-server process needed. On the very first run a browser window opens so you can
-sign in; the session is then reused silently.
+server process needed. Sign in explicitly with `python -m deepseek.auth` before the first request;
+the saved session is then reused.
 """
 
 from __future__ import annotations

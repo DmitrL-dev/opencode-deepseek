@@ -130,7 +130,7 @@ def _capture(context, page) -> Optional[Session]:
         cookies = [c for c in context.cookies([CHAT_URL, AUTH_URL, AUTH_REFRESH_URL])
                    if c.get("domain", "").lower().lstrip(".") in Session.COOKIE_DOMAINS]
         return Session(data["token"], cookies, page.evaluate("() => navigator.userAgent"),
-                       time.time(), expires)
+                       time.time(), expires_at=expires)
     except PlaywrightError as exc:
         if "Execution context was destroyed" in str(exc) or "navigation" in str(exc).lower():
             return None

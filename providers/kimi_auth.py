@@ -78,7 +78,6 @@ def validate_session(value, now=None, require_fresh=True):
 def session_lock(path):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
     with path.with_suffix('.lock').open('a+b') as lock:
         os.chmod(lock.name, 0o600)
         if os.name == 'nt' and lock.seek(0, 2) == 0:

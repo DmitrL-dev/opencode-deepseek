@@ -24,7 +24,7 @@ SECONDARY = "00000000-0000-4000-8000-000000000003"
 
 
 def session():
-    return Session("fake-qwen-token", [], "test-agent", time.time(), time.time() + 900)
+    return Session("fake-qwen-token", [], "test-agent", time.time(), expires_at=time.time() + 900)
 
 
 def events(*objects, done=True):
@@ -41,6 +41,21 @@ def answer(content, **extra):
 
 
 class QwenSessionTests(unittest.TestCase):
+    def test_capture_keeps_expiry_separate_from_continuation_identity(self):
+        expires = time.time() + 900
+        context = Mock()
+        context.cookies.return_value = []
+        page = Mock(url='https://chat.qwen.ai/')
+        page.evaluate.side_effect = [{'token': 'synthetic-token', 'expires_at': expires}, 'test-agent']
+        captured = _capture(context, page)
+        self.assertTrue(captured.usable)
+        self.assertEqual(captured.expires_at, expires)
+        self.assertIsNone(captured.continuation_scope)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'session.json'
+            captured.save(path)
+            self.assertEqual(Session.load(path), captured)
+
     def test_provider_cookies_never_cross_the_boundary(self):
         qwen = session()
         qwen.cookies = [
@@ -556,7 +571,8 @@ class QwenStreamTests(unittest.TestCase):
             if request.url.path == "/api/v2/chats/new":
                 return httpx.Response(200, json={"success": True, "data": {"id": CHAT}})
             self.assertEqual(request.url.path, "/api/v2/chat/completions")
-            text = "\n".join(events({"response.created": {"response_id": MESSAGE, "chat_id": CHAT}}, answer("OK")))
+            mid = SECONDARY if json.loads(request.content).get("parent_id") else MESSAGE
+            text = "\n".join(events({"response.created": {"response_id": mid, "chat_id": CHAT}}, {**answer("OK"), "response_id": mid}))
             return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
         client = QwenClient(session(), access_guard=None, transport=httpx.MockTransport(handler))
         try:

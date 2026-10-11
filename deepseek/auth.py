@@ -17,6 +17,7 @@ the local cache only by default; authentication cannot clear an account pause.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import tempfile
@@ -47,8 +48,8 @@ CHAT_URL = "https://chat.deepseek.com/"
 SIGNIN_URL = "https://chat.deepseek.com/sign_in"
 
 LAUNCH_ARGS = []
-# Maximum trusted cache age; expiry requires manual sign-in in the API.
-SESSION_MAX_AGE = 6 * 60 * 60  # 6 hours
+# No inferred server TTL. Explicit library callers can still request an age bound.
+SESSION_MAX_AGE = None
 _PROFILE_LOCK = threading.RLock()
 
 
@@ -64,7 +65,6 @@ def write_private_json(path: Path, data: dict) -> None:
     """Atomically replace a private state file without exposing a partial write."""
     path = Path(path)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
@@ -109,6 +109,10 @@ class Session:
     cookies: list[dict]
     user_agent: str
     captured_at: float
+    # Set only by an explicit same-account local session transfer, never by
+    # browser capture. Keeps already delivered history bound across rotation.
+    continuation_scope: Optional[str] = None
+    account_id: Optional[str] = None
 
     @property
     def age(self) -> float:
@@ -116,6 +120,25 @@ class Session:
 
     def save(self, path: Path = DEFAULT_SESSION_FILE) -> None:
         write_private_json(path, asdict(self))
+
+    def identity(self) -> str:
+        value = asdict(self)
+        if value.get('continuation_scope') is None:
+            value.pop('continuation_scope', None)
+        if value.get('account_id') is None:
+            value.pop('account_id', None)
+        return hashlib.sha256(json.dumps(value, sort_keys=True,
+                                        separators=(',', ':'), allow_nan=False).encode()).hexdigest()
+
+    def preserve_history_from(self, previous: "Session", *, same_account_confirmed=False):
+        """Explicit local transfer only; caller must verify the same account.
+
+        Does not save credentials, clear provider pauses, or unconsume history.
+        Browser capture must never call this automatically.
+        """
+        if same_account_confirmed is not True:
+            raise ValueError('Same-account confirmation required for history transfer')
+        self.continuation_scope = previous.continuation_scope or previous.identity()
 
     def cookie_jar(self) -> CookieJar:
         """Keep domain, path, expiry and secure restrictions in HTTP requests."""
@@ -154,6 +177,18 @@ class Session:
             if not isinstance(data.get("cookies"), list):
                 return None
             session = cls(**data)
+            if session.account_id is not None and (not isinstance(session.account_id, str)
+                    or not 1 <= len(session.account_id) <= 128
+                    or any(ord(c) < 33 or ord(c) > 126 for c in session.account_id)):
+                return None
+            if session.continuation_scope is not None and (
+                not isinstance(session.continuation_scope, str)
+                or len(session.continuation_scope) != 64
+                or any(c not in '0123456789abcdef' for c in session.continuation_scope)
+            ):
+                return None
+            if not isinstance(session.token, str) or not session.token.strip() or any(c in session.token for c in "\r\n"):
+                return None
             session.cookie_jar()
             return session
         except Exception:
@@ -272,25 +307,24 @@ def login(
     and saves the session. Later `get_session()` calls read this private cache;
     they do not open a browser or refresh it by default.
 
-    `assume_logged_out=True` skips the initial "are we already signed in?" hop to
-    CHAT_URL and goes straight to the sign-in page. Callers that have just
-    confirmed there's no token (e.g. an explicit library refresh)
-    pass this so the window doesn't visibly bounce CHAT_URL -> SIGNIN_URL."""
+    Navigate once, then let the user and website complete sign-in. A missing
+    token can mean a pending human-check, not a reason to interrupt it with
+    another navigation. `assume_logged_out=True` selects SIGNIN_URL as the
+    initial destination instead of CHAT_URL.
+    """
     profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         context = _launch_context(p, profile_dir, headless, channel)
         page = context.pages[0] if context.pages else context.new_page()
 
         try:
-            existing = None
-            if not assume_logged_out:
-                _safe_goto(page, CHAT_URL)
-                existing = _safe_evaluate(page, _READ_TOKEN_JS)
+            _safe_goto(page, SIGNIN_URL if assume_logged_out else CHAT_URL)
+            existing = _safe_evaluate(page, _READ_TOKEN_JS)
 
             if not existing:
-                _safe_goto(page, SIGNIN_URL)
-                print("[auth] Please sign in in the window (solve the human-check if "
-                      "shown). Waiting for the session...")
+                print("[auth] Please sign in in this window (use the website's sign-in "
+                      "button if needed). Complete any human-check manually; this "
+                      "helper will not navigate again. Waiting for the session...")
                 if not _wait_for_token(page, timeout=300):
                     raise RuntimeError("Login timed out — no token captured.")
 
@@ -327,20 +361,20 @@ def _headless_refresh(
 def get_session(
     profile_dir: Path = DEFAULT_PROFILE_DIR,
     session_file: Path = DEFAULT_SESSION_FILE,
-    max_age: int = SESSION_MAX_AGE,
+    max_age: Optional[int] = SESSION_MAX_AGE,
     allow_interactive: bool = False,
     channel: Optional[str] = DEFAULT_CHANNEL,
     fallback_channel: Optional[str] = None,
     allow_refresh: bool = False,
 ) -> Session:
-    """Load a fresh cache without browser access by default.
+    """Load a saved session without browser access or an inferred expiry.
 
     Explicit library callers may opt into allow_refresh; the API server never
     does. Use the auth CLI for manual sign-in. Never use sign-in to clear a
     provider pause or retry an account/security restriction.
     """
     cached = Session.load(session_file)
-    if cached and cached.age < max_age:
+    if cached and (max_age is None or cached.age < max_age):
         return cached
 
     # Requests must not reopen a website, recapture a session, or fall back to

@@ -136,6 +136,44 @@ class StreamProtocolTests(unittest.TestCase):
         self.assertEqual(parse(snapshot("cut","INCOMPLETE")),
                          ("cut",{"message_id":2,"finish_reason":"length"}))
 
+    def test_empty_finish_event_does_not_reuse_previous_patch_path(self):
+        for status, reason in (("FINISHED", "stop"), ("INCOMPLETE", "length")):
+            payload = snapshot("completed")
+            payload += event({"p": "response/status", "o": "SET", "v": status})
+            payload += event({}, "finish") + event({}, "finish")
+            with self.subTest(status=status):
+                self.assertEqual(parse(payload),
+                                 ("completed", {"message_id": 2, "finish_reason": reason}))
+
+    def test_empty_finish_after_content_patch_completes_reply(self):
+        payload = snapshot("Hello")
+        payload += event({"p": "response/fragments/0/content", "o": "APPEND", "v": " world"})
+        payload += event({}, "finish")
+        self.assertEqual(parse(payload), ("Hello world", {"message_id": 2, "finish_reason": "stop"}))
+
+    def test_service_event_without_patch_fields_does_not_reuse_status(self):
+        # Live diagnostics confirmed an unknown event with no p/o/v after
+        # terminal status. Its private metadata/name need not be retained.
+        service = event({'fixture_metadata': True}, 'fixture-service')
+        for status, reason in (("FINISHED", "stop"), ("INCOMPLETE", "length")):
+            completed = snapshot('done') + event({'p': 'response/status', 'v': status})
+            with self.subTest(status=status):
+                self.assertEqual(parse(completed + service),
+                                 ('done', {'message_id': 2, 'finish_reason': reason}))
+                for tail in (event({'v': 'RUNNING'}), event({'v': None}),
+                             event({'error': {'message': 'denied'}}, 'fixture-service')):
+                    with self.assertRaises((DeepSeekStreamError, ProviderRejected)):
+                        parse(completed + service + tail)
+
+    def test_finish_marker_does_not_hide_later_mutation_or_error(self):
+        completed = snapshot("done") + event({"p": "response/status", "v": "FINISHED"})
+        completed += event({}, "finish")
+        for tail in (event({"p": "response/fragments/0/content", "o": "APPEND", "v": "late"}),
+                     event({"p": "response/status", "v": "RUNNING"}),
+                     event({"error": {"message": "denied"}}, "finish")):
+            with self.subTest(tail=tail), self.assertRaises((DeepSeekStreamError, ProviderRejected)):
+                parse(completed + tail)
+
     def test_parent_message_id_patch_does_not_overwrite_assistant_id(self):
         payload = snapshot() + event({"p":"response/parent_message_id","v":99}) + "data: [DONE]\n\n"
         self.assertEqual(parse(payload)[1]["message_id"],2)

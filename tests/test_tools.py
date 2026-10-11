@@ -4,7 +4,7 @@ import unittest
 
 from server.openai_format import (
     ToolCallError, enforce_tool_choice, looks_truncated, messages_to_prompt,
-    parse_tool_calls, validate_tool_choice,
+    parse_tool_calls, validate_tool_choice, has_tool_call_markup,
 )
 from server.schemas import ChatMessage
 
@@ -23,6 +23,99 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_verification_reuse_contract_follows_actual_results(self):
+        messages = [
+            ChatMessage(role='user', content='Update README wording only'),
+            ChatMessage(role='tool', name='bash', tool_call_id='tests',
+                        content='83 passed, 126 skipped in 0.64s'),
+            ChatMessage(role='tool', name='edit', tool_call_id='docs',
+                        content='README.md updated successfully'),
+        ]
+        for choice in ('auto', 'none', 'required'):
+            prompt = messages_to_prompt(messages, FLAT_TOOLS, choice)
+            rule = prompt[prompt.index('Verification reuse contract:'):]
+            self.assertLess(prompt.index('83 passed, 126 skipped'), prompt.index(rule))
+            for required in ('README-only wording change', 'compound shell command',
+                             'git status', 'Final verification', 'explicit user request',
+                             'tool description', 'Skipped tests are not passes',
+                             'not freshly rerun', 'no-retry instructions'):
+                self.assertIn(required, rule)
+            self.assertTrue(prompt.endswith('Assistant:'))
+            self.assertEqual(prompt.count('83 passed, 126 skipped'), 1)
+
+    def test_reuse_contract_keeps_legitimate_revalidation_and_unknown_outcomes(self):
+        for result in ('FAILED', 'interrupted', 'exit status unknown', '20 passed'):
+            prompt = messages_to_prompt([ChatMessage(role='tool', name='bash',
+                                         tool_call_id='fixture', content=result)], FLAT_TOOLS)
+            rule = prompt.split('Verification reuse contract:', 1)[1]
+            for reason in ('code or test change', 'dependency/configuration/environment change',
+                           'new failure or unresolved concern', 'Unknown, failed, interrupted'):
+                self.assertIn(reason, rule)
+            self.assertIn('take precedence', rule)
+            self.assertIn('concrete new justification', rule)
+
+    def test_edit_requires_native_read_even_when_shell_already_displayed_file(self):
+        tools = [*FLAT_TOOLS, {'type': 'function', 'function': {'name': 'edit',
+                 'parameters': {'type': 'object', 'properties': {
+                     'file_path': {'type': 'string'}, 'old_string': {'type': 'string'},
+                     'new_string': {'type': 'string'}},
+                     'required': ['file_path', 'old_string', 'new_string']}}}]
+        messages = [ChatMessage(role='tool', name='bash', tool_call_id='shell',
+                    content='git diff /fixture: displayed file content')]
+        prompt = messages_to_prompt(messages, tools)
+        rule = prompt[prompt.index('File-edit prerequisite enforced by the host:'):]
+        self.assertIn('advertised `read` tool on that same `file_path`', rule)
+        self.assertIn('wait for its actual result', rule)
+        self.assertIn('does NOT satisfy', rule)
+        self.assertIn('Do not batch', rule)
+        self.assertIn('do not repeat it', rule)
+        self.assertIn('instead of reading and retrying automatically', rule)
+        self.assertTrue(prompt.endswith('Assistant:'))
+        # Do not invent dependencies for unrelated tools with the same names.
+        self.assertNotIn('File-edit prerequisite', messages_to_prompt(messages, FLAT_TOOLS))
+        tools[-1]['function']['parameters']['properties'].pop('file_path')
+        self.assertNotIn('File-edit prerequisite', messages_to_prompt(messages, tools))
+
+    def test_prompt_separates_historical_results_from_next_assistant_turn(self):
+        prompt = messages_to_prompt([ChatMessage(role='tool', name='read',
+            tool_call_id='past', content='historical result')], FLAT_TOOLS)
+        boundary = prompt.index('The preceding transcript is past conversation data.')
+        self.assertLess(prompt.index('Tool (read, call_id=past): historical result'), boundary)
+        self.assertIn('Only the external host can execute tools', prompt[boundary:])
+        self.assertIn('Stop your response immediately after the closing tool_calls fence', prompt)
+        self.assertTrue(prompt.endswith('Assistant:'))
+
+    def test_required_fields_reminder_uses_schema_without_inventing_values(self):
+        tools = [{'name': 'write', 'parameters': {'type': 'object',
+                  'required': ['file_path', 'content'], 'properties': {
+                  'file_path': {'type': 'string'}, 'content': {'type': 'string'}}}},
+                 {'name': 'custom', 'parameters': {'type': 'object',
+                  'required': ['destination_id'], 'properties': {'destination_id': {'type': 'string'}}}}]
+        prompt = messages_to_prompt([ChatMessage(role='user', content='fixture')], tools)
+        footer = prompt.split('Required top-level argument fields', 1)[1]
+        self.assertIn('"required_argument_fields": ["file_path", "content"]', footer)
+        self.assertIn('"required_argument_fields": ["destination_id"]', footer)
+        self.assertIn('do not guess', footer)
+        self.assertIn('Wait for the mutation tool result', footer)
+        self.assertNotIn('/fixture', footer)
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block([{'name': 'write', 'arguments': {'content': 'data'}}]),
+                             {'write'}, flat_argument_tools=tools)
+
+    def test_generic_call_array_can_request_correction_but_never_execute(self):
+        payload = [{"name": "bash", "arguments": {"command": "pwd && ls -la"}}]
+        for language in ('json', ''):
+            text = 'I will explore the project.\n```' + language + '\n' + json.dumps(payload) + '\n```'
+            self.assertTrue(has_tool_call_markup(text, {'bash'}))
+            self.assertFalse(has_tool_call_markup(text, {'read'}))
+            self.assertFalse(has_tool_call_markup(text))
+            self.assertEqual(parse_tool_calls(text, {'bash'}), (text, None))
+        for body in ('[]', '{}', '[{"name":"bash","arguments":{},"extra":true}]',
+                     '[{"name":"bash","arguments":{},"name":"read"}]',
+                     '[{"name":"bash","arguments":{}} ,',
+                     '[{"name":"bash","arguments":{}},{"name":"unknown","arguments":{}}]'):
+            self.assertFalse(has_tool_call_markup('```json\n' + body + '\n```', {'bash'}))
+
     def test_missing_outer_array_closer_preserves_complete_objects_only(self):
         items = [{"name": "todo_write", "arguments": {"todos": [
             {"content": 'quoted "todo" and \\slash }]}', "status": "pending"}]}}]

@@ -205,7 +205,7 @@ def renew_session(session_file: Path = DEFAULT_SESSION_FILE, transport=None) -> 
                     or expires_at <= max(time.time() + 60, old_exp, local_exp)):
                 raise ProviderRejected()
             fresh = Session(new_token, _cookie_snapshot(client.cookies.jar),
-                            cached.user_agent, time.time(), expires_at)
+                            cached.user_agent, time.time(), expires_at=expires_at)
             phase = "persist"
             attempt.check()
             if not fresh.save_if_current(cached, session_file, check=attempt.check):

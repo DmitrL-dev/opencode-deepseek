@@ -22,7 +22,7 @@ class DiagnosticTests(unittest.TestCase):
         self.request = ChatCompletionRequest(model='deepseek-chat', messages=[
             ChatMessage(role='user', content='PRIVATE_PROMPT')])
 
-    def test_capture_is_opt_in_and_private_and_replaces_only_the_last_reply(self):
+    def test_capture_is_opt_in_private_deduplicated_and_bounded(self):
         with patch.object(diagnostics, 'FAILURE_FILE', self.path), patch.dict(os.environ, TOOLCALL_DIAGNOSTICS='0'):
             diagnostics.save_tool_failure(self.reply, self.request)
             self.assertFalse(self.path.exists())
@@ -38,7 +38,16 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(self.path.parent.stat().st_mode), 0o700)
             diagnostics.save_tool_failure(Reply('replacement', None), self.request)
             self.assertEqual(json.loads(self.path.read_text())['reply'], 'replacement')
-            self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+            archive = self.path.parent / 'toolcall-failures'
+            self.assertEqual(len(list(archive.iterdir())), 2)
+            for entry in archive.iterdir():
+                self.assertEqual(stat.S_IMODE(entry.stat().st_mode), 0o600)
+            diagnostics.save_tool_failure(Reply('replacement', None), self.request)
+            self.assertEqual(len(list(archive.iterdir())), 2)
+            with patch.object(diagnostics, 'MAX_ARCHIVED', 2):
+                diagnostics.save_tool_failure(Reply('new failure', None), self.request)
+            self.assertEqual(len(list(archive.iterdir())), 2)
+            self.assertEqual(json.loads(self.path.read_text())['reply'], 'new failure')
 
     def test_capture_failure_never_leaks_payload_or_replaces_original_error(self):
         with patch.dict(os.environ, TOOLCALL_DIAGNOSTICS='1'), \

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="332" viewBox="0 0 1100 332" role="img">
-<title>OpenCode Web Bridge — your accounts, your workspace</title>
+<title>Local Account Bridge — Harness and OpenCode</title>
 <rect x="0" y="0" width="1100" height="332" rx="0" fill="#14232d" stroke="none"/>
-<text x="48" y="52" font-size="14" font-family="Arial, sans-serif" font-weight="700" fill="#8cd8bd">OPENCODE WEB BRIDGE</text>
+<text x="48" y="52" font-size="14" font-family="Arial, sans-serif" font-weight="700" fill="#8cd8bd">DEEPSEEK HARNESS + OPENCODE</text>
 <text x="46" y="133" font-size="49" font-family="Arial, sans-serif" font-weight="700" fill="#f5f3ec">Your accounts.</text>
 <text x="46" y="190" font-size="49" font-family="Arial, sans-serif" font-weight="700" fill="#f5f3ec">Your coding agent.</text>
 <text x="49" y="232" font-size="19" font-family="Arial, sans-serif" font-weight="400" fill="#b9c9cf">One local API. Tools run in your workspace.</text>

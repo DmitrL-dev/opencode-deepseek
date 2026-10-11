@@ -77,6 +77,12 @@ Setup never substitutes another model or paid API for the selected web model.
 
 ### DeepSeek session
 
+`python -m deepseek.auth` navigates once and waits up to five minutes for manual
+sign-in. Use the website's sign-in button if needed. A missing token no longer
+forces a navigation to `/sign_in`, which could interrupt an in-progress check.
+This fixes the helper's navigation behavior; it is not a confirmed fix for
+repeating hCaptcha challenges. Stop if the website keeps rejecting the check.
+
 `python -m deepseek.auth --keep-open --channel chromium` leaves the manual
 sign-in window open until it is closed or interrupted with Ctrl+C. Use it to
 inspect restrictions on the normal website. Changed credentials are saved
@@ -84,8 +90,9 @@ privately; token capture does not confirm access or clear a pause. Use
 `--channel chrome` for installed Chrome. This inspection mode never falls
 back to another browser channel.
 
-Harness requests use the saved cache only. After six hours it is considered
-stale and requires manual sign-in; DeepSeek has no automatic renewal. Failure
+Harness requests use the saved cache only. Cache age alone does not require sign-in. Token rejection (`40002`/`40003`)
+persists a pause and stops without retry. Resume requires manual sign-in and
+explicitly clearing the pause; DeepSeek has no automatic renewal. Failure
 logs contain only the protocol phase, HTTP status and fixed error category,
 without credentials, response bodies or prompts.
 
@@ -147,7 +154,7 @@ after a manual website check; see [account safety](ACCOUNT_SAFETY.md). All
 providers have account limits, including Chinese models. Tool continuations can
 consume another message.
 
-After the repeated October 10 restriction, live qualification is stopped. Keep `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge now resumes saved conversations and sends only new results; unknown history stops without a new-chat fallback. Durable load budgets and a 20-reply conversation cap apply. See [account safety](ACCOUNT_SAFETY.md).
+Defaults remain `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge resumes saved conversations and sends only new results; unknown history stops without creating a new chat. Rolling budgets and a configurable conversation cap (20 accepted replies by default) still apply. Historical checks below do not establish readiness for unlimited tasks.
 
 For unattended DeepSeek goals, optionally set `TOOLCALL_FORMAT_REPAIR=1` in
 the bridge process environment and restart the bridge. After a normally
@@ -175,7 +182,7 @@ This qualifies bounded tasks, not error-free execution of every possible goal.
 
 ## Offline verification
 
-The current suite was verified with installed Harness **0.2.0-rc.2**: 13 real CLI scenarios and setup
+The current suite was verified with installed Harness **0.2.0-rc.2**: 14 real CLI scenarios and setup
 tests. For an owned HTTP 503 fixture, the default policy made six requests;
 the bridge configuration made one. No real accounts were used.
 
@@ -193,3 +200,171 @@ and no retry after HTTP 503. This does not qualify live accounts.
 Reference: [official Harness model configuration](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers).
 
 [GLM browserless access blockers](GLM.md).
+
+## Local limits and errors
+
+`Local request budget exhausted` (`local_budget_exceeded`) can mean a rolling
+DeepSeek budget, the saved-conversation cap (20 accepted replies by default), or a prompt above
+128 KiB UTF-8. Rolling capacity returns as events age out, not at calendar-hour
+or midnight boundaries. Restart and `resume` preserve usage. `providers.access
+status` reports pauses rather than remaining budgets: an empty result does not
+rule out budget exhaustion.
+
+For longer tasks, explicitly configure the single bridge process environment:
+
+```dotenv
+DEEPSEEK_MAX_GENERATIONS_PER_HOUR=60
+DEEPSEEK_MAX_GENERATIONS_PER_DAY=300
+DEEPSEEK_MAX_CHATS_PER_HOUR=6
+DEEPSEEK_MAX_CHATS_PER_DAY=24
+DEEPSEEK_MAX_HTTP_PER_HOUR=200
+DEEPSEEK_MAX_HTTP_PER_DAY=1000
+DEEPSEEK_MAX_CONVERSATION_REPLIES=200
+```
+
+This is an expanded local budget example, not DeepSeek's allowance. Defaults
+remain 12/60 generations, 3/6 new chats and 40/200 HTTP requests. Values must be
+integers from 1 to 2000; each daily ceiling must be at least its hourly ceiling.
+Invalid settings stop startup. HTTP usage includes chat creation, challenge and
+generation; preflight checks space for the whole sequence. Changing limits
+preserves usage, pauses and pacing.
+
+Restart after changing `.env`. If a LaunchAgent sets these variables in
+`EnvironmentVariables`, change them there and reload the LaunchAgent; `kickstart`
+alone does not reread an edited plist. [Autostart](SETUP.en.md) starts the process
+at macOS login but does not renew DeepSeek authentication.
+
+If Harness renders tool JSON as text, optional `TOOLCALL_FORMAT_REPAIR=1` allows
+one correction after normal completion. A generic fenced JSON list of known
+tools is only a correction signal, never directly executable. An invalid second
+reply stops. Correction consumes another generation and does not remove website
+or conversation limits. Keep Harness automatic retries disabled.
+
+October 11: live Chat passed a reply and conversation-memory check; the service
+SSE `finish` fix has regression coverage. Generic JSON correction passed three
+format variants using the real Harness CLI and a local mocked provider. A new
+large live Expert task has not been qualified after these changes.
+
+`DEEPSEEK_MAX_CONVERSATION_REPLIES` separately controls the conversation cap (default 20, range 1–1000). It counts accepted replies, not all upstream generations: format correction also consumes the rolling budget. After raising it and restarting, exact saved history can continue in the same conversation. Counters and one-use protection are preserved; unknown or edited histories remain rejected.
+
+An empty or whitespace-only tool-mode reply is rejected instead of reported as success. With `TOOLCALL_FORMAT_REPAIR=1`, normal completion permits one correction in the same conversation; a second empty reply returns an explicit error. Output limits, refusals and `tool_choice=none` never trigger correction.
+
+### Local budget commands
+
+In the bridge directory with the virtualenv activated, run the following.
+It creates a private token (0600), preserves an existing token, and installs the
+plugin into your initialized Harness profile. No provider requests are made.
+
+```bash
+python - <<'PYTOKEN'
+import os
+from pathlib import Path
+import secrets
+path = Path("session/budget-admin.token").resolve()
+path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+if not path.exists():
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as out:
+        out.write(secrets.token_hex(32) + "\n")
+path.chmod(0o600)
+print(path)  # path only; never print the token
+PYTOKEN
+python -m integrations.harness_budget --profile desktop --token-file "$PWD/session/budget-admin.token"
+```
+
+Add `BRIDGE_BUDGET_TOKEN_FILE=/absolute/path/session/budget-admin.token` to `.env`,
+using the printed path. For a LaunchAgent-managed bridge, set the variable in its
+environment and reload the service. Restart the bridge; restart Harness if the
+profile change has not appeared. For a custom Harness directory, pass
+`--home /path/to/.dsh` explicitly: the budget installer does not read `DSH_HOME`.
+The token is for local budget administration, not a provider credential. Do not
+publish it.
+
+`/bridge-budget` displays all six rolling counters and next availability times.
+`/bridge-budget-reset` previews the counters. Confirm explicitly with
+`/bridge-budget-reset CONFIRM` in the same session within 60 seconds. Changes
+between preview and confirmation reject the reset. Commands run without an LLM.
+Reset clears only local usage, preserving provider pauses, pacing and conversation
+history. Active or unresolved requests prevent reset. The authenticated loopback
+admin endpoint rejects browser Origin requests.
+
+The accepted-reply cap per conversation is displayed separately from rolling
+budgets. `/bridge-budget-reset` does not reset it. The command does not show
+the current conversation count; reaching the cap reports it in the error.
+The bridge never creates a replacement conversation automatically.
+
+An explicit `40002/40003` challenge response before generation preserves the
+continuation for manual session recovery. The provider pause and all request
+charges remain; there is no automatic retry. Timeouts, ambiguous failures and
+failures after generation dispatch do not release history. Transferring history
+to a new token requires explicit confirmation of the same account; ordinary
+session capture never does this automatically.
+
+### Update the session through Safari
+
+Install [DeepSeek session transfer](../browser/deepseek-session-transfer.user.js)
+once in Userscripts' actual Save Location, granting access only to
+`chat.deepseek.com` and `127.0.0.1`. Update the local budget plugin and restart
+Harness. This supports macOS with the bridge at `http://127.0.0.1:8000` and
+does not require `BROWSER_BRIDGE_ENABLED` or the chat controller.
+
+Select **deepseek-login** in Harness' command menu, or run `/deepseek-login`.
+Safari opens. If the token was rejected, sign out and back into the same account.
+Confirm the same account on the first transfer; later transfers compare the
+stored account identifier. The opened tab transfers the session after sign-in;
+no inspector or token copying is needed. The one-time request expires in ten
+minutes. `/deepseek-login-status` shows the result.
+
+No model request is sent and goals are never resumed automatically. History,
+usage and pacing remain unchanged. Only an auth pause with no uncertain
+generation can be cleared (explicit challenge `40002/40003`). Account restrictions,
+quotas, active requests and uncertain failures require separate investigation.
+If local state changes during sign-in, start a new transfer.
+
+The script sends the token, account id, User-Agent and page-visible cookies only
+to loopback. Userscripts cannot read HttpOnly cookies; local save success does
+not verify upstream acceptance. An ordinary unarmed tab never transfers credentials.
+
+### Private stream diagnostics
+
+Enable `DEEPSEEK_STREAM_DIAGNOSTICS=1` in the bridge environment and restart it.
+Authenticated local `GET /admin/budget` reports `stream_diagnostics.enabled`.
+`TOOLCALL_DIAGNOSTICS` independently controls failed tool-call reply capture.
+
+On SSE failure, diagnostics save received decoded HTTP bytes, EOF/truncation
+flags, an internal error code and the conversation/parent response binding.
+HTTP headers, cookies, tokens and the outgoing prompt are not separately captured;
+provider output may still contain sensitive data. Files have mode `0600`; a newly
+created directory has mode `0700`. Storage stops at four files of up to 8 MiB raw
+stream bytes each (about 11 MiB base64 JSON). Existing evidence is never deleted
+automatically. Oversize streams retain a prefix marked truncated and cannot recover.
+
+```bash
+python -m deepseek.stream_diagnostics session/failed-streams/<id>.json
+```
+
+This command uses no network. It verifies integrity, EOF, no truncation, then
+reparses the stream and requires normal completion, nonempty text and a fresh
+response ID. Success creates a private `.review.json` beside the capture;
+existing output is not overwritten. Invalid JSON, unknown completion markers,
+incomplete replies, stale IDs and data after `[DONE]` are refused.
+
+This reconstructs text for review; it **does not deliver a reply to Harness**.
+A checksum proves byte integrity, not provenance or lack of previous delivery.
+History repair still requires checking request ownership, tool schemas and
+whether any tools already ran. Pauses, history, counters and goals stay unchanged.
+Missing bytes from past failures cannot be reconstructed offline. Checking provider
+history would require a separately authorized request; no new generation is used.
+
+Offline checks: `python -m unittest tests.test_stream_capture tests.test_deepseek_protocol tests.test_stream`.
+This feature has not been tested against a live account.
+
+### DeepSeek conversation context exhausted
+
+An SSE `hint` with `type=error` and `finish_reason=context_length_exceeded`
+means the provider conversation has reached its context limit. The bridge retains
+a `conversation_context_exceeded` pause. Signing in again, resetting local
+budgets or increasing the reply cap does not resolve the cause. No new chat or
+repeated generation is started automatically. Continuing requires a separately
+authorized migration of the goal and necessary context to a new conversation;
+preserve the old history.

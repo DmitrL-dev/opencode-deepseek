@@ -19,7 +19,7 @@ def _object(payload, on_error=None):
     return value
 
 
-def grok_answer(body):
+def grok_answer(body, expected_chat=None):
     """Only a complete modelResponse, never an accumulated partial token tail."""
     final = None
     for line in body.splitlines():
@@ -34,6 +34,15 @@ def grok_answer(body):
         response = result.get("response", result)
         if not isinstance(response, dict) or response.get("error"):
             raise ProviderUnavailable("Grok rejected the completion")
+        if expected_chat is not None:
+            # Some frames omit identity; validate every explicit identity that
+            # is present rather than trusting the controller's visible URL.
+            objects = [result, response, result.get("conversation"), response.get("modelResponse")]
+            for obj in objects:
+                if isinstance(obj, dict):
+                    for key in ("conversationId", "conversation_id"):
+                        if key in obj and obj[key] != expected_chat:
+                            raise ProviderUnavailable("Grok response belongs to a different conversation")
         model = response.get("modelResponse")
         if model is not None:
             if (not isinstance(model, dict) or model.get("partial") is True

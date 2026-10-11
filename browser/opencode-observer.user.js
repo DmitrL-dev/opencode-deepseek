@@ -127,6 +127,30 @@
                     || (data.chatId !== undefined && (typeof data.chatId !== "string" || !data.chatId))) return null;
                 return { user_id: data.messageId, version: 0, chat_id: data.chatId ?? null };
               }
+              if (["grok.com", "chat.z.ai"].includes(location.hostname)) {
+                const data = JSON.parse(body);
+                if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+                const candidates = [];
+                if (typeof data.message === "string") candidates.push(data.message);
+                if (Array.isArray(data.messages) && data.messages.length) {
+                  const last = data.messages[data.messages.length - 1];
+                  if (last?.role !== "user" || typeof last.content !== "string") return false;
+                  candidates.push(last.content);
+                }
+                if (!candidates.length || candidates.some(text => text !== job.prompt)) return false;
+                let chatId = null;
+                if (location.hostname === "grok.com") {
+                  const match = url.pathname.match(/^\/rest\/app-chat\/conversations\/([\w-]+)\/responses$/);
+                  chatId = match ? match[1] : null;
+                  if (job.path === null ? chatId !== null : job.path !== "/c/" + chatId) return false;
+                } else {
+                  const ids = [data.chat_id, data.chatId].filter(id => id !== undefined && id !== null && id !== "");
+                  if (ids.some(id => typeof id !== "string") || new Set(ids).size > 1) return false;
+                  chatId = ids.length ? ids[0] : null;
+                  if (job.path !== null && job.path !== "/c/" + chatId) return false;
+                }
+                return { chat_id: chatId, prompt: job.prompt, endpoint: url.pathname };
+              }
               return body.includes(job.prompt) || body.includes(JSON.stringify(job.prompt).slice(1, -1));
             });
           }
@@ -142,7 +166,7 @@
         document.dispatchEvent(new CustomEvent(CHANNEL, { detail: JSON.stringify({ nonce: job.nonce, observing: true }) }));
         // Clone before returning: the frontend may immediately consume its own
         // body. Never await the clone's stream or block frontend rendering.
-        void observe(response.clone(), job, location.hostname === "chat.mistral.ai" && typeof matches === "object" ? matches : null).catch(() => {
+        void observe(response.clone(), job, typeof matches === "object" ? matches : null).catch(() => {
           document.dispatchEvent(new CustomEvent(CHANNEL, {
             detail: JSON.stringify({ nonce: job.nonce, error: "Completion observation failed" }),
           }));

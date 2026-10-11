@@ -124,7 +124,7 @@ class UserscriptFixtureTests(unittest.TestCase):
         body = ('data: ' + json.dumps({"type":"chat:completion","data":{"phase":"answer","content":"FIXTURE_OK","done":True}}) + '\n\n').encode()
         if grok_editor:
             job["provider"] = "grok"
-            completion_path = "/rest/app-chat/conversations/new"
+            completion_path = "/rest/app-chat/conversations/fixture/responses"
             body = json.dumps({"result":{"response":{"modelResponse":{"message":"FIXTURE_OK","partial":False}}}}).encode()
         results, upstream = [], []
         store = {}
@@ -158,14 +158,14 @@ class UserscriptFixtureTests(unittest.TestCase):
                             /* unrelated-request */
                             const response = await fetch('/api/chat/completions', {
                               method:'POST', headers:{'Content-Type':'application/json'},
-                              body:JSON.stringify({message:editor.value})
+                              body:JSON.stringify({message:editor.value,chat_id:location.pathname.slice(3)})
                             });
                             window.frontendReceivedResponse = true;
                             await response.text();
                           });
                         </script>'''
                         if unrelated:
-                            html = html.replace('/* unrelated-request */', "await fetch('/api/chats/new', {method:'POST', body:JSON.stringify({message:editor.value})});")
+                            html = html.replace('/* unrelated-request */', "await fetch('/api/chats/new', {method:'POST', body:JSON.stringify({message:editor.value,chat_id:location.pathname.slice(3)})});")
                         html = html.replace("/api/chat/completions", completion_path)
                         if grok_editor:
                             markup = '<form data-composer="true"><textarea id="chat-input" aria-label="Ask Grok anything"></textarea></form>' if grok_editor == 'textarea' else '<form data-composer="true"><textarea aria-hidden="true" style="visibility:hidden;position:absolute"></textarea><div id="chat-input" class="query-bar-editor" contenteditable="true" aria-label="Задай Grok любой вопрос"></div></form>'
@@ -183,7 +183,7 @@ class UserscriptFixtureTests(unittest.TestCase):
                             html = html.replace('/* unrelated-request */', "if (!window.fixtureSent) {window.fixtureSent=1;editor.value='';return;}")
                         if request_object:
                             html = html.replace("fetch('/api/chat/completions', {", "fetch(new Request('/api/chat/completions', {")
-                            html = html.replace("body:JSON.stringify({message:editor.value})\n                            });", "body:JSON.stringify({message:editor.value})\n                            }));")
+                            html = html.replace("body:JSON.stringify({message:editor.value,chat_id:location.pathname.slice(3)})\n                            });", "body:JSON.stringify({message:editor.value,chat_id:location.pathname.slice(3)})\n                            }));")
                         if delayed_editor:
                             html = html.replace('<textarea id="chat-input">', '<textarea id="chat-input" style="display:none">')
                             html = html.replace('const editor =', 'setTimeout(() => document.querySelector("textarea").style.display = "", 1500); const editor =')
@@ -455,3 +455,38 @@ class UserscriptFixtureTests(unittest.TestCase):
         self.assertEqual(requests,[])
         self.assertEqual(value,'user edited owned fixture')
         self.assertIn('error',result['result'])
+
+@unittest.skipUnless(os.getenv("RUN_BROWSER_FIXTURES") == "1", "Opt-in isolated browser fixtures")
+class ExactRequestBindingFixtures(unittest.TestCase):
+    observe = ObserverBoundaryFixtureTests.observe
+
+    def test_grok_history_substring_and_neighbor_dialog_are_not_captured(self):
+        receipts = self.observe('grok.com', """() => {
+            window.fetch = async () => new Response('answer', {status:200});
+        }""", """async () => {
+            document.dispatchEvent(new CustomEvent('opencode-local-job-v1', {detail:JSON.stringify({
+                nonce:'binding',prompt:'owned prompt',path:'/c/owned-chat'})}));
+            for (const [chat,message] of [['other','owned prompt'],['owned-chat','different question'],['owned-chat','owned prompt']]) {
+                await fetch('/rest/app-chat/conversations/'+chat+'/responses',{method:'POST',body:JSON.stringify({
+                    message,history:[{message:'owned prompt'}]})});
+            }
+        }""", "receipts.some(r=>r.body)")
+        results=[r for r in receipts if 'body' in r]
+        self.assertEqual(len(results),1)
+        self.assertEqual(results[0]['request_turn'],{'chat_id':'owned-chat','prompt':'owned prompt',
+                         'endpoint':'/rest/app-chat/conversations/owned-chat/responses'})
+
+    def test_glm_last_message_and_chat_identity_must_match(self):
+        receipts = self.observe('chat.z.ai', """() => {
+            window.fetch = async () => new Response('answer', {status:200});
+        }""", """async () => {
+            document.dispatchEvent(new CustomEvent('opencode-local-job-v1', {detail:JSON.stringify({
+                nonce:'binding',prompt:'owned prompt',path:'/c/owned-chat'})}));
+            for (const [chat,content] of [['other','owned prompt'],['owned-chat','different'],['owned-chat','owned prompt']]) {
+                await fetch('/api/v2/chat/completions',{method:'POST',body:JSON.stringify({chat_id:chat,
+                    messages:[{role:'user',content:'owned prompt'},{role:'user',content}]})});
+            }
+        }""", "receipts.some(r=>r.body)")
+        results=[r for r in receipts if 'body' in r]
+        self.assertEqual(len(results),1)
+        self.assertEqual(results[0]['request_turn']['chat_id'],'owned-chat')
