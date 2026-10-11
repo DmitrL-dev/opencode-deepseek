@@ -144,6 +144,26 @@ quotas, request intervals or conversation history. Active or unresolved requests
 and usage changes since the preview, prevent reset. The plugin requires its own
 private token; installing the model catalog alone does not install these commands.
 
+### Refresh DeepSeek through Safari
+
+On macOS, select **deepseek-login** in the Harness command menu or enter
+`/deepseek-login`. Safari opens; sign in to the same account if needed. The
+session transfers locally without an inspector or copying tokens. Check the
+result with `/deepseek-login-status` and resume your goal manually.
+
+One-time setup: update the local budget plugin, install
+[DeepSeek session transfer](browser/deepseek-session-transfer.user.js) in the
+Userscripts app's Save Location, and allow access to `chat.deepseek.com` and
+`127.0.0.1`. Restart the updated bridge and Harness after active work finishes.
+This flow requires macOS and `http://127.0.0.1:8000`.
+[Setup and recovery rules](docs/HARNESS.en.md#update-the-session-through-safari).
+
+History, counters and request intervals are preserved; goals never resume
+automatically. The first transfer asks you to confirm the same account; later
+transfers compare its saved identifier. This is manual session recovery, not
+background renewal. Offline checks passed; this new flow has not yet been
+verified end to end with a live account.
+
 ### If Harness stops
 
 | Message / symptom | Check |
@@ -207,8 +227,11 @@ are sent to the selected provider. The bridge validates responses and
 `tool_calls`, saves conversation state and sends new tool results to the existing
 chat. Unknown history stops instead of silently creating a new chat.
 
-Refusal pauses survive restart. Client setup, sign-in and local budget reset do
-not clear them. Inspect pauses with `python -m providers.access status`.
+Refusal pauses survive restart. Client setup, ordinary sign-in and local budget
+reset do not clear them. The explicit Safari transfer can clear an authentication
+pause after a rejected challenge when there is no uncertain generation; it does
+not clear account restrictions or quotas. Inspect pauses with
+`python -m providers.access status`.
 [Resume rules](docs/ACCOUNT_SAFETY.md).
 
 The API binds to `127.0.0.1`; `session/` and `.env` are excluded from Git.
