@@ -8,3 +8,4 @@ python-dotenv>=1.0      # load configuration from .env
 wasmtime>=21.0          # runs DeepSeek's PoW WASM module (deepseek/pow.py)
 openai
 ruamel.yaml>=0.18,<0.19  # round-trip Harness config edits (comments and !!js preserved)
+jsonschema>=4.23,<5     # validate complete tool argument batches without remote schema retrieval

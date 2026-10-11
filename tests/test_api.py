@@ -57,7 +57,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
 
-    async def test_disabling_format_repair_does_not_accept_broken_markup_as_text(self):
+    async def test_prefaced_flat_read_is_validated_without_format_repair(self):
         tools=[{'type':'function','function':{'name':'read','parameters':{
             'type':'object','properties':{'file_path':{'type':'string'}},'required':['file_path']}}}]
         answer=('I will read the file.\n\n```tool_calls\n'
@@ -68,8 +68,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 fake=Mock();fake.chat.return_value=Reply(answer,'owned:2')
                 with patch.object(api,'_FORMAT_REPAIR',False), patch.object(api,'get_client',return_value=fake):
                     response=await self.post(tools=tools,stream=stream)
-                self.assertIn('Unsupported tool-call markup',response.text)
-                self.assertNotIn('"tool_calls":',response.text)
+                self.assertNotIn('"error":',response.text)
+                self.assertIn('"tool_calls":',response.text)
                 self.assertEqual(fake.chat.call_count,1)
 
     async def test_observed_goal_reader_wrapper_without_regeneration(self):
@@ -141,7 +141,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_opt_in_format_correction_is_bounded_and_preserves_validated_calls(self):
         good = block([{"name": "bash", "arguments": {"command": "printf verified"}}])
         broken = '```tool_calls\n[{"name":"write","arguments":{}},'
-        for first in (broken, 'I will run it.\n' + good,
+        for first in (broken,
                       'I will explore the project.\n' + good.replace('```tool_calls', '```json'),
                       'I will explore the project.\n' + good.replace('```tool_calls', '```'),
                       '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="bash">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'):
@@ -164,6 +164,24 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                             self.assertNotIn('"tool_calls":', response.text)
                         else:
                             self.assertIn('Finished without tools.', response.text)
+
+    async def test_saved_bash_wrapper_validates_whole_batch_without_replay(self):
+        from tests.test_tool_schema import SAVED_REPLY
+        for stream in (False, True):
+            for answer, finish, choice, valid in (
+                (SAVED_REPLY, 'stop', 'auto', True),
+                (SAVED_REPLY, 'stop', 'none', False),
+                (SAVED_REPLY, 'length', 'auto', False),
+                (SAVED_REPLY.replace('"command": "pwd && ls -la"', '"command": 7'), 'stop', 'auto', False),
+                (SAVED_REPLY.replace('}]', '},{"name":"read","file_path":7}]'), 'stop', 'auto', False),
+            ):
+                with self.subTest(stream=stream, valid=valid, finish=finish, choice=choice):
+                    fake = Mock(); fake.chat.return_value = Reply(answer, 'owned:2', finish)
+                    with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, '_MAX_CONTINUATIONS', 0), patch.object(api, 'get_client', return_value=fake):
+                        response = await self.post(tools=FLAT_TOOLS, stream=stream, tool_choice=choice)
+                    fake.chat.assert_called_once()
+                    self.assertEqual('"error":' in response.text, not valid)
+                    self.assertEqual('"tool_calls":' in response.text, valid)
 
     async def test_empty_tool_reply_correction_is_bounded(self):
         for stream in (False, True):

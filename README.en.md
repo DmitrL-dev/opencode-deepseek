@@ -187,12 +187,20 @@ creating a new chat. Migrating the goal requires a separate manual decision.
 Disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
 it does not disable tool-markup validation. Malformed tool blocks stop the step
 instead of being returned as successful plain text.
-A narrow exception handles a normally finished DeepSeek reply containing a single
-`get_goal`, commentary before `tool_calls`, and known closing DSML markers. Empty
-`arguments` are supplied only for an advertised parameterless schema. Commands,
-file edits, batches and ambiguous arguments are excluded. Verified offline against
-a saved reply, without another generation. The fix does not resume a stopped goal
-or replay an old reply automatically, and does not reset history or counters.
+After a normal DeepSeek stop, commentary may precede one explicit terminal
+`tool_calls` block. The bridge locally normalizes flat arguments against the
+advertised schema and known closing DSML markers without rewriting values. Empty
+arguments are accepted only when the schema permits them. Every call undergoes
+JSON Schema validation (types, required fields, nested structures and constraints);
+one invalid call rejects the entire batch. Duplicate keys, unknown tools,
+ambiguous envelopes, trailing text and incomplete data are rejected. Generic JSON
+fences and quotations do not become calls. An explicit `tool_calls` block is an
+action protocol: do not use it for explanatory examples. Remote schemas are never
+fetched; local `$ref` references work. On update, install `requirements.txt`
+(the new dependency is `jsonschema`) and restart the bridge.
+
+Verified offline against saved replies without another generation. The fix does
+not resume a stopped goal, replay an old reply, or reset history or counters.
 
 ### If Harness stops
 

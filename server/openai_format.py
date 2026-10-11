@@ -293,7 +293,7 @@ def _flat_tool_arguments(item: dict, tools: Optional[List[dict]]) -> Optional[di
             or set(properties) & {"name", "arguments", "function", "type", "id"}):
         return None
     arguments = {key: value for key, value in item.items() if key != "name"}
-    if not arguments or not set(arguments) <= properties.keys() or not set(required) <= arguments.keys():
+    if not set(arguments) <= properties.keys() or not set(required) <= arguments.keys():
         return None
     return arguments
 
@@ -311,36 +311,21 @@ def _tool_json(payload):
     return json.loads(payload, object_pairs_hook=_unique_json_object)
 
 
-def _normalize_goal_read(text, tools):
-    """Tolerate the observed wrapper only for Harness's parameterless reader.
+def _tool_block_after_preamble(text):
+    """Accept one explicit terminal protocol block after plain commentary.
 
-    This is deliberately not general prose-to-action extraction. No command,
-    edit, batch, argument value or inferred required input can pass this path.
-    The caller must have observed a normal provider stop.
+    This option defines tool_calls as an action protocol, not a documentation
+    fence. Generic JSON, quoted blocks and blocks inside other fences stay text.
+    The entire suffix still goes through the strict batch parser below.
     """
-    specs = [s for s in _tool_specs(tools) if s['name'] == 'get_goal']
-    if len(specs) != 1 or specs[0]['parameters'] not in (
-            {'type': 'object', 'properties': {}},
-            {'type': 'object', 'properties': {}, 'required': []}):
+    starts = list(re.finditer(r"(?m)^```tool_calls[ \t]*\r?$", text))
+    if len(starts) != 1:
         return text
-    # Exactly one terminal explicit block; quoted/fenced examples and opening
-    # DSML markup cannot become a call through this tolerance.
-    parts = text.split('```tool_calls\n')
-    if len(parts) != 2:
+    prefix = text[:starts[0].start()]
+    if ('```' in prefix or '~~~' in prefix or '<' in prefix
+            or re.search(r'(?m)^\s*>', prefix)):
         return text
-    preamble, body = parts
-    if any(marker in preamble for marker in ('`', '<', '>', '{', '}', '[', ']')):
-        return text
-    match = re.fullmatch(r'(\[.*\])\s*' + _DSML_CLOSERS, body, re.DOTALL)
-    if not match:
-        return text
-    try:
-        calls = _tool_json(match.group(1))
-    except (ValueError, TypeError):
-        return text
-    if calls not in ([{'name': 'get_goal'}], [{'name': 'get_goal', 'arguments': {}}]):
-        return text
-    return '```tool_calls\n[{"name":"get_goal","arguments":{}}]\n```'
+    return text[starts[0].start():]
 
 
 def parse_tool_calls(
@@ -349,7 +334,7 @@ def parse_tool_calls(
     allow_closing_artifacts: bool = False,
     allow_missing_array_closer: bool = False,
     flat_argument_tools: Optional[List[dict]] = None,
-    allow_goal_read_wrapper: bool = False,
+    allow_tool_preamble: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, with explicit narrow tolerances.
 
@@ -362,12 +347,12 @@ def parse_tool_calls(
     Invalid JSON values and partial batches fail closed.
     Normal-stop callers may also supply schemas for an unambiguous flat input
     envelope. No input values or missing fields are inferred.
-    The opt-in goal reader wrapper is limited to one parameterless get_goal;
-    it must never generalize to action-bearing calls embedded in prose.
+    With explicit opt-in, plain commentary may precede one terminal protocol
+    block. Advertised schemas validate every call before the batch is returned.
     """
     stripped = (text or "").strip()
-    if allow_goal_read_wrapper:
-        stripped = _normalize_goal_read(stripped, flat_argument_tools)
+    if allow_tool_preamble and flat_argument_tools is not None:
+        stripped = _tool_block_after_preamble(stripped)
     if not stripped.startswith("```tool_calls"):
         return text, None
     match = _TOOL_BLOCK_RE.fullmatch(stripped)
@@ -438,6 +423,12 @@ def parse_tool_calls(
             arguments = json.dumps(args, ensure_ascii=False, allow_nan=False)
         except ValueError as exc:
             raise ToolCallError("Tool arguments contain non-finite numbers") from exc
+        if flat_argument_tools is not None:
+            from .tool_schema import validate_arguments
+            try:
+                validate_arguments(name, args, flat_argument_tools)
+            except ValueError as exc:
+                raise ToolCallError(str(exc)) from None
         calls.append({
             "id": f"call_{uuid.uuid4().hex[:24]}",
             "type": "function",
