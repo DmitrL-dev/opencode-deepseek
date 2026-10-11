@@ -112,8 +112,12 @@ class AccessGuard:
             # Upgrade the initial flat pause format without losing restrictions.
             if isinstance(item, str) and item in MESSAGES:
                 item = {'pause': item}
-            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at', 'next_http_at', 'usage'}:
+            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at', 'next_http_at', 'usage', 'recoverable_auth'}:
                 raise ValueError('Invalid provider record')
+            if 'recoverable_auth' in item and (item['recoverable_auth'] is not True
+                    or provider != 'deepseek' or item.get('pause') != 'session_expired'
+                    or not item.get('pending') or item.get('dispatched') is not True):
+                raise ValueError('Invalid auth recovery evidence')
             pause, pending, dispatched, next_at = item.get('pause'), item.get('pending'), item.get('dispatched', False), item.get('next_at', 0)
             if (pause is not None and (not isinstance(pause, str) or pause not in MESSAGES)
                     or pending is not None and (not isinstance(pending, str) or len(pending) != 32)
@@ -251,6 +255,7 @@ class AccessGuard:
             record.pop('pause', None)
             record.pop('pending', None)
             record.pop('dispatched', None)
+            record.pop('recoverable_auth', None)
             self._save(state)
             self._failed.discard(provider)
 
@@ -405,6 +410,13 @@ class Attempt:
         # outcome remains durably pending even if writing the pause fails.
         if self.dispatched or isinstance(exc, Exception) and not isinstance(exc, ValueError) and not getattr(exc, 'before_dispatch', False):
             self.guard.reject(self.provider, exc or ProviderRejected(), owner=self.id)
+            if (self.provider == 'deepseek' and self.challenge_auth_rejected
+                    and not self.generation_dispatched):
+                with self.guard._state() as state:
+                    record = state[self.provider]
+                    if record.get('pending') == self.id and record.get('pause') == 'session_expired':
+                        record['recoverable_auth'] = True
+                        self.guard._save(state)
         else:
             try:
                 self.complete()

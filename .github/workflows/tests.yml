@@ -29,6 +29,11 @@ jobs:
       - run: bash -n ds bin/ds-chat
       - run: node --check .opencode/plugin/deepseek-tool-discipline.js
       - run: node --check browser/opencode-controller.user.js && node --check browser/opencode-observer.user.js
+      - name: Verify manual Safari session transfer offline
+        run: |
+          node tests/harness_session_fixture.mjs
+          node tests/deepseek_session_fixture.cjs
+          node tests/harness_budget_fixture.mjs
       - name: Install browser for owned fixtures
         if: matrix.python-version == '3.12'
         run: python -m playwright install --with-deps chromium

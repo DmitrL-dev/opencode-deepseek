@@ -112,6 +112,7 @@ class Session:
     # Set only by an explicit same-account local session transfer, never by
     # browser capture. Keeps already delivered history bound across rotation.
     continuation_scope: Optional[str] = None
+    account_id: Optional[str] = None
 
     @property
     def age(self) -> float:
@@ -124,6 +125,8 @@ class Session:
         value = asdict(self)
         if value.get('continuation_scope') is None:
             value.pop('continuation_scope', None)
+        if value.get('account_id') is None:
+            value.pop('account_id', None)
         return hashlib.sha256(json.dumps(value, sort_keys=True,
                                         separators=(',', ':'), allow_nan=False).encode()).hexdigest()
 
@@ -174,6 +177,10 @@ class Session:
             if not isinstance(data.get("cookies"), list):
                 return None
             session = cls(**data)
+            if session.account_id is not None and (not isinstance(session.account_id, str)
+                    or not 1 <= len(session.account_id) <= 128
+                    or any(ord(c) < 33 or ord(c) > 126 for c in session.account_id)):
+                return None
             if session.continuation_scope is not None and (
                 not isinstance(session.continuation_scope, str)
                 or len(session.continuation_scope) != 64

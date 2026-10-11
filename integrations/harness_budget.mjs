@@ -1,6 +1,16 @@
 import { readFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 export const name = 'bridge-budget';
 export const inject = ['commands'];
+
+export async function openSessionSafari(data, baseURL, run = promisify(execFile)) {
+  const base = new URL(baseURL);
+  if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || base.port !== '8000'
+      || !/^[A-Za-z0-9_-]{43}$/.test(data.nonce)) throw new Error('Unsupported Safari transfer endpoint');
+  const fragment = new URLSearchParams({bridge_session: data.nonce, expires: String(Date.now() + data.expires_in * 1000)});
+  await run('/usr/bin/open', ['-a', 'Safari', 'https://chat.deepseek.com/#' + fragment.toString()], {timeout:5000});
+}
 
 export function formatBudget(data) {
   const names = {generation:'Генерации', chat:'Новые чаты', http:'HTTP-запросы'};
@@ -14,7 +24,7 @@ export function formatBudget(data) {
     'Для ручного сброса: /bridge-budget-reset'].join('\n');
 }
 
-export function apply(ctx, config) {
+export function apply(ctx, config, {openSafari = openSessionSafari} = {}) {
   const url = new URL(config.baseURL || 'http://127.0.0.1:8000');
   if (url.protocol !== 'http:' || !['127.0.0.1','[::1]'].includes(url.hostname) || url.username || url.password || url.search || url.hash || url.pathname !== '/') throw new Error('Budget endpoint must be literal loopback HTTP');
   const pending = new Map();
@@ -37,6 +47,21 @@ export function apply(ctx, config) {
   ctx.commands.register({definitionId:'local/bridge-budget', name:'bridge-budget',
     description:'Локальные счётчики и лимиты DeepSeek', recordInput:false,
     handler:handler(async () => formatBudget(await request('/admin/budget')))});
+  ctx.commands.register({definitionId:'local/deepseek-login', name:'deepseek-login',
+    description:'Обновить сессию DeepSeek через Safari, сохранив историю и счётчики', recordInput:false,
+    handler:handler(async () => {
+      const data = await request('/admin/session/deepseek/start', {});
+      try { await openSafari(data, url.href); }
+      catch (error) { await request('/admin/session/deepseek/cancel', {}); throw error; }
+      return 'Safari открыт. Расширение DeepSeek session transfer должно быть установлено и разрешено для DeepSeek и 127.0.0.1. Войди в тот же аккаунт, если потребуется. При первом переносе подтверди аккаунт. Запрос действует 10 минут. История и счётчики сохраняются; цель сама не возобновится. Результат: /deepseek-login-status.';
+    })});
+  ctx.commands.register({definitionId:'local/deepseek-login-status', name:'deepseek-login-status',
+    description:'Результат переноса сессии Safari', recordInput:false,
+    handler:handler(async () => {
+      const data = await request('/admin/session/deepseek/status');
+      const labels = {idle:'Перенос ещё не запускался.', waiting:'Ожидается сессия Safari.', saved:'Сессия сохранена. История и счётчики сохранены. Цель не возобновлялась.', expired:'Время переноса истекло. Повтори /deepseek-login.', cancelled:'Перенос отменён.', state_changed:'Состояние изменилось. Повтори /deepseek-login.', failed:'Перенос не завершён. Проверь состояние моста.'};
+      return labels[data.status] || 'Неизвестный результат переноса.';
+    })});
   ctx.commands.register({definitionId:'local/bridge-budget-reset', name:'bridge-budget-reset',
     description:'Ручной сброс локальных счётчиков (с подтверждением)', input:{hint:'[CONFIRM]'}, recordInput:false,
     handler:handler(async invocation => {

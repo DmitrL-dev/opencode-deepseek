@@ -299,3 +299,28 @@ charges remain; there is no automatic retry. Timeouts, ambiguous failures and
 failures after generation dispatch do not release history. Transferring history
 to a new token requires explicit confirmation of the same account; ordinary
 session capture never does this automatically.
+
+### Update the session through Safari
+
+Install [DeepSeek session transfer](../browser/deepseek-session-transfer.user.js)
+once in Userscripts' actual Save Location, granting access only to
+`chat.deepseek.com` and `127.0.0.1`. Update the local budget plugin and restart
+Harness. This supports macOS with the bridge at `http://127.0.0.1:8000` and
+does not require `BROWSER_BRIDGE_ENABLED` or the chat controller.
+
+Select **deepseek-login** in Harness' command menu, or run `/deepseek-login`.
+Safari opens. If the token was rejected, sign out and back into the same account.
+Confirm the same account on the first transfer; later transfers compare the
+stored account identifier. The opened tab transfers the session after sign-in;
+no inspector or token copying is needed. The one-time request expires in ten
+minutes. `/deepseek-login-status` shows the result.
+
+No model request is sent and goals are never resumed automatically. History,
+usage and pacing remain unchanged. Only an auth pause with no uncertain
+generation can be cleared (explicit challenge `40002/40003`). Account restrictions,
+quotas, active requests and uncertain failures require separate investigation.
+If local state changes during sign-in, start a new transfer.
+
+The script sends the token, account id, User-Agent and page-visible cookies only
+to loopback. Userscripts cannot read HttpOnly cookies; local save success does
+not verify upstream acceptance. An ordinary unarmed tab never transfers credentials.
