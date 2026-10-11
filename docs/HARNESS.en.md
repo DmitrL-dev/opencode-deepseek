@@ -244,15 +244,34 @@ An empty or whitespace-only tool-mode reply is rejected instead of reported as s
 
 ### Local budget commands
 
-Install the offline command plugin with:
+In the bridge directory with the virtualenv activated, run the following.
+It creates a private token (0600), preserves an existing token, and installs the
+plugin into your initialized Harness profile. No provider requests are made.
 
 ```bash
-python -m integrations.harness_budget --profile desktop --token-file /absolute/private/budget-token
+python - <<'PYTOKEN'
+import os
+from pathlib import Path
+import secrets
+path = Path("session/budget-admin.token").resolve()
+path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+if not path.exists():
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as out:
+        out.write(secrets.token_hex(32) + "\n")
+path.chmod(0o600)
+print(path)  # path only; never print the token
+PYTOKEN
+python -m integrations.harness_budget --profile desktop --token-file "$PWD/session/budget-admin.token"
 ```
 
-Create a private (0600) file containing a random 64-character hex token and set
-`BRIDGE_BUDGET_TOKEN_FILE` to that path in the bridge environment. Restart the bridge.
-The plugin receives only the file path, never provider credentials.
+Add `BRIDGE_BUDGET_TOKEN_FILE=/absolute/path/session/budget-admin.token` to `.env`,
+using the printed path. For a LaunchAgent-managed bridge, set the variable in its
+environment and reload the service. Restart the bridge; restart Harness if the
+profile change has not appeared. For a custom Harness directory, pass
+`--home /path/to/.dsh` explicitly: the budget installer does not read `DSH_HOME`.
+The token is for local budget administration, not a provider credential. Do not
+publish it.
 
 `/bridge-budget` displays all six rolling counters and next availability times.
 `/bridge-budget-reset` previews the counters. Confirm explicitly with
@@ -260,4 +279,4 @@ The plugin receives only the file path, never provider credentials.
 between preview and confirmation reject the reset. Commands run without an LLM.
 Reset clears only local usage, preserving provider pauses, pacing and conversation
 history. Active or unresolved requests prevent reset. The authenticated loopback
-admin endpoint rejects browser Origin requests. Harness reloads its profile patch.
+admin endpoint rejects browser Origin requests.

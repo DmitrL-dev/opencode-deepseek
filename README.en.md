@@ -1,136 +1,41 @@
 <p align="center">
-  <img src="docs/media/bridge-hero.svg" alt="OpenCode Web Bridge — your AI accounts, one local API" width="100%">
+  <img src="docs/media/bridge-hero.svg" alt="Local Account Bridge — DeepSeek Harness and OpenCode" width="100%">
 </p>
 
 <p align="center">
   <a href="README.md">Русский</a> ·
-  <a href="#quick-start">Get started</a> ·
+  <a href="#quick-start">Install</a> ·
+  <a href="#connect-harness">Harness</a> ·
+  <a href="#connect-opencode">OpenCode</a> ·
   <a href="#provider-status">Providers</a> ·
-  <a href="#inside-opencode">Demos</a> ·
-  <a href="docs/SETUP.en.md">Full guide</a>
+  <a href="docs/HARNESS.en.md">Harness guide</a>
 </p>
 
-# Your AI accounts, inside OpenCode and DeepSeek Harness
+# Your AI accounts — in DeepSeek Harness and OpenCode
 
-A local bridge connects **DeepSeek, Qwen, GLM and Kimi** web chats to OpenCode and Harness
-through an OpenAI-compatible API. Sign in to your account, select a model and
-work with project files using the agent. These connections do not need a
-separate provider API key.
+One local server connects **DeepSeek Harness or OpenCode** to your DeepSeek,
+Qwen, Kimi and GLM accounts through an OpenAI-compatible API. Your client runs
+project tools; the bridge sends messages to the selected provider. Website
+adapters do not require a separate provider API key.
 
-**Already using DeepSeek Harness?** [Connect the bridge](docs/HARNESS.en.md):
-`python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash`.
-Setup reads the model catalog, disables retries and model-generated titles, and
-sends no prompts to your accounts.
-This mode needs no tabs while serving requests: Qwen passed with its browser
-closed; the GLM, `kimi-web`, Grok, and Mistral tab adapters are excluded.
-Kimi also has an experimental [direct HTTP mode](docs/KIMI.md),
-`kimi-instant`, `kimi-k3` and `kimi-k2.8`,
-disabled by default. Instant passed direct completion, token rotation and Harness `read` on October 10.
-K3 was refused because free-account server capacity was unavailable; K2.8 was not
-attempted after that refusal. Initial Qwen sign-in still uses a browser. [Browser requirements](docs/HARNESS.en.md#run-without-an-open-browser).
+**Harness works independently: you do not need OpenCode to use it.**
+Everything documented here is on this fork's `main` branch.
 
-**This fork contains fixes and new adapters. Everything published below is in
-`main` at [DmitrL-dev/opencode-deepseek](https://github.com/DmitrL-dev/opencode-deepseek).**
+[![Main checks](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml)
 
-[![main checks](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml)
-
-> Free web chat uses **your account's allowance**. This is not an unlimited API:
-> each agent turn, including a tool result, can require another website message.
-> [Quotas and boundaries](#limits-and-boundaries).
-
-> Automating a normal website account can lead to account restrictions.
-> The website reported our DeepSeek account blocked until October 4, 2026, 22:17.
-> The cause is unknown. On October 10, after checking normal website access,
-> DeepSeek Chat passed one bounded Harness task with its browser closed:
-> reading a fixture file and answering. This does not guarantee future access.
-> The OpenCode demo captures below come from an earlier version.
-
-The server no longer refreshes sign-in in the background or replays rejected
-requests. Restrictions, quotas, security denials and uncertain outcomes persist
-a provider pause across restarts. HTTP errors use `403` and `retryable: false`.
-Once SSE headers are sent, the first failure is an error event; the next attempt
-returns `403` before accessing the account. Attempts and tool continuations are
-spaced by at least 30 seconds by default; pacing does not guarantee quota or
-terms compliance.
-
-Inspect pauses with `python -m providers.access status`. Resume a provider using
-`python -m providers.access resume qwen` only after manually checking normal
-website access. Sign-in does not clear a pause. Set OpenCode's `small_model`
-explicitly: title generation consumes messages too and must not silently use
-another account.
-
-## One bridge and long Harness tasks
-
-All enabled models share one process at `http://127.0.0.1:8000/v1`.
-The Harness installer updates one **Local account bridge** group from `/v1/models`;
-rerun it after changing enabled providers. Catalog presence does not establish
-session validity or clear an account pause.
-
-**`Local request budget exhausted` is a local ceiling, not a website ban.**
-DeepSeek defaults to 12 generations per hour / 60 per day. Tool continuations
-and format corrections consume generations too, so a large investigation can
-stop at this ceiling. Configure `DEEPSEEK_MAX_*` in the bridge environment to
-change limits while retaining existing usage.
-[Harness setup and troubleshooting](docs/HARNESS.en.md#local-limits-and-errors).
-
-On October 11, DeepSeek Chat passed a live reply and conversation-memory check.
-Service SSE event handling and generic JSON detection for one tool-format
-correction were fixed. Correction was verified using the real Harness CLI with
-a mocked provider; this is not renewed end-to-end qualification of Expert on
-a large task. [Verification details](docs/HARNESS.en.md#offline-verification).
-
-## Provider status
-
-Historical checks from **October 2–10, 2026**; the October 11 update is above.
-“Verified” means a live answer, conversation continuation
-and a native OpenCode `read` on an owned fixture. It qualifies that account and
-session, rather than every future task.
-
-| Provider | Local API model ids | Status | Connection |
-| --- | --- | --- | --- |
-| **DeepSeek** | `deepseek-chat` / `deepseek-expert` | Browserless Harness, October 10: Chat `read`; Expert `read` → `write` → answer, 3 generations without retries | [Login and saved session](docs/SETUP.en.md#4-log-in-to-deepseek-once) |
-| **Qwen** | `qwen3.8-omni-flash` / `qwen3.8-max` | Flash and Max verified | [Separate Qwen session](docs/SETUP.en.md#qwen-chat) |
-| **GLM / Z.ai** | `glm-web` | Verified; GLM-5.3-Flash selected in the test | [Your Safari tab](browser/README.md#safari) |
-| **Kimi** | `kimi-instant`, `kimi-k3`, `kimi-k2.8` / `kimi-web` | Instant: HTTP, refresh and browserless Harness `read`, October 10; K3/K2.8 not qualified end to end; tab mode verified previously | [HTTP session](docs/KIMI.md) / [Safari](browser/README.md#safari) |
-| **Mistral / Vibe** | `mistral-web` | New reply passed; continuation hit `429`. Agent unverified | Experimental, off by default |
-| **Grok** | `grok-web` | Frontend replies; bridge capture does not complete | Experimental, off by default |
-| **Gemini** | Configured from `agy models` | Login passed; completion rejected by region | [Official Antigravity CLI](browser/README.md#gemini), off |
-
-On **2026-10-10**, Qwen also passed live checks in Harness **0.2.0-rc.2**:
-a Max answer and a Flash `read` tool round trip after the safety changes.
-[Sign-in and short session limits](docs/HARNESS.en.md#qwen-session).
-
-`glm-web` and `kimi-web` use the model **selected on the website**; these names
-make no version or plan claim. Qwen and all new adapters are opt-in. A fresh
-installation exposes no provider, including DeepSeek. Enable only the chosen adapter.
-
-## Inside OpenCode
-
-Real captures from OpenCode **1.18.34**: the `plan` agent reads a small
-`hello.py` and returns its result. Demos use a disposable workspace and include
-no personal files or account data.
-
-| Qwen3.8 Omni Flash | Qwen3.8 Max |
-| --- | --- |
-| ![OpenCode with Qwen Flash](docs/media/qwen-flash-opencode.png) | ![OpenCode with Qwen Max](docs/media/qwen-max-opencode.png) |
-
-| GLM · model selected in Safari | Kimi · model selected in Safari |
-| --- | --- |
-| ![OpenCode with GLM](docs/media/glm-opencode.png) | ![OpenCode with Kimi](docs/media/kimi-opencode.png) |
-
-Click an image for the full frame. [Capture provenance](docs/media/README.md).
-The earlier DeepSeek capture stopped on `user is muted`; an older successful
-frame is not substituted. No successful agent demos are claimed for Mistral,
-Grok or Gemini.
+> This is not an unlimited API. Account quotas and local budgets apply.
+> Automating a website chat can lead to restrictions: our DeepSeek account was
+> restricted repeatedly, with the exact cause undetermined. A passing test does
+> not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
 ## Quick start
 
-You need **Python 3.9+** (3.12 recommended), Git, a Qwen account and
-[OpenCode installed](https://opencode.ai/docs/). The bridge itself does not need
-Node.js. These steps are for a fresh macOS/Linux install;
-[Windows and details](docs/SETUP.en.md).
+You need **Python 3.9+** (3.12 recommended), Git, an account with your selected
+provider, and either [DeepSeek Harness](https://www.deepseek.com/en/harness/) or
+[OpenCode](https://opencode.ai/docs/). These commands target macOS/Linux;
+see [Windows and detailed setup](docs/SETUP.en.md).
 
-**1. Install this fork.**
+### 1. Install the bridge
 
 ```bash
 git clone https://github.com/DmitrL-dev/opencode-deepseek.git
@@ -142,130 +47,199 @@ python -m playwright install chromium
 cp .env.example .env
 ```
 
-**2. Sign in to Qwen and enable it.**
+When updating an existing installation, preserve `.env` and `session/`.
+All providers start disabled; enable only the ones you intend to use.
+
+### 2. Connect an account
+
+This first-run example uses **Qwen Flash**:
 
 ```bash
 python -m qwen.auth
 ```
 
-Change `QWEN_ENABLED=0` to `QWEN_ENABLED=1` in `.env`.
-Qwen access tokens can expire after about 15 minutes. For longer sessions,
-separately enable `QWEN_RENEW_SESSION=1`: before a new request, the bridge may
-renew a locally expired session once using the existing sign-in cookie.
-Refusals persist a pause; there are no retries, background renewals, or message
-replays. [Details](docs/HARNESS.en.md#qwen-session). Then start:
+Complete sign-in yourself in the opened window and wait for the session to be
+saved. Change this setting in `.env`:
+
+```dotenv
+QWEN_ENABLED=1
+```
+
+Initial sign-in needs a browser; requests do not need open tabs afterward.
+Tokens are short-lived. Optionally set `QWEN_RENEW_SESSION=1` to renew before a
+new request. Once the sign-in cookie expires, manual sign-in is required again.
+[Renewal details](docs/HARNESS.en.md#qwen-session).
+
+**Using DeepSeek instead?** Run `python -m deepseek.auth`, sign in, and set
+`DEEPSEEK_ENABLED=1`. Replace `qwen3.8-omni-flash` in the Harness command below
+with `deepseek-chat` or `deepseek-expert`. DeepSeek has no automatic renewal;
+a saved session older than six hours requires sign-in again. Stop if the
+normal website shows an account restriction.
+
+For Kimi, follow [HTTP session setup](docs/KIMI.md); for GLM, use the
+[Safari tab adapter](browser/README.md#safari).
+
+### 3. Start the server
 
 ```bash
 python app.py
 ```
 
-Complete sign-in yourself in the opened browser. Leave the server running.
-In a separate terminal:
+Keep this terminal running. One process serves all enabled providers; do not
+start another instance. In a separate terminal:
 
 ```bash
 curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/v1/models
 ```
 
-**3. Connect OpenCode in your project.**
+These local checks send no model requests. Confirm your model appears in the
+catalog, then connect **your client** below.
 
-Put the [example `opencode.json`](examples/opencode.json) in your project
-folder. If a config already exists, merge its `provider` objects while keeping
-your settings. The default port is `8000`, `baseURL` is
-`http://127.0.0.1:8000/v1`, and `apiKey: "unused"` is an SDK placeholder.
-The example's `limit` fields are conservative client budgets, rather than
-verified model context specifications or account quotas.
+## Connect Harness
+
+1. Install and open [official Harness](https://www.deepseek.com/en/harness/)
+   once. During initial setup, you can choose **Add API Key → Set up later**.
+2. In another terminal, enter the bridge directory, activate
+   `source venv/bin/activate`, and run this while the server is running:
+
+```bash
+python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash
+```
+
+3. Select your **project folder**, create a **new session**, and choose
+   **Local account bridge** → your model in Harness. Restart Harness if the
+   group has not appeared. Existing sessions may retain their previous model.
+4. Start with a small task, such as “Read this project's README and briefly
+   explain its purpose.” Check the tool calls and final response.
+
+The installer reads the local catalog, backs up the profile and updates
+`~/.dsh/profiles/desktop/cordis.patch.yml`. It disables automatic retries and
+model-generated titles. Setup sends no account requests.
+
+| Connection | Harness configuration |
+| --- | --- |
+| DeepSeek, Qwen, direct HTTP Kimi | Use the command above with `--without-browser` and an available `--default-model` |
+| GLM or `kimi-web` through a tab | Set up the tab; run installation **without** `--without-browser`, selecting `glm-web` or `kimi-web` |
+| Web UI / CLI | For an initialized profile, replace `--install desktop` with `--install web` / `--install headless` |
+| Enabled or disabled another provider | Restart the bridge and reinstall the catalog with your intended flags |
+
+`--without-browser` filters adapters; it does not remove initial sign-in or
+turn GLM into a direct HTTP connection. Catalog visibility does not confirm
+account availability. [Full Harness guide](docs/HARNESS.en.md).
+
+### Counters and reset inside Harness
+
+After [installing the local budget plugin](docs/HARNESS.en.md#local-budget-commands),
+these commands run **without calling a model**:
+
+| Command | Result |
+| --- | --- |
+| `/bridge-budget` | Six rolling DeepSeek budgets: generations, new chats and HTTP requests per hour/day, with remaining capacity |
+| `/bridge-budget-reset` | Preview only; no counters changed |
+| `/bridge-budget-reset CONFIRM` | Explicit confirmation in the same session within 60 seconds |
+
+Reset clears local usage only. It does not clear provider pauses, change website
+quotas, request intervals or conversation history. Active or unresolved requests,
+and usage changes since the preview, prevent reset. The plugin requires its own
+private token; installing the model catalog alone does not install these commands.
+
+### If Harness stops
+
+| Message / symptom | Check |
+| --- | --- |
+| `Local request budget exhausted` | Rolling budgets, conversation reply cap or prompt size. A new chat or restart does not clear rolling usage |
+| `MISSING_CREDENTIAL` for `deepseek-official` | The official API route needs a key. To use the bridge, select **Local account bridge** |
+| `login_required` | Saved authentication expired; sign in to the selected provider again |
+| `quota_exceeded`, `user is muted`, security refusal | Stop and inspect the normal website; do not retry automatically |
+| Missing group or model | Check `.env`, the running server and `/v1/models`, then reinstall the catalog |
+
+DeepSeek defaults are **12/60 generations, 3/6 new chats and 40/200 HTTP requests
+per hour/day**, with 20 accepted replies per conversation and a 30-second
+interval. `DEEPSEEK_MAX_*` settings belong to the bridge process environment.
+Raising a local ceiling does not raise the website's allowance.
+[Configuration and error guide](docs/HARNESS.en.md#local-limits-and-errors).
+
+## Connect OpenCode
+
+Use the same bridge and account setup above. Put the example
+[`opencode.json`](examples/opencode.json) in your project. For existing configs,
+merge settings while preserving your `provider`, `model` and `small_model`.
+Set `small_model` explicitly: title generation can also consume messages.
 
 ```bash
 cd /path/to/your-project
 opencode --agent plan --model local-qwen/qwen3.8-omni-flash
 ```
 
-Ask it to read and explain a file. Use OpenCode's normal agent selection when
-you want edits. [Agent and tool-plugin setup](docs/SETUP.en.md#opencode-integration).
+For DeepSeek, select `local-deepseek/deepseek-chat` or
+`local-deepseek/deepseek-expert`. API URL: `http://127.0.0.1:8000/v1`.
+`apiKey: "unused"` is an SDK placeholder, not an account key or API access control.
+[Agents and tool plugin](docs/SETUP.en.md#opencode-integration).
 
-**4. Add the accounts you need.**
+## Provider status
 
-- **Qwen Max:** after Qwen sign-in, choose `local-qwen/qwen3.8-max`.
-- **DeepSeek (account restriction risk):** deliberately set `DEEPSEEK_ENABLED=1`
-  in `.env`, run `python -m deepseek.auth`, restart the API, then choose
-  `local-deepseek/deepseek-chat` or `local-deepseek/deepseek-expert`. Stop on
-  `user is muted`: another sign-in did not resolve it in our test.
-- **GLM / Kimi:** install Safari Userscripts and follow
-  [tab pairing](browser/README.md#safari). Set `BROWSER_BRIDGE_ENABLED=1` and
-  `GLM_ENABLED=1` / `KIMI_ENABLED=1` in `.env`, then restart the API. OpenCode
-  model ids are `local-glm/glm-web` / `local-kimi/kimi-web`. Keep the paired tab
-  open; closing or reloading it during a request interrupts the task.
+Implementation and historical checks as of **October 11, 2026**. A passing test
+on one account does not establish current access or reliable unlimited goals.
+Provider documentation retains detailed qualification results.
 
-Check the status table before enabling an experimental adapter.
+| Provider / model ID | Browser during requests | Status |
+| --- | --- | --- |
+| DeepSeek · `deepseek-chat`, `deepseek-expert` | Not needed after manual sign-in | Small Harness tasks passed; repeated account restrictions occurred. No automatic renewal |
+| Qwen · `qwen3.8-omni-flash`, `qwen3.8-max` | Not needed after sign-in | Tested in Harness; Max reached a daily limit. [Session](docs/HARNESS.en.md#qwen-session) |
+| Kimi · `kimi-instant` | Not needed after capture | Experimental HTTP: reply, renewal and Harness `read` passed |
+| Kimi · `kimi-k3`, `kimi-k2.8` | Not needed after capture | Implemented, not qualified end to end: K3 refused free-user capacity; K2.8 was not attempted afterward. [Details](docs/KIMI.md) |
+| GLM · `glm-web` | Connected tab required | Previously tested with GLM-5.3-Flash; browserless access remains incomplete. [Blockers](docs/GLM.md) |
+| Kimi · `kimi-web` | Connected tab required | Older tab adapter; model selected on the website |
+| Mistral / Grok | Tab required | Experimental: Mistral continuation returned `429`; Grok capture did not complete |
+| Gemini / Antigravity | Official CLI | Request rejected by region in our test; working access not established |
+
+All connections start disabled. Website versions, quotas and availability may
+change. Chinese providers also have limits; the exact Qwen Max daily allowance
+and reset time have not been established.
 
 ## Architecture
 
-![Architecture: OpenCode executes tools locally; the API routes messages to saved DeepSeek/Qwen sessions, GLM/Kimi browser tabs or the official CLI](docs/media/bridge-architecture.svg)
+![Harness or OpenCode → local bridge → HTTP session, browser tab or CLI](docs/media/bridge-architecture.svg)
 
-[Open the full diagram](docs/media/bridge-architecture.svg).
+**Harness or OpenCode runs tools on your computer.** Prompts and tool-read data
+are sent to the selected provider. The bridge validates responses and
+`tool_calls`, saves conversation state and sends new tool results to the existing
+chat. Unknown history stops instead of silently creating a new chat.
 
-**OpenCode executes tools on your computer.** The model receives your prompt
-and permitted tool results. The bridge converts a completed answer into text
-or validated `tool_calls`; incomplete and invalid calls are not returned.
+Refusal pauses survive restart. Client setup, sign-in and local budget reset do
+not clear them. Inspect pauses with `python -m providers.access status`.
+[Resume rules](docs/ACCOUNT_SAFETY.md).
 
-**Connections use different paths.** DeepSeek and Qwen use locally saved
-sessions and the website HTTP protocol. Kimi Instant also uses HTTP with a
-manually captured access/refresh pair. GLM and the legacy `kimi-web` adapter
-send through a normal Safari tab paired with a local queue using Userscripts.
-Gemini uses a separate official CLI.
+The API binds to `127.0.0.1`; `session/` and `.env` are excluded from Git.
+Do not publish them, personalized Userscripts or budget credentials.
+Supported: text and emulated tool calls. Images, audio and video are not uploaded,
+even for models named Omni.
 
-Browser answers are checked for request ownership and transport completion
-before release. SSE can send keepalives while the verified answer is being
-prepared; token-by-token delivery is not promised for every provider.
+## OpenCode demonstrations
 
-## Limits and boundaries
+Historical OpenCode 1.18.34 captures of a small fixture-file read.
+These are **not Harness screenshots** or proof of current account availability.
 
-- **Mistral Free limits messages.** In our test, quota stopped continuation
-  after one successful reply. [Mistral plans](https://mistral.ai/pricing/).
-- **Kimi has frequency and peak-load limits.** Chinese providers are not
-  inherently unlimited. [Official chat help](https://www.kimi.com/en/help/others/chat-issues).
-- **Qwen3.8-Max reached its daily limit on October 10, 2026.** The site sent
-  its quota notice as ordinary answer text. The bridge now recognizes this
-  known notice, returns `quota_exceeded`, and pauses all Qwen requests without
-  retrying or switching to Flash. The allowance, reset timezone and exact
-  reset time are unknown; Flash exhaustion has not been established.
-- **DeepSeek and GLM did not exhaust their allowance in earlier tests.** This
-  does not establish unlimited access. Paid API/CLI quotas do not describe
-  these web connections.
-- **DeepSeek previously rejected the test account:** `biz_code=5`,
-  `user is muted`. The response gives no cause; this does not establish a
-  service-wide restriction for every user.
-- **Text only.** Images, audio and video are not uploaded, even for Omni models.
-- **Website protocols can change.** Stop on `429`, a security challenge or a
-  region rejection and check the normal account UI.
+| Qwen Flash | Qwen Max |
+| --- | --- |
+| ![OpenCode Qwen Flash](docs/media/qwen-flash-opencode.png) | ![OpenCode Qwen Max](docs/media/qwen-max-opencode.png) |
 
-[Full limit notes](browser/README.md#usage-limits). The bridge does not rotate
-accounts to evade quotas or provide regional access.
-
-## Local data and permissions
-
-The API binds to **`127.0.0.1`** by default. Saved sessions live in `session/`
-and settings in `.env`; both are excluded from Git. Personalized Userscripts
-contain your bridge pairing key and must not be published.
-
-Prompts and files read by the agent are sent to **the selected provider**.
-A local bridge does not make a cloud model local. OpenCode permissions govern
-access to files and commands. [Security details](docs/SETUP.en.md#security).
+[GLM/Kimi captures and recording method](docs/media/README.md).
 
 ## Documentation and development
 
-- [Full setup, API and troubleshooting](docs/SETUP.en.md)
-- [Safari, GLM/Kimi, experimental adapters and Gemini](browser/README.md)
-- [OpenCode config for verified connections](examples/opencode.json)
-- [Python and HTTP examples](examples/README.md)
+- [Harness: setup, sessions, budgets, offline verification](docs/HARNESS.en.md)
+- [Full setup, OpenCode, API and autostart](docs/SETUP.en.md)
+- [Kimi HTTP](docs/KIMI.md) · [GLM](docs/GLM.md) · [Safari Userscripts](browser/README.md)
+- [Account safety](docs/ACCOUNT_SAFETY.md) · [API examples](examples/README.md)
 - [Standalone DeepSeek terminal chat](docs/TERMINAL_CHAT.md)
 
-CI covers Python 3.9/3.12, real PoW WASM loading, shell/JavaScript syntax and
-isolated browser fixtures. [CI runs](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml).
-Run locally with `python -m unittest discover -s tests -t . -v`.
+CI covers Python 3.9/3.12, PoW WASM, shell/JavaScript and isolated browser fixtures.
+Locally: `python -m unittest discover -s tests -t . -v`.
+[Real Harness CLI fixtures with mocked providers](docs/HARNESS.en.md#offline-verification).
 
 **MIT · unofficial project.** Based on
 [Tsuev/opencode-deepseek](https://github.com/Tsuev/opencode-deepseek) and
 [sums001/Deepseek-API](https://github.com/sums001/Deepseek-API).
-Use your account under the corresponding service's terms. [License](LICENSE).
+Use accounts under each service's terms. [License](LICENSE).

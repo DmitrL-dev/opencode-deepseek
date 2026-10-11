@@ -1,5 +1,9 @@
 # Detailed setup
 
+> **Using Harness?** Start with the [quick start](../README.en.md#quick-start)
+> and [Harness setup](HARNESS.en.md). OpenCode is not required.
+> This detailed reference also contains OpenCode-specific configuration.
+
 [Home](../README.en.md) · [Русский](SETUP.ru.md)
 
 This reference covers installation, API usage, agents and maintenance. See the home page for provider status and demos. Follow the [separate guide](../browser/README.md) for GLM/Kimi browser tabs and experimental adapters.

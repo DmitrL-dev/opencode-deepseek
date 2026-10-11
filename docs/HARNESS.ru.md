@@ -43,7 +43,7 @@ GLM, Kimi, Grok, Mistral и настроенные через `GEMINI_MODELS` м
 python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash
 ```
 
-Фильтр оставляет включённые Qwen, DeepSeek, Gemini и явно включённый
+Фильтр оставляет включённые Qwen, DeepSeek, Gemini и явно включённые
 экспериментальные `kimi-instant`, `kimi-k3` и `kimi-k2.8`
 ([проверки и ограничения доступа](KIMI.md)). Адаптеры
 GLM, `kimi-web`, Grok и Mistral не попадают в эту группу: им нужна вкладка.
@@ -265,12 +265,32 @@ Harness CLI на локальном подменённом провайдере 
 Сбрасывается только локальный расход DeepSeek. Квоты сайта, защитные паузы,
 задержки и история бесед сохраняются. Активный или неопределённый запрос запрещает сброс.
 
-Для установки создайте приватный файл (0600) со случайным hex-токеном длиной 64 символа,
-задайте серверу его абсолютный путь через `BRIDGE_BUDGET_TOKEN_FILE` и выполните:
+В каталоге моста с активированным virtualenv выполните команды ниже. Они создают
+приватный токен (0600), сохраняя существующий, и устанавливают плагин в уже
+настроенный профиль Harness. Запросов к аккаунтам нет.
 
 ```bash
-python -m integrations.harness_budget --profile desktop --token-file /absolute/private/budget-token
+python - <<'PYTOKEN'
+import os
+from pathlib import Path
+import secrets
+path = Path("session/budget-admin.token").resolve()
+path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+if not path.exists():
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as out:
+        out.write(secrets.token_hex(32) + "\n")
+path.chmod(0o600)
+print(path)  # path only; never print the token
+PYTOKEN
+python -m integrations.harness_budget --profile desktop --token-file "$PWD/session/budget-admin.token"
 ```
 
-Сервер нужно перезапустить; Harness перечитывает профиль автоматически. Этот токен
-служит только для локального управления счётчиками и не связан с аккаунтом провайдера.
+Добавьте в `.env` строку `BRIDGE_BUDGET_TOKEN_FILE=/абсолютный/путь/session/budget-admin.token`,
+используя путь, который напечатала команда. Если мост запускается через LaunchAgent,
+задайте переменную в его окружении и перезагрузите службу. Перезапустите мост;
+Harness перечитает профиль, при необходимости перезапустите приложение.
+
+Токен служит только для локального управления счётчиками и не связан с аккаунтом
+провайдера. Не публикуйте его. Для другого каталога Harness передайте установщику
+`--home /путь/к/.dsh` явно; установщик бюджетов не читает `DSH_HOME`.
