@@ -22,7 +22,7 @@ from deepseek.client import Reply
 from integrations.harness import ROUTE, catalog_models, patch_document, render, yaml_codec
 from providers import access
 from providers.access import AccessGuard, ProviderRejected
-from server import api
+from server import api, ratelimit
 from server.conversation_cache import ConversationCache
 from tests.test_tools import block
 
@@ -42,6 +42,9 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.calls, self.prompts, self.conversation_args = [], [], []
         self.behavior = "text"
         self.addCleanup(patch.stopall)
+        # The module-level app is shared across tests. Give each isolated
+        # server its own identity rather than sharing localhost's rolling quota.
+        patch.object(ratelimit, '_client_key', return_value=self.id()).start()
         patch.object(api, "conversation_cache", ConversationCache(self.root / "conversations.sqlite3")).start()
         patch.object(api, "guard", self.guard).start()
         patch.object(access, "guard", self.guard).start()
@@ -103,7 +106,7 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.conversation_args.append(args)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior in ("format_correction", "dsml_correction", "generic_correction"):
+        if self.behavior in ("format_correction", "dsml_correction", "generic_correction", "json_correction"):
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if len(self.prompts) == 1:
                 answer = "I will read the file.\n" + answer
@@ -111,8 +114,15 @@ class HarnessRuntimeTests(unittest.TestCase):
                     answer = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="read">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'
                 elif self.behavior == "generic_correction":
                     answer = answer.replace('```tool_calls', '```json')
+                elif self.behavior == "json_correction":
+                    answer = '```tool_calls\n[{"name":"read","arguments":{"file_path":"PRIVATE_PATH",}}]\n```'
             elif len(self.prompts) == 2:
-                self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
+                if self.behavior == "json_correction":
+                    self.assertTrue(prompt.startswith(api._FORMAT_REPAIR_PROMPT))
+                    self.assertIn('JSON validation failed: invalid_syntax, line 1, column ', prompt)
+                    self.assertNotIn('PRIVATE_PATH', prompt)
+                else:
+                    self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
                 self.assertEqual(args[:2], ("owned-fixture:2", None))
             else:
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
@@ -189,7 +199,7 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertTrue(any(message["role"] == "tool" for message in self.calls[1]["messages"]))
 
     def test_opt_in_format_correction_executes_native_tool_once(self):
-        for self.behavior in ("format_correction", "dsml_correction", "generic_correction"):
+        for self.behavior in ("format_correction", "dsml_correction", "generic_correction", "json_correction"):
             with self.subTest(behavior=self.behavior), patch.object(api, "_FORMAT_REPAIR", True):
                 self.calls.clear()
                 self.prompts.clear()

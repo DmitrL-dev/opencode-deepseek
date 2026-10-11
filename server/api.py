@@ -384,20 +384,35 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     reply = _chat_with_retry(prompt, req, model_type)
     try:
         return _validate_tool_reply(reply, req)
-    except ToolCallError:
+    except ToolCallError as initial_error:
         if not (_FORMAT_REPAIR and model_provider(req.model) == "deepseek"
                 and req.tool_choice != "none" and reply.finish_reason == "stop"
                 and reply.conversation_id):
+            print('[toolcalls] format_correction=not_eligible', flush=True)
             raise
         _check_cancelled()
         correction = req.model_copy(update={"conversation_id": reply.conversation_id})
-        corrected = _chat_with_retry(_FORMAT_REPAIR_PROMPT, correction, None)
+        print('[toolcalls] format_correction=requested', flush=True)
+        correction_prompt = _FORMAT_REPAIR_PROMPT
+        if initial_error.repair_hint:
+            correction_prompt += "\n" + initial_error.repair_hint
+        corrected = _chat_with_retry(correction_prompt, correction, None)
         if corrected.finish_reason != "stop":
+            print('[toolcalls] format_correction=incomplete', flush=True)
             save_tool_failure(corrected, req)
             raise ToolCallError("The format correction did not finish normally; no calls were returned")
         # No recursion: a second invalid answer is terminal. The original
         # batch never escaped validation and cannot be executed twice.
-        return _validate_tool_reply(corrected, req)
+        try:
+            result = _validate_tool_reply(corrected, req)
+        except ToolCallError as exc:
+            print('[toolcalls] format_correction=invalid', flush=True)
+            raise ToolCallError(
+                'The single format correction also failed; no further correction was requested. '
+                + str(exc)
+            ) from exc
+        print('[toolcalls] format_correction=validated', flush=True)
+        return result
 
 
 def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):

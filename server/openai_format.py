@@ -39,6 +39,10 @@ _CLOSING_ARTIFACTS_RE = re.compile(r"\A(?:\}|</｜｜DSML｜｜tool_calls>|(?:\}
 class ToolCallError(RuntimeError):
     """The model emitted an invalid or disallowed explicit tool reply."""
 
+    def __init__(self, message, *, repair_hint=None):
+        super().__init__(message)
+        self.repair_hint = repair_hint
+
 
 def has_tool_call_markup(text: str, allowed_names=None) -> bool:
     """Recognize call framing, not inline protocol names in a final report.
@@ -418,7 +422,11 @@ def _json_tool_error(message: str, exc: json.JSONDecodeError) -> ToolCallError:
         reason = "invalid_syntax"
     return ToolCallError(
         f"{message} ({reason}; line {exc.lineno}, column {exc.colno}). "
-        "No tools from this reply were returned; automatic replay is disabled."
+        "No tools from this reply were returned; automatic replay is disabled.",
+        repair_hint=(f"JSON validation failed: {reason}, line {exc.lineno}, column {exc.colno} "
+                     "within the JSON payload (not the Markdown fence). "
+                     "Regenerate the whole valid block, not a patch or suffix. "
+                     "Check commas, quoted keys, and escaping of quotes and backslashes inside strings.")
     )
 
 

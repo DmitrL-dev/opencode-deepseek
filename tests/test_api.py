@@ -132,6 +132,45 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(fake.chat.call_args.args[1:3], ('owned:2', None))
                         self.assertIn('Recovered answer' if corrected else '"error":', response.text)
 
+    async def test_invalid_correction_reports_stage_without_logging_reply(self):
+        broken = '```tool_calls\n[{"name":"write","arguments":{"content":"PRIVATE_REPLY",}}]\n```'
+        for stream in (False, True):
+            fake = Mock()
+            fake.chat.side_effect = [Reply(broken, 'owned:2'), Reply(broken, 'owned:4')]
+            output = io.StringIO()
+            with patch.object(api, '_FORMAT_REPAIR', True), \
+                    patch.object(api, 'get_client', return_value=fake), \
+                    patch.object(api, '_debug_toolcalls', return_value=False), \
+                    patch.object(api, 'save_tool_failure'), contextlib.redirect_stdout(output):
+                response = await self.post(tools=TOOLS, stream=stream)
+            self.assertEqual(fake.chat.call_count, 2)
+            self.assertIn('The single format correction also failed', response.text)
+            self.assertIn('invalid_syntax', response.text)
+            self.assertNotIn('"tool_calls":', response.text)
+            self.assertIn('format_correction=requested', output.getvalue())
+            self.assertIn('format_correction=invalid', output.getvalue())
+            for private in ('PRIVATE_REPLY', 'owned:2', 'owned:4'):
+                self.assertNotIn(private, output.getvalue() + response.text)
+
+    async def test_json_correction_receives_position_without_private_payload(self):
+        broken = '```tool_calls\n[{"name":"write","arguments":{"content":"PRIVATE_REPLY",}}]\n```'
+        good = block([{"name": "bash", "arguments": {"command": "printf fixture"}}])
+        for stream in (False, True):
+            fake = Mock()
+            fake.chat.side_effect = [Reply(broken, 'owned:2'), Reply(good, 'owned:4')]
+            with patch.object(api, '_FORMAT_REPAIR', True), \
+                    patch.object(api, 'get_client', return_value=fake), \
+                    patch.object(api, 'save_tool_failure'):
+                response = await self.post(tools=TOOLS, stream=stream)
+            self.assertEqual(fake.chat.call_count, 2)
+            correction = fake.chat.call_args.args[0]
+            self.assertTrue(correction.startswith(api._FORMAT_REPAIR_PROMPT))
+            self.assertIn('invalid_syntax, line 1, column 57', correction)
+            self.assertNotIn('PRIVATE_REPLY', correction)
+            self.assertEqual(fake.chat.call_args.args[1:3], ('owned:2', None))
+            self.assertIn('"tool_calls":', response.text)
+            self.assertNotIn('"error":', response.text)
+
     async def test_empty_tool_reply_does_not_override_correction_guards(self):
         for stream in (False, True):
             for enabled, choice, finish in ((False, 'auto', 'stop'), (True, 'none', 'stop'), (True, 'auto', 'length')):
