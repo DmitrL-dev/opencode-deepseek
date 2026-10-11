@@ -79,6 +79,14 @@ class AccessTests(unittest.TestCase):
             _biz({"code": 123, "msg": "secret=private"})
         self.assertNotIn("private", str(error.exception))
 
+    def test_auth_codes_in_sse_are_terminal_without_message_matching(self):
+        for code in (40002, 40003):
+            for payload in ({"code": code}, {"v": {"code": code}}, {"code": code, "error": "private detail"}):
+                with self.subTest(payload=payload), self.assertRaises(ProviderRejected) as error:
+                    list(_parse_sse(event(payload).splitlines()))
+                self.assertEqual(error.exception.code, "session_expired")
+                self.assertNotIn("private", str(error.exception))
+
     def test_expired_session_does_not_launch_or_recapture_a_browser(self):
         with patch("deepseek.auth.Session.load", return_value=None), patch("deepseek.auth._headless_refresh") as refresh, patch("deepseek.auth.login") as login:
             with self.assertRaises(LoginRequired):
@@ -241,12 +249,12 @@ class SafetySdkTests(unittest.TestCase):
         self.addCleanup(self.sdk.close)
         self.messages = [{"role": "user", "content": "offline fixture"}]
 
-    def deepseek_fixture(self, rejected_path):
+    def deepseek_fixture(self, rejected_path, rejection_payload=MUTED):
         calls = []
         def handler(request):
             calls.append(request.url.path)
             if request.url.path == rejected_path:
-                return httpx.Response(200, json=MUTED)
+                return httpx.Response(200, json=rejection_payload)
             data = {"chat_session": {"id": "fixture"}} if request.url.path.endswith("/create") else {"challenge": {}}
             return httpx.Response(200, json={"code": 0, "data": {"biz_code": 0, "biz_data": data}})
         client = DeepSeekClient.__new__(DeepSeekClient)
@@ -257,6 +265,22 @@ class SafetySdkTests(unittest.TestCase):
         client._http = httpx.Client(base_url="https://offline.invalid", transport=httpx.MockTransport(handler))
         self.addCleanup(client.close)
         return client, calls
+
+    def test_invalid_auth_codes_stop_each_phase_and_survive_restart(self):
+        for code in (40002, 40003):
+            for path in ("/api/v0/chat_session/create", "/api/v0/chat/create_pow_challenge", "/api/v0/chat/completion"):
+                case_guard = AccessGuard(Path(self.directory.name) / (str(code) + path.replace("/", "_") + ".json"), interval=0)
+                client, calls = self.deepseek_fixture(path, {"code": code, "msg": "untranslated private detail"})
+                with self.subTest(code=code, path=path), patch.object(api, "get_client", return_value=client) as factory, patch.object(api, "guard", case_guard):
+                    with self.assertRaises(PermissionDeniedError) as failure:
+                        self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
+                    self.assertEqual(failure.exception.body["code"], "session_expired")
+                    self.assertFalse(failure.exception.body["retryable"])
+                    restarted = AccessGuard(case_guard.path, interval=0)
+                    with patch.object(api, "guard", restarted), self.assertRaises(PermissionDeniedError):
+                        self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
+                    self.assertEqual(calls.count(path), 1)
+                    self.assertEqual(factory.call_count, 1)
 
     def test_muted_at_each_protocol_step_stops_sdk_and_later_requests(self):
         for path in ("/api/v0/chat_session/create", "/api/v0/chat/create_pow_challenge", "/api/v0/chat/completion"):

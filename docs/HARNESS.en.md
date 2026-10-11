@@ -90,8 +90,9 @@ privately; token capture does not confirm access or clear a pause. Use
 `--channel chrome` for installed Chrome. This inspection mode never falls
 back to another browser channel.
 
-Harness requests use the saved cache only. After six hours it is considered
-stale and requires manual sign-in; DeepSeek has no automatic renewal. Failure
+Harness requests use the saved cache only. Cache age alone does not require sign-in. Token rejection (`40002`/`40003`)
+persists a pause and stops without retry. Resume requires manual sign-in and
+explicitly clearing the pause; DeepSeek has no automatic renewal. Failure
 logs contain only the protocol phase, HTTP status and fixed error category,
 without credentials, response bodies or prompts.
 
@@ -286,3 +287,8 @@ between preview and confirmation reject the reset. Commands run without an LLM.
 Reset clears only local usage, preserving provider pauses, pacing and conversation
 history. Active or unresolved requests prevent reset. The authenticated loopback
 admin endpoint rejects browser Origin requests.
+
+The accepted-reply cap per conversation is displayed separately from rolling
+budgets. `/bridge-budget-reset` does not reset it. The command does not show
+the current conversation count; reaching the cap reports it in the error.
+The bridge never creates a replacement conversation automatically.

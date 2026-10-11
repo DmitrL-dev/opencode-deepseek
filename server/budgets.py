@@ -24,13 +24,21 @@ def authorized(request):
         request.headers.get('authorization', '').encode('utf-8'), ('Bearer ' + token).encode('utf-8'))
 
 
+def status_with_conversation_limit(guard):
+    from server.api import conversation_cache, SESSION_MAX_AGE
+    return {**guard.budget_status(), 'conversation': {
+        'max_replies': conversation_cache.max_replies,
+        'reset_by_budget_reset': False,
+    }, 'session_policy': {'max_age_seconds': SESSION_MAX_AGE}}
+
+
 @router.get('/admin/budget')
 async def budget_status(request: Request):
     if not authorized(request):
         return JSONResponse({'error': 'Unauthorized'}, status_code=403)
     from server.api import guard
     try:
-        return guard.budget_status()
+        return status_with_conversation_limit(guard)
     except ProviderRejected:
         return JSONResponse({'error': 'Safety state unavailable'}, status_code=503)
 
@@ -55,7 +63,7 @@ async def budget_reset(request: Request):
     from server.api import guard
     try:
         guard.reset_budget(data['revision'])
-        return guard.budget_status()
+        return status_with_conversation_limit(guard)
     except RuntimeError as exc:
         if isinstance(exc, ProviderRejected):
             return JSONResponse({'error': 'Safety state unavailable'}, status_code=503)

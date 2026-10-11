@@ -29,7 +29,10 @@ class BudgetControls(unittest.IsolatedAsyncioTestCase):
 
     async def test_read_counts_and_reset_preserve_pause_and_pacing(self):
         r = await self.client.get('/admin/budget'); self.assertEqual(r.status_code,200)
-        d = r.json(); self.assertEqual([b['used'] for b in d['budgets']], [2,2,1,1,1,1])
+        d = r.json(); self.assertEqual(d['conversation']['max_replies'], api.conversation_cache.max_replies)
+        self.assertFalse(d['conversation']['reset_by_budget_reset'])
+        self.assertIsNone(d['session_policy']['max_age_seconds'])
+        self.assertEqual([b['used'] for b in d['budgets']], [2,2,1,1,1,1])
         result = await self.client.post('/admin/budget/reset',json={'revision':d['revision'],'confirmation':'RESET LOCAL BUDGET'})
         self.assertEqual(result.status_code,200); self.assertTrue(all(b['used']==0 for b in result.json()['budgets']))
         saved = json.loads(self.guard.path.read_text())['deepseek'];self.assertEqual(saved['pause'],'account_restricted');self.assertEqual(saved['next_at'],self.record['next_at'])

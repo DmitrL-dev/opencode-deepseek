@@ -86,13 +86,20 @@ def _decode_cid(conversation_id: Optional[str]) -> tuple[Optional[str], Optional
     return match[1], int(match[2])
 
 
+def _deepseek_rejection(data):
+    """Classify observed site auth codes without relying on error wording."""
+    if isinstance(data, dict) and data.get("code") in (40002, 40003, "40002", "40003"):
+        return ProviderRejected("session_expired")
+    return rejection(data)
+
+
 def _biz(data: dict) -> dict:
     """Unwrap DeepSeek's `data.biz_data` envelope, raising on API-level errors."""
     if not isinstance(data, dict):
         raise ProviderRejected()
     envelope = data.get("data")
     if data.get("code") != 0:
-        raise rejection(data)
+        raise _deepseek_rejection(data)
     if not isinstance(envelope, dict):
         raise ProviderRejected()
     if envelope.get("biz_code", 0) != 0:
@@ -466,7 +473,9 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             _biz(envelope)
         if event == "error" or "error" in envelope or envelope.get("code", 0) != 0:
             detail = envelope.get("error") or envelope
-            raise rejection(detail)
+            if envelope.get("code", 0) != 0:
+                detail = envelope
+            raise _deepseek_rejection(detail)
         if event == "finish":
             terminal = True
             meta.setdefault("finish_reason", "stop")

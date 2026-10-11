@@ -5,12 +5,15 @@ import {join} from 'node:path';
 import {apply} from '../integrations/harness_budget.mjs';
 const dir=await mkdtemp(join(tmpdir(),'budget-fixture-'));const tokenFile=join(dir,'token');await writeFile(tokenFile,'a'.repeat(64));
 const commands=new Map(); const calls=[];
-const data={budgets:[{category:'generation',window_seconds:3600,used:49,limit:120,remaining:71}],revision:'b'.repeat(64),min_interval_seconds:30,paused:null,busy:false};
+const data={conversation:{max_replies:100,reset_by_budget_reset:false},budgets:[{category:'generation',window_seconds:3600,used:49,limit:120,remaining:71}],revision:'b'.repeat(64),min_interval_seconds:30,paused:null,busy:false};
 globalThis.fetch=async(url,options)=>{calls.push({url:String(url),...options});return {ok:true,json:async()=>data};};
 try {
  apply({commands:{register:c=>commands.set(c.name,c)}},{tokenFile});
  const invocation=rawInput=>({rawInput,agent:{session:{id:'synthetic'}}});
- assert.match((await commands.get('bridge-budget').handler(invocation(''))).text,/49 \/ 120/);
+ const status=(await commands.get('bridge-budget').handler(invocation(''))).text;
+ assert.match(status,/49 \/ 120/);
+ assert.match(status,/100 подтверждённых ответов/);
+ assert.match(status,/этот лимит не сбрасывает/);
  await commands.get('bridge-budget-reset').handler(invocation('CONFIRM'));
  assert.equal(calls.length,1);
  await commands.get('bridge-budget-reset').handler(invocation(''));

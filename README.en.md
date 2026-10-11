@@ -73,7 +73,7 @@ new request. Once the sign-in cookie expires, manual sign-in is required again.
 **Using DeepSeek instead?** Run `python -m deepseek.auth`, sign in, and set
 `DEEPSEEK_ENABLED=1`. Replace `qwen3.8-omni-flash` in the Harness command below
 with `deepseek-chat` or `deepseek-expert`. DeepSeek has no automatic renewal;
-a saved session older than six hours requires sign-in again. Stop if the
+saved sessions have no local age cutoff. Token rejection (`40002`/`40003`) stops requests without retry and requires manual sign-in. Stop if the
 normal website shows an account restriction.
 
 For Kimi, follow [HTTP session setup](docs/KIMI.md); for GLM, use the

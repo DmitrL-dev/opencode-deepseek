@@ -115,7 +115,7 @@ class ConversationCache:
             if not row or row[1]:
                 raise ConversationStateError('History is unknown or already consumed; automatic replay and new-chat fallback are disabled.')
             if row[2] >= self.max_replies:
-                raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped.')
+                raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.
             reservation = uuid.uuid4().hex
             db.execute('UPDATE links SET used=1, reservation=? WHERE key=?', (reservation, key))

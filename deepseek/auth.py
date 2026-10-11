@@ -47,8 +47,8 @@ CHAT_URL = "https://chat.deepseek.com/"
 SIGNIN_URL = "https://chat.deepseek.com/sign_in"
 
 LAUNCH_ARGS = []
-# Maximum trusted cache age; expiry requires manual sign-in in the API.
-SESSION_MAX_AGE = 6 * 60 * 60  # 6 hours
+# No inferred server TTL. Explicit library callers can still request an age bound.
+SESSION_MAX_AGE = None
 _PROFILE_LOCK = threading.RLock()
 
 
@@ -153,6 +153,8 @@ class Session:
             if not isinstance(data.get("cookies"), list):
                 return None
             session = cls(**data)
+            if not isinstance(session.token, str) or not session.token.strip() or any(c in session.token for c in "\r\n"):
+                return None
             session.cookie_jar()
             return session
         except Exception:
@@ -325,20 +327,20 @@ def _headless_refresh(
 def get_session(
     profile_dir: Path = DEFAULT_PROFILE_DIR,
     session_file: Path = DEFAULT_SESSION_FILE,
-    max_age: int = SESSION_MAX_AGE,
+    max_age: Optional[int] = SESSION_MAX_AGE,
     allow_interactive: bool = False,
     channel: Optional[str] = DEFAULT_CHANNEL,
     fallback_channel: Optional[str] = None,
     allow_refresh: bool = False,
 ) -> Session:
-    """Load a fresh cache without browser access by default.
+    """Load a saved session without browser access or an inferred expiry.
 
     Explicit library callers may opt into allow_refresh; the API server never
     does. Use the auth CLI for manual sign-in. Never use sign-in to clear a
     provider pause or retry an account/security restriction.
     """
     cached = Session.load(session_file)
-    if cached and cached.age < max_age:
+    if cached and (max_age is None or cached.age < max_age):
         return cached
 
     # Requests must not reopen a website, recapture a session, or fall back to

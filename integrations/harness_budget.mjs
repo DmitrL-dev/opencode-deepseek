@@ -7,6 +7,8 @@ export function formatBudget(data) {
   const rows = data.budgets.map(b => `${names[b.category]} / ${b.window_seconds === 3600 ? 'час' : 'сутки'}: ${b.used} / ${b.limit}; осталось ${b.remaining}` +
     (b.remaining === 0 ? `; освободится ${new Date(b.next_available_at * 1000).toLocaleString('ru-RU')}` : ''));
   return ['Локальный бюджет DeepSeek (не квота провайдера)', ...rows,
+    `Отдельный лимит одного диалога: ${data.conversation?.max_replies ?? 'не сообщён мостом'} подтверждённых ответов.`,
+    'Расход текущего диалога здесь не показан; /bridge-budget-reset этот лимит не сбрасывает.',
     `Интервал: ${data.min_interval_seconds} сек.`,
     `Защитная пауза: ${data.paused || 'нет'}. Активный запрос: ${data.busy ? 'да' : 'нет'}.`,
     'Для ручного сброса: /bridge-budget-reset'].join('\n');

@@ -912,6 +912,7 @@ class RefreshAndStartupTests(unittest.TestCase):
     def test_request_client_only_loads_cached_session(self):
         with patch.object(api, "get_session") as load, patch.object(api, "DeepSeekClient"):
             api._build_client(force=True, allow_interactive=True)
+        self.assertIsNone(load.call_args.kwargs["max_age"])
         self.assertFalse(load.call_args.kwargs["allow_refresh"])
         self.assertFalse(load.call_args.kwargs["allow_interactive"])
 

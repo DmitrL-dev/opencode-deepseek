@@ -100,6 +100,33 @@ class SessionTests(unittest.TestCase):
         with self.assertRaises(auth.LoginRequired):
             auth.Session("fake",{},"fake",time.time()).cookie_jar()
 
+    def test_old_session_is_reused_without_browser_or_cache_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            saved = session()
+            saved.captured_at = time.time() - 365 * 86400
+            saved.save(path)
+            before = path.read_bytes()
+            with patch.object(auth, "_headless_refresh") as refresh, patch.object(auth, "login") as login:
+                loaded = auth.get_session(session_file=path)
+                self.assertEqual(loaded.token, saved.token)
+                self.assertEqual(loaded.captured_at, saved.captured_at)
+                self.assertEqual(path.read_bytes(), before)
+                with self.assertRaises(auth.LoginRequired):
+                    auth.get_session(session_file=path, max_age=3600)
+                refresh.assert_not_called()
+                login.assert_not_called()
+
+    def test_unusable_cached_token_still_requires_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "session.json"
+            for token in (None, "", "  ", "bad\r\nheader", 123):
+                saved = session()
+                saved.token = token
+                saved.save(path)
+                with self.subTest(token=token), self.assertRaises(auth.LoginRequired):
+                    auth.get_session(session_file=path)
+
     def test_fallback_handles_channel_exceptions_and_saves_requested_path(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/"custom"/"session.json"
