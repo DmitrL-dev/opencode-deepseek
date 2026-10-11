@@ -57,6 +57,21 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def post(self, **extra):
         return await self.client.post("/v1/chat/completions",json={**self.request,**extra})
 
+    async def test_disabling_format_repair_does_not_accept_broken_markup_as_text(self):
+        tools=[{'type':'function','function':{'name':'read','parameters':{
+            'type':'object','properties':{'file_path':{'type':'string'}},'required':['file_path']}}}]
+        answer=('I will read the file.\n\n```tool_calls\n'
+                '[{"name":"read","file_path":"/fixture/example.py"}]'
+                '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+        for stream in (False,True):
+            with self.subTest(stream=stream):
+                fake=Mock();fake.chat.return_value=Reply(answer,'owned:2')
+                with patch.object(api,'_FORMAT_REPAIR',False), patch.object(api,'get_client',return_value=fake):
+                    response=await self.post(tools=tools,stream=stream)
+                self.assertIn('Unsupported tool-call markup',response.text)
+                self.assertNotIn('"tool_calls":',response.text)
+                self.assertEqual(fake.chat.call_count,1)
+
     async def test_final_report_can_mention_tool_markup_without_correction(self):
         replies = [
             'Готово. Цель закрыта. Модель возвращает валидный ` ```tool_calls ` блок.\nВсе тесты прошли.',

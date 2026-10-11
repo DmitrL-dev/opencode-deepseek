@@ -438,7 +438,7 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
                     allow_closing_artifacts=reply.finish_reason == "stop",
                     allow_missing_array_closer=reply.finish_reason == "stop",
                     flat_argument_tools=req.tools if reply.finish_reason == "stop" else None)
-                if (_FORMAT_REPAIR and req.tool_choice != "none" and tool_calls is None
+                if (req.tool_choice != "none" and tool_calls is None
                         and has_tool_call_markup(
                             reply.text, names if model_provider(req.model) == "deepseek" else None)):
                     raise ToolCallError("Unsupported tool-call markup; no calls were returned")

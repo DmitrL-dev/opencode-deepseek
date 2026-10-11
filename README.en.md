@@ -184,6 +184,10 @@ its context. It is not a local budget or expired session; resetting counters or
 signing in again will not fix it. The bridge preserves history and stops, without
 creating a new chat. Migrating the goal requires a separate manual decision.
 
+Disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
+it does not disable tool-markup validation. Malformed tool blocks stop the step
+instead of being returned as successful plain text.
+
 ### If Harness stops
 
 | Message / symptom | Check |
