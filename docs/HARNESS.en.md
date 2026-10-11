@@ -147,7 +147,7 @@ after a manual website check; see [account safety](ACCOUNT_SAFETY.md). All
 providers have account limits, including Chinese models. Tool continuations can
 consume another message.
 
-After the repeated October 10 restriction, live qualification is stopped. Keep `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge now resumes saved conversations and sends only new results; unknown history stops without a new-chat fallback. Durable load budgets and a 20-reply conversation cap apply. See [account safety](ACCOUNT_SAFETY.md).
+Defaults remain `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge resumes saved conversations and sends only new results; unknown history stops without creating a new chat. Rolling budgets and a 20-accepted-reply conversation cap still apply. Historical checks below do not establish readiness for unlimited tasks.
 
 For unattended DeepSeek goals, optionally set `TOOLCALL_FORMAT_REPAIR=1` in
 the bridge process environment and restart the bridge. After a normally
@@ -175,7 +175,7 @@ This qualifies bounded tasks, not error-free execution of every possible goal.
 
 ## Offline verification
 
-The current suite was verified with installed Harness **0.2.0-rc.2**: 13 real CLI scenarios and setup
+The current suite was verified with installed Harness **0.2.0-rc.2**: 14 real CLI scenarios and setup
 tests. For an owned HTTP 503 fixture, the default policy made six requests;
 the bridge configuration made one. No real accounts were used.
 
@@ -193,3 +193,46 @@ and no retry after HTTP 503. This does not qualify live accounts.
 Reference: [official Harness model configuration](https://deepseek-harness.github.io/deepseek-harness/en/guide/providers).
 
 [GLM browserless access blockers](GLM.md).
+
+## Local limits and errors
+
+`Local request budget exhausted` (`local_budget_exceeded`) can mean a rolling
+DeepSeek budget, the 20-accepted-reply saved-conversation cap, or a prompt above
+128 KiB UTF-8. Rolling capacity returns as events age out, not at calendar-hour
+or midnight boundaries. Restart and `resume` preserve usage. `providers.access
+status` reports pauses rather than remaining budgets: an empty result does not
+rule out budget exhaustion.
+
+For longer tasks, explicitly configure the single bridge process environment:
+
+```dotenv
+DEEPSEEK_MAX_GENERATIONS_PER_HOUR=60
+DEEPSEEK_MAX_GENERATIONS_PER_DAY=300
+DEEPSEEK_MAX_CHATS_PER_HOUR=6
+DEEPSEEK_MAX_CHATS_PER_DAY=24
+DEEPSEEK_MAX_HTTP_PER_HOUR=200
+DEEPSEEK_MAX_HTTP_PER_DAY=1000
+```
+
+This is an expanded local budget example, not DeepSeek's allowance. Defaults
+remain 12/60 generations, 3/6 new chats and 40/200 HTTP requests. Values must be
+integers from 1 to 1000; each daily ceiling must be at least its hourly ceiling.
+Invalid settings stop startup. HTTP usage includes chat creation, challenge and
+generation; preflight checks space for the whole sequence. Changing limits
+preserves usage, pauses and pacing.
+
+Restart after changing `.env`. If a LaunchAgent sets these variables in
+`EnvironmentVariables`, change them there and reload the LaunchAgent; `kickstart`
+alone does not reread an edited plist. [Autostart](SETUP.en.md) starts the process
+at macOS login but does not renew DeepSeek authentication.
+
+If Harness renders tool JSON as text, optional `TOOLCALL_FORMAT_REPAIR=1` allows
+one correction after normal completion. A generic fenced JSON list of known
+tools is only a correction signal, never directly executable. An invalid second
+reply stops. Correction consumes another generation and does not remove website
+or conversation limits. Keep Harness automatic retries disabled.
+
+October 11: live Chat passed a reply and conversation-memory check; the service
+SSE `finish` fix has regression coverage. Generic JSON correction passed three
+format variants using the real Harness CLI and a local mocked provider. A new
+large live Expert task has not been qualified after these changes.

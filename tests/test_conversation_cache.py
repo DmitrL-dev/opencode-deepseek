@@ -226,6 +226,37 @@ class BudgetTests(unittest.TestCase):
                 attempt.preflight_generation(False)
         self.assertEqual(len(json.loads(self.path.read_text())['deepseek']['usage']), 39)
 
+    def test_configured_limit_preserves_usage_and_preflight(self):
+        guard = AccessGuard(self.path, interval=0)
+        for _ in range(12):
+            self.charge(guard, 'generation')
+        with patch.dict('os.environ', {'DEEPSEEK_MAX_GENERATIONS_PER_HOUR': '13'}):
+            raised = AccessGuard(self.path, interval=0)
+            with raised.attempt('deepseek') as attempt:
+                attempt.preflight_generation(False)
+                attempt.dispatch(kind='generation')
+            with self.assertRaises(ProviderRejected):
+                with raised.attempt('deepseek') as attempt:
+                    attempt.preflight_generation(False)
+        self.assertEqual(len(json.loads(self.path.read_text())['deepseek']['usage']), 13)
+        with self.assertRaises(ProviderRejected):
+            self.charge(AccessGuard(self.path, interval=0), 'generation')
+
+    def test_invalid_budget_configuration_is_rejected(self):
+        for value in ('0', '-1', '1001', '1.5', 'nan', '', '１２', '61'):
+            with self.subTest(value=value), patch.dict('os.environ',
+                    {'DEEPSEEK_MAX_GENERATIONS_PER_HOUR': value}):
+                with self.assertRaises(ValueError):
+                    AccessGuard(self.path, interval=0)
+
+    def test_configured_http_preflight_reserves_whole_sequence(self):
+        with patch.dict('os.environ', {'DEEPSEEK_MAX_HTTP_PER_HOUR': '2'}):
+            guard = AccessGuard(self.path, interval=0)
+            with self.assertRaises(ProviderRejected):
+                with guard.attempt('deepseek') as attempt:
+                    attempt.preflight_generation(True)
+            self.assertEqual(json.loads(self.path.read_text())['deepseek'].get('usage', []), [])
+
     def test_http_pacing_is_persisted_inside_one_operation(self):
         guard = AccessGuard(self.path, interval=30)
         with patch('providers.access.time.time', return_value=100000):

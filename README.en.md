@@ -59,9 +59,30 @@ website access. Sign-in does not clear a pause. Set OpenCode's `small_model`
 explicitly: title generation consumes messages too and must not silently use
 another account.
 
+## One bridge and long Harness tasks
+
+All enabled models share one process at `http://127.0.0.1:8000/v1`.
+The Harness installer updates one **Local account bridge** group from `/v1/models`;
+rerun it after changing enabled providers. Catalog presence does not establish
+session validity or clear an account pause.
+
+**`Local request budget exhausted` is a local ceiling, not a website ban.**
+DeepSeek defaults to 12 generations per hour / 60 per day. Tool continuations
+and format corrections consume generations too, so a large investigation can
+stop at this ceiling. Configure `DEEPSEEK_MAX_*` in the bridge environment to
+change limits while retaining existing usage.
+[Harness setup and troubleshooting](docs/HARNESS.en.md#local-limits-and-errors).
+
+On October 11, DeepSeek Chat passed a live reply and conversation-memory check.
+Service SSE event handling and generic JSON detection for one tool-format
+correction were fixed. Correction was verified using the real Harness CLI with
+a mocked provider; this is not renewed end-to-end qualification of Expert on
+a large task. [Verification details](docs/HARNESS.en.md#offline-verification).
+
 ## Provider status
 
-As of **2026-10-02**. “Verified” means a live answer, conversation continuation
+Historical checks from **October 2–10, 2026**; the October 11 update is above.
+“Verified” means a live answer, conversation continuation
 and a native OpenCode `read` on an owned fixture. It qualifies that account and
 session, rather than every future task.
 

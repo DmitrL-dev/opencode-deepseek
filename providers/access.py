@@ -65,12 +65,34 @@ def _file_lock(file, unlock=False):
         fcntl.flock(file, fcntl.LOCK_UN if unlock else fcntl.LOCK_EX)
 
 
+def _configured_budgets():
+    """Bounded rolling ceilings; 1000 is also the persisted ledger size limit."""
+    limits = []
+    for name, category, defaults in (
+        ('HTTP', None, (40, 200)), ('CHATS', 'chat', (3, 6)),
+        ('GENERATIONS', 'generation', (12, 60)),
+    ):
+        values = []
+        for suffix, default in zip(('HOUR', 'DAY'), defaults):
+            key = f'DEEPSEEK_MAX_{name}_PER_{suffix}'
+            raw = os.getenv(key, str(default))
+            if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= 1000:
+                raise ValueError(f'{key} must be an integer between 1 and 1000')
+            values.append(int(raw))
+        if values[0] > values[1]:
+            raise ValueError(f'DEEPSEEK_MAX_{name}_PER_DAY must be >= PER_HOUR')
+        limits.extend((window, category, value)
+                      for window, value in zip((3600, 86400), values))
+    return tuple(limits)
+
+
 class AccessGuard:
     def __init__(self, path=ROOT / 'session' / 'provider-pauses.json', interval=None):
         self.path = Path(path) if path is not None else None
         self.interval = float(os.getenv('PROVIDER_MIN_INTERVAL', '30') if interval is None else interval)
         if not math.isfinite(self.interval) or not 0 <= self.interval <= 3600:
             raise ValueError('PROVIDER_MIN_INTERVAL must be between 0 and 3600 seconds')
+        self.budget_limits = _configured_budgets()
         self._lock = threading.RLock()
         self._memory = {}
         self._failed = set()
@@ -235,12 +257,10 @@ class AccessGuard:
                     for name, record in state.items() if name in self._failed or record.get('pause') or record.get('pending')}
 
 
-def _budget_usage(record, kind, now, http_cost=1):
+def _budget_usage(record, kind, now, http_cost=1, limits=None):
     usage = [entry for entry in record.get('usage', []) if entry[0] > now - 86400]
     # Local ceilings only, not provider-approved quotas.
-    limits = [(3600, None, 40), (86400, None, 200),
-              (3600, 'chat', 3), (86400, 'chat', 6),
-              (3600, 'generation', 12), (86400, 'generation', 60)]
+    limits = _configured_budgets() if limits is None else limits
     for window, category, maximum in limits:
         if category is None or category == kind:
             count = sum(t > now - window and (category is None or k == category)
@@ -280,9 +300,9 @@ class Attempt:
         if self.provider == 'deepseek':
             with self.guard._state() as state:
                 record = state[self.provider]
-                _budget_usage(record, 'generation', time.time(), 3 if new_chat else 2)
+                _budget_usage(record, 'generation', time.time(), 3 if new_chat else 2, self.guard.budget_limits)
                 if new_chat:
-                    _budget_usage(record, 'chat', time.time(), 3)
+                    _budget_usage(record, 'chat', time.time(), 3, self.guard.budget_limits)
 
     def dispatch(self, validate=None, kind="http"):
         if kind not in ('http', 'chat', 'generation'):
@@ -301,7 +321,7 @@ class Attempt:
                 if delay <= 0:
                     if self.provider == 'deepseek':
                         now = time.time()
-                        usage = _budget_usage(record, kind, now)
+                        usage = _budget_usage(record, kind, now, limits=self.guard.budget_limits)
                         record['usage'] = [*usage, [now, kind]]
                         record['next_http_at'] = now + min(self.guard.interval, 3)
                     if validate is not None:

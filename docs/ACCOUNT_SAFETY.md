@@ -149,7 +149,7 @@ separate deliberate workflow, not an automatic new-chat fallback.
 
 Default pacing is 30 seconds between operation starts; DeepSeek HTTP dispatches
 within an operation are additionally separated by 3 seconds (or the configured
-interval when lower). Requests are serialised. Hard rolling limits per local
+interval when lower). Requests are serialised. Default rolling limits per local
 DeepSeek safety ledger are:
 
 | Charged event | Per hour | Per 24 hours |
@@ -170,3 +170,14 @@ circumvent these limits.
 These ceilings are engineering limits, **not DeepSeek-approved quotas**. They do
 not guarantee that website automation is permitted or will avoid restrictions.
 Do not rotate to another account to test around an existing restriction.
+
+### Explicit budget configuration
+
+`DEEPSEEK_MAX_{GENERATIONS,CHATS,HTTP}_PER_{HOUR,DAY}` configures the six
+ceilings above. Each value must be an integer 1..1000 with day >= hour for each
+category; invalid settings fail startup. Restart the server to apply changes.
+All processes sharing a ledger must use the same configuration. A changed
+ceiling retains charged events and does not clear provider pauses. Raising a
+local ceiling does not raise a website quota. The 1000-entry ledger bound is
+compatible with the maximum permitted daily HTTP ceiling. See
+[Harness examples and error distinctions](HARNESS.en.md#local-limits-and-errors).
