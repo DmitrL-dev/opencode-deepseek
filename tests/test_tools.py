@@ -23,6 +23,36 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_goal_read_wrapper_is_narrow_and_opt_in(self):
+        suffix = '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>'
+        tools = [{'name': 'get_goal', 'parameters': {'type': 'object', 'properties': {}}}]
+        def parse(text, schemas=tools, names={'get_goal'}):
+            return parse_tool_calls(text, names, flat_argument_tools=schemas,
+                                    allow_goal_read_wrapper=True)
+        answer = 'Let me check the goal.\n\n```tool_calls\n[{"name":"get_goal"}]' + suffix
+        self.assertIsNone(parse_tool_calls(answer, {'get_goal'}, flat_argument_tools=tools)[1])
+        self.assertEqual(json.loads(parse(answer)[1][0]['function']['arguments']), {})
+        for text in (
+            answer.replace('get_goal', 'bash'),
+            answer.replace('"get_goal"}', '"get_goal","extra":1}'),
+            answer.replace('"get_goal"}', '"get_goal","arguments":{"x":1}}'),
+            answer.replace('"get_goal"}', '"get_goal","name":"get_goal"}'),
+            answer.replace('[{"name":"get_goal"}]', '[{"name":"get_goal"},{"name":"get_goal"}]'),
+            answer + '\ntrailing text',
+            answer.replace('}]', '}'),
+            '```text\n' + answer,
+            answer + '\n```tool_calls\n[]',
+            answer.replace('</｜｜DSML｜｜ parameter>', '<｜｜DSML｜｜ parameter>'),
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(parse(text)[1])
+        for schemas in ([], tools * 2,
+                        [{'name': 'get_goal', 'parameters': {'type': 'object',
+                          'properties': {'id': {'type': 'string'}}, 'required': ['id']}}]):
+            self.assertIsNone(parse(answer, schemas)[1])
+        with self.assertRaises(ToolCallError):
+            parse(answer, names={'bash'})
+
     def test_generic_call_array_can_request_correction_but_never_execute(self):
         payload = [{"name": "bash", "arguments": {"command": "pwd && ls -la"}}]
         for language in ('json', ''):

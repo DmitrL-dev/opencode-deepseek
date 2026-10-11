@@ -187,6 +187,12 @@ creating a new chat. Migrating the goal requires a separate manual decision.
 Disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
 it does not disable tool-markup validation. Malformed tool blocks stop the step
 instead of being returned as successful plain text.
+A narrow exception handles a normally finished DeepSeek reply containing a single
+`get_goal`, commentary before `tool_calls`, and known closing DSML markers. Empty
+`arguments` are supplied only for an advertised parameterless schema. Commands,
+file edits, batches and ambiguous arguments are excluded. Verified offline against
+a saved reply, without another generation. The fix does not resume a stopped goal
+or replay an old reply automatically, and does not reset history or counters.
 
 ### If Harness stops
 

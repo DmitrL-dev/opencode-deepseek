@@ -72,6 +72,37 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('"tool_calls":',response.text)
                 self.assertEqual(fake.chat.call_count,1)
 
+    async def test_observed_goal_reader_wrapper_without_regeneration(self):
+        answer = ('I need to stop and reassess rather than keep drilling sideways. '
+                  'Let me check the actual goal state, because I have now spent several '
+                  'rounds on reconnaissance that produces no verified progress.\n\n'
+                  '```tool_calls\n[{"name": "get_goal"}]</｜｜DSML｜｜ parameter>\n'
+                  '</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+        tools = [{'type': 'function', 'function': {'name': 'get_goal', 'parameters': {
+            'type': 'object', 'properties': {}}}}]
+        for stream in (False, True):
+            fake = Mock(); fake.chat.return_value = Reply(answer, 'owned:2')
+            with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, 'get_client', return_value=fake):
+                response = await self.post(tools=tools, stream=stream)
+            self.assertNotIn('"error":', response.text)
+            if stream:
+                calls = [c for event in sse_objects(response.text)
+                         for choice in event.get('choices', [])
+                         for c in choice.get('delta', {}).get('tool_calls', [])]
+            else:
+                calls = response.json()['choices'][0]['message']['tool_calls']
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]['function']['name'], 'get_goal')
+            self.assertEqual(json.loads(calls[0]['function']['arguments']), {})
+            fake.chat.assert_called_once()
+        for finish, choice in (('length', 'auto'), ('stop', 'none')):
+            fake = Mock(); fake.chat.return_value = Reply(answer, 'owned:2', finish)
+            with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, '_MAX_CONTINUATIONS', 0), patch.object(api, 'get_client', return_value=fake):
+                response = await self.post(tools=tools, tool_choice=choice)
+            self.assertIn('"error":', response.text)
+            self.assertNotIn('"tool_calls":', response.text)
+            fake.chat.assert_called_once()
+
     async def test_final_report_can_mention_tool_markup_without_correction(self):
         replies = [
             'Готово. Цель закрыта. Модель возвращает валидный ` ```tool_calls ` блок.\nВсе тесты прошли.',
