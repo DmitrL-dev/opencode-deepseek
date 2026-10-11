@@ -143,7 +143,9 @@ The snapshot-based cache namespace deliberately does not resume links from the
 older file-hash implementation. Such histories stop locally; the migration
 does not create a new chat, reset usage, or clear provider pauses. Plain
 DeepSeek SSE is buffered so incomplete replies cannot become resumable history.
-A stateless conversation stops after 20 accepted replies. This is a safety cap,
+A stateless conversation defaults to stopping after 20 accepted replies.
+`DEEPSEEK_MAX_CONVERSATION_REPLIES` configures this cap (integer 1..1000).
+Raising it preserves existing counts and one-use links. This is a safety cap,
 not unlimited autonomous operation; continuing a capped/compacted task needs a
 separate deliberate workflow, not an automatic new-chat fallback.
 

@@ -83,6 +83,34 @@ class ConversationTests(unittest.TestCase):
         with self.assertRaises(ConversationStateError):
             self.cache.prepare(self.req.model_copy(update={'messages': self.history()}))
 
+    def test_raised_cap_resumes_existing_history_without_reset_or_replay(self):
+        self.cache.remember(self.req, self.reply, '', self.calls, 19)
+        req = self.req.model_copy(update={'messages': self.history()})
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(req)
+        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '100'}):
+            restarted = ConversationCache(self.cache.path)
+            continuation, steps = restarted.prepare(req)
+            self.assertEqual(continuation.conversation_id, 'owned:2')
+            self.assertEqual(steps, 20)
+            with self.assertRaises(ConversationStateError):
+                restarted.prepare(req)
+
+    def test_configured_cap_stops_before_claiming_history(self):
+        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '100'}):
+            cache = ConversationCache(self.cache.path)
+            cache.remember(self.req, self.reply, '', self.calls, 99)
+            with self.assertRaisesRegex(ConversationStateError, '100 accepted replies'):
+                cache.prepare(self.req.model_copy(update={'messages': self.history()}))
+            with cache.connection() as db:
+                self.assertEqual(db.execute('SELECT used, steps FROM links').fetchone(), (0, 100))
+
+    def test_invalid_conversation_cap_fails_startup(self):
+        for raw in ('0', '-1', '1001', 'nan', '1.5', '', '２０'):
+            with self.subTest(raw=raw), patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': raw}):
+                with self.assertRaises(ValueError):
+                    ConversationCache(self.cache.path)
+
     def test_ambiguous_identical_histories_are_not_merged(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
         self.cache.remember(self.req, Reply('', 'another:2'), '', self.calls, 0)

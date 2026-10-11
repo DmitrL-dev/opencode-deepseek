@@ -47,6 +47,10 @@ def digest(req, messages):
 
 class ConversationCache:
     def __init__(self, path, account_file=None):
+        raw = os.getenv('DEEPSEEK_MAX_CONVERSATION_REPLIES', '20')
+        if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= 1000:
+            raise ValueError('DEEPSEEK_MAX_CONVERSATION_REPLIES must be an integer between 1 and 1000')
+        self.max_replies = int(raw)
         self.path = Path(path)
         self.account_file = Path(account_file) if account_file is not None else None
 
@@ -110,8 +114,8 @@ class ConversationCache:
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
             if not row or row[1]:
                 raise ConversationStateError('History is unknown or already consumed; automatic replay and new-chat fallback are disabled.')
-            if row[2] >= 20:
-                raise ConversationStateError('Local conversation limit reached (20 generations); continuation stopped.')
+            if row[2] >= self.max_replies:
+                raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped.')
             # Claim before dispatch. An uncertain response must never replay.
             reservation = uuid.uuid4().hex
             db.execute('UPDATE links SET used=1, reservation=? WHERE key=?', (reservation, key))

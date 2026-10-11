@@ -147,7 +147,7 @@ after a manual website check; see [account safety](ACCOUNT_SAFETY.md). All
 providers have account limits, including Chinese models. Tool continuations can
 consume another message.
 
-Defaults remain `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge resumes saved conversations and sends only new results; unknown history stops without creating a new chat. Rolling budgets and a 20-accepted-reply conversation cap still apply. Historical checks below do not establish readiness for unlimited tasks.
+Defaults remain `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`. The bridge resumes saved conversations and sends only new results; unknown history stops without creating a new chat. Rolling budgets and a configurable conversation cap (20 accepted replies by default) still apply. Historical checks below do not establish readiness for unlimited tasks.
 
 For unattended DeepSeek goals, optionally set `TOOLCALL_FORMAT_REPAIR=1` in
 the bridge process environment and restart the bridge. After a normally
@@ -197,7 +197,7 @@ Reference: [official Harness model configuration](https://deepseek-harness.githu
 ## Local limits and errors
 
 `Local request budget exhausted` (`local_budget_exceeded`) can mean a rolling
-DeepSeek budget, the 20-accepted-reply saved-conversation cap, or a prompt above
+DeepSeek budget, the saved-conversation cap (20 accepted replies by default), or a prompt above
 128 KiB UTF-8. Rolling capacity returns as events age out, not at calendar-hour
 or midnight boundaries. Restart and `resume` preserve usage. `providers.access
 status` reports pauses rather than remaining budgets: an empty result does not
@@ -212,6 +212,7 @@ DEEPSEEK_MAX_CHATS_PER_HOUR=6
 DEEPSEEK_MAX_CHATS_PER_DAY=24
 DEEPSEEK_MAX_HTTP_PER_HOUR=200
 DEEPSEEK_MAX_HTTP_PER_DAY=1000
+DEEPSEEK_MAX_CONVERSATION_REPLIES=100
 ```
 
 This is an expanded local budget example, not DeepSeek's allowance. Defaults
@@ -236,3 +237,5 @@ October 11: live Chat passed a reply and conversation-memory check; the service
 SSE `finish` fix has regression coverage. Generic JSON correction passed three
 format variants using the real Harness CLI and a local mocked provider. A new
 large live Expert task has not been qualified after these changes.
+
+`DEEPSEEK_MAX_CONVERSATION_REPLIES` separately controls the conversation cap (default 20, range 1–1000). It counts accepted replies, not all upstream generations: format correction also consumes the rolling budget. After raising it and restarting, exact saved history can continue in the same conversation. Counters and one-use protection are preserved; unknown or edited histories remain rejected.
