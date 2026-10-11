@@ -303,7 +303,7 @@ if _MAX_CONTINUATIONS < 0:
 # rejection nor an uncertain/truncated generation qualifies.
 _FORMAT_REPAIR = os.getenv("TOOLCALL_FORMAT_REPAIR", "0") == "1"
 _FORMAT_REPAIR_PROMPT = (
-    "No tools were executed from your previous reply: its tool-call format was invalid. "
+    "No tools were executed from your previous reply: it was empty or its tool-call format was invalid. "
     "Choose the next response using the task and tool schemas already provided. "
     "If a tool is necessary, return ONLY one fenced tool_calls block containing a "
     "complete valid JSON array. Each entry must have name and arguments; ALL input "
@@ -425,6 +425,9 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
                         and has_tool_call_markup(
                             reply.text, names if model_provider(req.model) == "deepseek" else None)):
                     raise ToolCallError("Unsupported tool-call markup; no calls were returned")
+                if not tool_calls and not (content or '').strip():
+                    print('[toolcalls] empty_answer: no text or calls after parsing', flush=True)
+                    raise ToolCallError("Provider returned no answer text or tool calls; no actions were returned")
                 enforce_tool_choice(req.tool_choice, tool_calls)
                 if tool_calls and reply.finish_reason != "stop":
                     raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")

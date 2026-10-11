@@ -239,3 +239,5 @@ format variants using the real Harness CLI and a local mocked provider. A new
 large live Expert task has not been qualified after these changes.
 
 `DEEPSEEK_MAX_CONVERSATION_REPLIES` separately controls the conversation cap (default 20, range 1–1000). It counts accepted replies, not all upstream generations: format correction also consumes the rolling budget. After raising it and restarting, exact saved history can continue in the same conversation. Counters and one-use protection are preserved; unknown or edited histories remain rejected.
+
+An empty or whitespace-only tool-mode reply is rejected instead of reported as success. With `TOOLCALL_FORMAT_REPAIR=1`, normal completion permits one correction in the same conversation; a second empty reply returns an explicit error. Output limits, refusals and `tool_choice=none` never trigger correction.

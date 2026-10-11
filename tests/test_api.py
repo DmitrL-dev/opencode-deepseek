@@ -119,6 +119,30 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                         else:
                             self.assertIn('Finished without tools.', response.text)
 
+    async def test_empty_tool_reply_correction_is_bounded(self):
+        for stream in (False, True):
+            for first in ('', ' \n\t'):
+                for corrected in ('Recovered answer', ''):
+                    with self.subTest(stream=stream, first=first, corrected=corrected):
+                        fake = Mock()
+                        fake.chat.side_effect = [Reply(first, 'owned:2'), Reply(corrected, 'owned:4')]
+                        with patch.object(api, '_FORMAT_REPAIR', True), patch.object(api, 'get_client', return_value=fake):
+                            response = await self.post(model='deepseek-expert', tools=TOOLS, stream=stream)
+                        self.assertEqual(fake.chat.call_count, 2)
+                        self.assertEqual(fake.chat.call_args.args[1:3], ('owned:2', None))
+                        self.assertIn('Recovered answer' if corrected else '"error":', response.text)
+
+    async def test_empty_tool_reply_does_not_override_correction_guards(self):
+        for stream in (False, True):
+            for enabled, choice, finish in ((False, 'auto', 'stop'), (True, 'none', 'stop'), (True, 'auto', 'length')):
+                with self.subTest(stream=stream, enabled=enabled, choice=choice, finish=finish):
+                    fake = Mock()
+                    fake.chat.return_value = Reply('', 'owned:2', finish)
+                    with patch.object(api, '_FORMAT_REPAIR', enabled), patch.object(api, 'get_client', return_value=fake):
+                        response = await self.post(tools=TOOLS, stream=stream, tool_choice=choice)
+                    fake.chat.assert_called_once()
+                    self.assertIn('"error":', response.text)
+
     async def test_format_correction_never_retries_refusals_or_uncertain_outputs(self):
         broken = '```tool_calls\n[{"name":"write","arguments":{'
         cases = [Reply(broken, "owned:2", "length"), Reply(broken, ""),
