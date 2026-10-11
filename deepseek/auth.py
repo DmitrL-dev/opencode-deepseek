@@ -271,25 +271,24 @@ def login(
     and saves the session. Later `get_session()` calls read this private cache;
     they do not open a browser or refresh it by default.
 
-    `assume_logged_out=True` skips the initial "are we already signed in?" hop to
-    CHAT_URL and goes straight to the sign-in page. Callers that have just
-    confirmed there's no token (e.g. an explicit library refresh)
-    pass this so the window doesn't visibly bounce CHAT_URL -> SIGNIN_URL."""
+    Navigate once, then let the user and website complete sign-in. A missing
+    token can mean a pending human-check, not a reason to interrupt it with
+    another navigation. `assume_logged_out=True` selects SIGNIN_URL as the
+    initial destination instead of CHAT_URL.
+    """
     profile_dir.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         context = _launch_context(p, profile_dir, headless, channel)
         page = context.pages[0] if context.pages else context.new_page()
 
         try:
-            existing = None
-            if not assume_logged_out:
-                _safe_goto(page, CHAT_URL)
-                existing = _safe_evaluate(page, _READ_TOKEN_JS)
+            _safe_goto(page, SIGNIN_URL if assume_logged_out else CHAT_URL)
+            existing = _safe_evaluate(page, _READ_TOKEN_JS)
 
             if not existing:
-                _safe_goto(page, SIGNIN_URL)
-                print("[auth] Please sign in in the window (solve the human-check if "
-                      "shown). Waiting for the session...")
+                print("[auth] Please sign in in this window (use the website's sign-in "
+                      "button if needed). Complete any human-check manually; this "
+                      "helper will not navigate again. Waiting for the session...")
                 if not _wait_for_token(page, timeout=300):
                     raise RuntimeError("Login timed out — no token captured.")
 

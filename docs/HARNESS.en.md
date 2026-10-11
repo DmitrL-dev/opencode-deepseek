@@ -77,6 +77,12 @@ Setup never substitutes another model or paid API for the selected web model.
 
 ### DeepSeek session
 
+`python -m deepseek.auth` navigates once and waits up to five minutes for manual
+sign-in. Use the website's sign-in button if needed. A missing token no longer
+forces a navigation to `/sign_in`, which could interrupt an in-progress check.
+This fixes the helper's navigation behavior; it is not a confirmed fix for
+repeating hCaptcha challenges. Stop if the website keeps rejecting the check.
+
 `python -m deepseek.auth --keep-open --channel chromium` leaves the manual
 sign-in window open until it is closed or interrupted with Ctrl+C. Use it to
 inspect restrictions on the normal website. Changed credentials are saved

@@ -162,6 +162,71 @@ with patch("dotenv.load_dotenv",load):
         self.assertEqual(json.loads(output),[7,False,"/tmp/audit-profile"])
 
 
+class InteractiveLoginTests(unittest.TestCase):
+    def test_delayed_token_does_not_interrupt_challenge_with_another_navigation(self):
+        for logged_out in (False, True):
+            with self.subTest(logged_out=logged_out), tempfile.TemporaryDirectory() as directory:
+                context, page = Mock(), Mock()
+                context.pages = [page]
+                captured = session()
+                destination = auth.SIGNIN_URL if logged_out else auth.CHAT_URL
+                with patch.object(auth, 'sync_playwright'), \
+                        patch.object(auth, '_launch_context', return_value=context), \
+                        patch.object(auth, '_safe_goto') as navigate, \
+                        patch.object(auth, '_safe_evaluate', side_effect=[None, None, None, 'fake-token']), \
+                        patch.object(auth, '_capture_from_context', return_value=captured), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    def wait(_):
+                        navigate.assert_called_once_with(page, destination)
+                    page.wait_for_timeout.side_effect = wait
+                    path = Path(directory) / 'session.json'
+                    result = auth.login(Path(directory) / 'profile', assume_logged_out=logged_out,
+                                        session_file=path)
+                navigate.assert_called_once_with(page, destination)
+                self.assertEqual(page.wait_for_timeout.call_count, 2)
+                page.reload.assert_not_called()
+                context.close.assert_called_once()
+                self.assertEqual(auth.Session.load(path).token, captured.token)
+                self.assertIs(result, captured)
+
+    def test_existing_session_is_captured_without_waiting_or_redirecting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context, page = Mock(), Mock()
+            context.pages = [page]
+            with patch.object(auth, 'sync_playwright'), \
+                    patch.object(auth, '_launch_context', return_value=context), \
+                    patch.object(auth, '_safe_goto') as navigate, \
+                    patch.object(auth, '_safe_evaluate', return_value='fake-token'), \
+                    patch.object(auth, '_wait_for_token') as wait, \
+                    patch.object(auth, '_capture_from_context', return_value=session()):
+                auth.login(Path(directory) / 'profile', session_file=Path(directory) / 'session.json')
+            navigate.assert_called_once_with(page, auth.CHAT_URL)
+            wait.assert_not_called()
+            context.close.assert_called_once()
+
+    def test_login_timeout_closes_window_without_navigation_retry_or_cache_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            context, page = Mock(), Mock()
+            context.pages = [page]
+            path = Path(directory) / 'session.json'
+            session().save(path)
+            original = path.read_bytes()
+            with patch.object(auth, 'sync_playwright'), \
+                    patch.object(auth, '_launch_context', return_value=context), \
+                    patch.object(auth, '_safe_goto') as navigate, \
+                    patch.object(auth, '_safe_evaluate', return_value=None), \
+                    patch.object(auth, '_wait_for_token', return_value=None) as wait, \
+                    patch.object(auth, '_capture_from_context') as capture, \
+                    contextlib.redirect_stdout(io.StringIO()), \
+                    self.assertRaisesRegex(RuntimeError, 'Login timed out'):
+                auth.login(Path(directory) / 'profile', session_file=path)
+            navigate.assert_called_once_with(page, auth.CHAT_URL)
+            wait.assert_called_once_with(page, timeout=300)
+            capture.assert_not_called()
+            context.close.assert_called_once()
+            self.assertEqual(path.read_bytes(), original)
+
+
 class ManualInspectionTests(unittest.TestCase):
     def test_capture_saves_changed_credentials_once_and_closes_on_interrupt(self):
         first = session()
