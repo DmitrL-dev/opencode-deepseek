@@ -105,6 +105,27 @@ class ConversationTests(unittest.TestCase):
             with cache.connection() as db:
                 self.assertEqual(db.execute('SELECT used, steps FROM links').fetchone(), (0, 100))
 
+    def test_raise_100_to_200_preserves_history_and_stops_at_200(self):
+        req = self.req.model_copy(update={'messages': self.history()})
+        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '100'}):
+            old = ConversationCache(self.cache.path)
+            old.remember(self.req, self.reply, '', self.calls, 99)
+            with self.assertRaises(ConversationStateError):
+                old.prepare(req)
+        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '200'}):
+            restarted = ConversationCache(self.cache.path)
+            continuation, steps = restarted.prepare(req)
+            self.assertEqual((continuation.conversation_id, steps), ('owned:2', 100))
+            with self.assertRaises(ConversationStateError):
+                restarted.prepare(req)
+            # A separate offline fixture exercises the new exact boundary.
+            boundary = ConversationCache(self.cache.path.with_name('boundary.sqlite3'))
+            boundary.remember(self.req, self.reply, '', self.calls, 199)
+            with self.assertRaisesRegex(ConversationStateError, '200 accepted replies'):
+                boundary.prepare(req)
+            with boundary.connection() as db:
+                self.assertEqual(db.execute('SELECT used, steps FROM links').fetchone(), (0, 200))
+
     def test_invalid_conversation_cap_fails_startup(self):
         for raw in ('0', '-1', '1001', 'nan', '1.5', '', '２０'):
             with self.subTest(raw=raw), patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': raw}):
