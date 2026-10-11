@@ -21,6 +21,67 @@ def parse(text, tools=FLAT_TOOLS):
 
 
 class SchemaProtocolTests(unittest.TestCase):
+    def test_multiple_missing_envelope_closers_preserve_all_arguments(self):
+        items = [{'name': 'read', 'arguments': {'file_path': '/fixture/} , { "\\n'}}] * 3
+        for mask in range(1, 8):
+            parts = [json.dumps(item)[:-1] if mask & (1 << i) else json.dumps(item)
+                     for i, item in enumerate(items)]
+            text = '```tool_calls\n[' + ', '.join(parts) + ']\n```'
+            _, calls = parse_tool_calls(text, {'read'}, flat_argument_tools=FLAT_TOOLS,
+                                        allow_missing_call_closer=True)
+            self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                             [i['arguments'] for i in items])
+
+    def test_multi_envelope_recovery_rejects_bad_member_and_is_bounded(self):
+        good = json.dumps({'name': 'read', 'arguments': {'file_path': '/fixture'}})
+        for last in ('{"name":"read","arguments":{"file_path":7}',
+                     '{"name":"read","arguments":{"file_path":"x","file_path":"y"}',
+                     '{"name":"read","arguments":{"file_path":"unterminated}',
+                     '{"name":"read","arguments":{"file_path":"x"',
+                     '{"name":"read","arguments":{"file_path":"x"},"extra":1'):
+            with self.subTest(last=last), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n[' + good[:-1] + ',' + last + ']\n```',
+                                 {'read'}, flat_argument_tools=FLAT_TOOLS,
+                                 allow_missing_call_closer=True)
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls('```tool_calls\n[' + ','.join([good[:-1]] * 33) + ']\n```',
+                             {'read'}, flat_argument_tools=FLAT_TOOLS,
+                             allow_missing_call_closer=True)
+
+    def test_missing_call_closer_preserves_complete_nested_arguments(self):
+        tools = [{'name': 'plan', 'parameters': {'type': 'object', 'properties': {
+            'items': {'type': 'array'}}, 'required': ['items'], 'additionalProperties': False}},
+            *FLAT_TOOLS]
+        first = {'name': 'plan', 'arguments': {'items': [{'text': '}, { \\"nested"', 'status': 'pending'}]}}
+        second = {'name': 'read', 'arguments': {'file_path': '/fixture'}}
+        payload = '[' + json.dumps(first)[:-1] + ', ' + json.dumps(second) + ']'
+        text = '```tool_calls\n' + payload + '\n```'
+        with self.assertRaises(ToolCallError):
+            parse(text, tools)
+        _, calls = parse_tool_calls(text, {'plan', 'read'}, flat_argument_tools=tools,
+                                    allow_missing_call_closer=True)
+        self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                         [first['arguments'], second['arguments']])
+
+    def test_missing_call_closer_never_repairs_arguments_or_other_errors(self):
+        first = json.dumps({'name': 'read', 'arguments': {'file_path': '/fixture'}})
+        second = json.dumps({'name': 'read', 'arguments': {'file_path': '/other'}})
+        valid = '[' + first[:-1] + ', ' + second + ']'
+        for payload in ('[' + first[:-2] + ', ' + second + ']',
+                        valid.replace('"/other"', '7'),
+                        valid.replace('"/other"', '"/other", "file_path": "duplicate"'),
+                        valid.replace('"name": "read"', '"name": "unknown"'),
+                        valid + ' trailing',
+                        '[' + first[:-1] + ', "extra": 1, ' + second + ']'):
+            with self.subTest(payload=payload), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + payload + '\n```', {'read'},
+                                 flat_argument_tools=FLAT_TOOLS, allow_missing_call_closer=True)
+        for tools, ending in ((None, '\n```'), (FLAT_TOOLS, '')):
+            with self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + valid + ending, {'read'},
+                                 flat_argument_tools=tools, allow_unclosed_fence=True,
+                                 allow_missing_call_closer=True)
+
     def test_outer_closer_transposition_preserves_values_and_batch(self):
         arguments = {'command': 'printf "]} \\\" [ { \\n"', 'description': 'Run tests'}
         batch = [{'name': 'read', 'arguments': {'file_path': '/fixture'}},
@@ -92,7 +153,7 @@ class SchemaProtocolTests(unittest.TestCase):
                 parse('Next steps.\n' + block([valid, bad]))
 
     def test_ambiguous_framing_and_suffix_are_not_executed(self):
-        for text in ('```text\n' + SAVED_REPLY, '> Quoted example\n' + SAVED_REPLY,
+        for text in ('```text\n' + SAVED_REPLY, '> Quoted example\n' + block([{'name': 'read', 'file_path': '/fixture'}]),
                      '<pre>\n' + SAVED_REPLY,
                      SAVED_REPLY + '\n' + block([{'name': 'read', 'file_path': '/fixture'}]),
                      SAVED_REPLY.replace('```tool_calls', '```json')):
@@ -102,6 +163,44 @@ class SchemaProtocolTests(unittest.TestCase):
                      SAVED_REPLY.replace('</｜｜DSML｜｜ parameter>', '<｜｜DSML｜｜ parameter>')):
             with self.subTest(text=text), self.assertRaises(ToolCallError):
                 parse(text)
+
+    def test_prose_quotes_before_top_level_calls_preserve_arguments(self):
+        args = {'file_path': '/fixture/cli.py', 'offset': 1170, 'limit': 40}
+        tools = [{'name': 'read', 'parameters': {
+            'type': 'object', 'properties': {'file_path': {'type': 'string'},
+            'offset': {'type': 'integer'}, 'limit': {'type': 'integer'}},
+            'required': ['file_path'], 'additionalProperties': False}}]
+        action = block([{'name': 'read', 'arguments': args}])
+        for prefix in ('The docs say:\n\n> Read-only inputs.\n\nNow inspect.\n\n',
+                       '> Quote with `inline code`.\n\n',
+                       '> Outer\n>> Nested prose\n\n',
+                       '> Quote\r\n \t\r\n'):
+            with self.subTest(prefix=prefix):
+                _, calls = parse(prefix + action, tools)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(json.loads(calls[0]['function']['arguments']), args)
+                self.assertIsNone(parse_tool_calls(prefix + action, {'read'})[1])
+
+    def test_quoted_nested_and_ambiguous_code_stays_text(self):
+        action = block([{'name': 'read', 'file_path': '/fixture'}])
+        for text in (
+            '\n'.join('> ' + line for line in action.splitlines()),
+            '\n'.join('>> ' + line for line in action.splitlines()),
+            '> Quote\n' + action,
+            '> ```tool_calls\n' + action + '\n> ```',
+            '> ```text\n> example\n> ```\n\n' + action,
+            '> ~~~text\n> example\n> ~~~\n\n' + action,
+            '````text\n> quote\n\n' + action + '\n````',
+            '> Quote\n\n    ' + action.replace('\n', '\n    '),
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(parse(text)[1])
+
+    def test_prose_quote_does_not_bypass_batch_validation(self):
+        for calls in ([{'name': 'read', 'file_path': 7}],
+                      [{'name': 'read', 'file_path': '/fixture'}, {'name': 'unknown'}]):
+            with self.assertRaises(ToolCallError):
+                parse('> Ordinary quotation\n\n' + block(calls))
 
     def test_nested_schema_constraints_and_local_refs(self):
         schema = {'type': 'object', 'properties': {'items': {'type': 'array', 'minItems': 1,

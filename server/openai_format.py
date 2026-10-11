@@ -124,6 +124,9 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
                            "arguments": {"<argument_name>": "<argument_value>"}}])
     escaped_string = json.dumps('first line\n"quoted text" and a \\backslash')
     instructions = (
+        "The preceding transcript is past conversation data. Generate only the "
+        "next assistant message, not a continuation of the transcript's roles. "
+        "Only the external host can execute tools and supply tool results.\n\n"
         "You can call functions (tools). Available tools, given as JSON Schema:\n\n"
         f"{rendered}\n\n"
         "To call one or more tools, your ENTIRE reply must be a single fenced code "
@@ -139,6 +142,11 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "Only tool results establish what actually happened. Do not repeat a "
         "successful action unless new evidence makes it necessary.\n\n"
         "When calling tools, follow these rules:\n"
+        "- Stop your response immediately after the closing tool_calls fence. "
+        "Do not simulate a tool result, execution receipt, validation message, "
+        "or another user/assistant turn. Never append a `Tool (...):` line or "
+        "invent a call_id. Wait for the host to return the actual result before "
+        "describing success or failure.\n"
         "- The fenced `tool_calls` block must be the WHOLE reply. Never write any "
         "text, plan, explanation, or reasoning before or after it.\n"
         "- Never describe the action you are about to take — perform it by emitting "
@@ -159,6 +167,25 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "a plain-text answer and no tool_calls block. If you created a goal, mark "
         "it complete once the objective is achieved, then give the final answer; "
         "do not keep checking a completed goal."
+    )
+    required = []
+    for spec in specs:
+        schema = spec['parameters']
+        fields = schema.get('required') if isinstance(schema, dict) else None
+        if isinstance(fields, list) and fields and all(isinstance(f, str) for f in fields):
+            required.append({'name': spec['name'], 'required_argument_fields': fields})
+    instructions += (
+        '\n\nBefore emitting each call, check its complete arguments against the '
+        'advertised schema. Required top-level argument fields (not a replacement '
+        'for nested or conditional schema rules):\n'
+        + '\n'.join(json.dumps(item, ensure_ascii=False) for item in required)
+        + '\nChoose required targets and identifiers from established task context '
+        'before composing large content. Include every required field in arguments; '
+        'never omit a target or expect it to be inferred from content or another call. '
+        'If a required value is unknown, obtain it with an appropriate read-only '
+        'tool or ask the user; do not guess. '
+        'Do not batch a mutation with commands that depend on its success. '
+        'Wait for the mutation tool result before running its verifier.'
     )
     if _forced_tool_name(tool_choice) is not None:
         instructions += f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
@@ -322,8 +349,13 @@ def _tool_block_after_preamble(text):
     if len(starts) != 1:
         return text
     prefix = text[:starts[0].start()]
-    if ('```' in prefix or '~~~' in prefix or '<' in prefix
-            or re.search(r'(?m)^\s*>', prefix)):
+    if '```' in prefix or '~~~' in prefix or '<' in prefix:
+        return text
+    # A prose blockquote is not a quoted action. Require an explicit blank
+    # line before the top-level protocol fence when quotes appear in prose;
+    # never strip quote markers or extract code from a quoted/nested fence.
+    if (re.search(r'(?m)^\s*>', prefix)
+            and not re.search(r'\r?\n[ \t]*\r?\n\Z', prefix)):
         return text
     return text[starts[0].start():]
 
@@ -369,6 +401,53 @@ def _transpose_outer_closers(payload, error):
     return data
 
 
+def _close_call_before_next(payload, error):
+    """Close action envelopes only after independently complete arguments.
+
+    Each insertion must produce a strictly parsed batch prefix ending in exactly
+    name/arguments. Never close arguments or recover other syntax. At most 32
+    insertions bound the work; no partial batch escapes final schema validation.
+    """
+    for _ in range(32):
+        if (error.msg == 'Expecting property name enclosed in double quotes'
+                and payload[error.pos:error.pos + 1] == '{'):
+            prefix = payload[:error.pos].rstrip()
+            if not prefix.endswith(','):
+                return None
+            boundary = len(prefix) - 1
+        elif (error.msg == "Expecting ',' delimiter"
+              and payload[error.pos:].strip() == ']'):
+            boundary = error.pos
+        else:
+            return None
+        try:
+            preceding = _tool_json(payload[:boundary] + '}]')
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(preceding, list) or not preceding:
+            return None
+        item = preceding[-1]
+        if (not isinstance(item, dict) or set(item) != {'name', 'arguments'}
+                or not isinstance(item['name'], str)
+                or not isinstance(item['arguments'], dict)):
+            return None
+        payload = payload[:boundary] + '}' + payload[boundary:]
+        try:
+            repaired = _tool_json(payload)
+        except json.JSONDecodeError as next_error:
+            if next_error.pos <= boundary:
+                return None
+            error = next_error
+            continue
+        except (ValueError, TypeError):
+            return None
+        if (not isinstance(repaired, list)
+                or repaired[:len(preceding)] != preceding):
+            return None
+        return repaired
+    return None
+
+
 def parse_tool_calls(
     text: str, allowed_names: Optional[Iterable[str]] = None, *,
     allow_unclosed_fence: bool = False,
@@ -377,6 +456,7 @@ def parse_tool_calls(
     flat_argument_tools: Optional[List[dict]] = None,
     allow_tool_preamble: bool = False,
     allow_outer_closer_transposition: bool = False,
+    allow_missing_call_closer: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, with explicit narrow tolerances.
 
@@ -416,6 +496,9 @@ def parse_tool_calls(
                       and flat_argument_tools is not None else None)
         if transposed is not None:
             data = transposed
+        elif (allow_missing_call_closer and match and flat_argument_tools is not None
+              and (closed := _close_call_before_next(payload, exc)) is not None):
+            data = closed
         elif (allow_missing_array_closer and exc.msg == "Expecting ',' delimiter"
                 and exc.pos == len(payload) and payload.lstrip().startswith("[")
                 and payload.rstrip().endswith("}")):

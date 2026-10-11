@@ -23,6 +23,32 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_prompt_separates_historical_results_from_next_assistant_turn(self):
+        prompt = messages_to_prompt([ChatMessage(role='tool', name='read',
+            tool_call_id='past', content='historical result')], FLAT_TOOLS)
+        boundary = prompt.index('The preceding transcript is past conversation data.')
+        self.assertLess(prompt.index('Tool (read, call_id=past): historical result'), boundary)
+        self.assertIn('Only the external host can execute tools', prompt[boundary:])
+        self.assertIn('Stop your response immediately after the closing tool_calls fence', prompt)
+        self.assertTrue(prompt.endswith('Assistant:'))
+
+    def test_required_fields_reminder_uses_schema_without_inventing_values(self):
+        tools = [{'name': 'write', 'parameters': {'type': 'object',
+                  'required': ['file_path', 'content'], 'properties': {
+                  'file_path': {'type': 'string'}, 'content': {'type': 'string'}}}},
+                 {'name': 'custom', 'parameters': {'type': 'object',
+                  'required': ['destination_id'], 'properties': {'destination_id': {'type': 'string'}}}}]
+        prompt = messages_to_prompt([ChatMessage(role='user', content='fixture')], tools)
+        footer = prompt.split('Required top-level argument fields', 1)[1]
+        self.assertIn('"required_argument_fields": ["file_path", "content"]', footer)
+        self.assertIn('"required_argument_fields": ["destination_id"]', footer)
+        self.assertIn('do not guess', footer)
+        self.assertIn('Wait for the mutation tool result', footer)
+        self.assertNotIn('/fixture', footer)
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block([{'name': 'write', 'arguments': {'content': 'data'}}]),
+                             {'write'}, flat_argument_tools=tools)
+
     def test_generic_call_array_can_request_correction_but_never_execute(self):
         payload = [{"name": "bash", "arguments": {"command": "pwd && ls -la"}}]
         for language in ('json', ''):

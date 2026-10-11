@@ -49,6 +49,7 @@ from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
 from providers.access import guard, ProviderRejected, rejection
+from .tool_protocol import validate_reply
 from .diagnostics import save_tool_failure
 from .conversation_cache import conversation_cache, ConversationStateError
 
@@ -67,14 +68,11 @@ from .config import (
 )
 from .openai_format import (
     completion_response,
-    has_tool_call_markup,
     looks_truncated,
     messages_to_prompt,
-    parse_tool_calls,
     sse_frames,
     stream_chunks,
     ToolCallError,
-    enforce_tool_choice,
     validate_tool_choice,
 )
 from .ratelimit import RateLimiter, install_rate_limit
@@ -432,26 +430,11 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
                         and looks_truncated(reply.text, names))
         if not can_continue:
             try:
-                content, tool_calls = parse_tool_calls(
-                    reply.text, allowed_names=names,
-                    allow_unclosed_fence=reply.finish_reason == "stop",
-                    allow_closing_artifacts=reply.finish_reason == "stop",
-                    allow_missing_array_closer=reply.finish_reason == "stop",
-                    flat_argument_tools=req.tools if reply.finish_reason == "stop" else None,
-                    allow_outer_closer_transposition=(reply.finish_reason == "stop"
-                                                      and model_provider(req.model) == "deepseek"),
-                    allow_tool_preamble=(reply.finish_reason == "stop"
-                                         and model_provider(req.model) == "deepseek"))
-                if (req.tool_choice != "none" and tool_calls is None
-                        and has_tool_call_markup(
-                            reply.text, names if model_provider(req.model) == "deepseek" else None)):
-                    raise ToolCallError("Unsupported tool-call markup; no calls were returned")
-                if not tool_calls and not (content or '').strip():
-                    print('[toolcalls] empty_answer: no text or calls after parsing', flush=True)
-                    raise ToolCallError("Provider returned no answer text or tool calls; no actions were returned")
-                enforce_tool_choice(req.tool_choice, tool_calls)
-                if tool_calls and reply.finish_reason != "stop":
-                    raise ToolCallError("The provider did not finish the tool reply normally; no calls were returned")
+                content, tool_calls = validate_reply(
+                    reply.text, req.tools, req.tool_choice,
+                    finish_reason=reply.finish_reason,
+                    provider=model_provider(req.model),
+                )
             except ToolCallError:
                 save_tool_failure(reply, req)
                 if _debug_toolcalls():

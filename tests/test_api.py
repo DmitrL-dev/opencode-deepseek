@@ -44,6 +44,72 @@ def sse_objects(text):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_local_recovery_stop_finishes_stream_and_json_without_error(self):
+        from server.recovery_status import recovery_stopped
+        for stream in (False, True):
+            with patch.object(api, '_conversation_tool_chat', return_value=recovery_stopped()) as local, \
+                    patch.object(api, 'get_client', side_effect=AssertionError('account forbidden')):
+                response = await self.post(tools=FLAT_TOOLS, stream=stream)
+            local.assert_called_once()
+            self.assertEqual(response.status_code, 200)
+            self.assertNotIn('"error":', response.text)
+            self.assertNotIn('"tool_calls":', response.text)
+            choices = (sse_objects(response.text) if stream else [response.json()])
+            self.assertEqual(choices[-1]['choices'][0]['finish_reason'], 'stop')
+
+    async def test_fabricated_result_suffix_rejects_entire_batch_without_retry(self):
+        action = block([{'name': 'read', 'arguments': {'file_path': '/fixture'}}])
+        for stream in (False, True):
+            fake = Mock(); fake.chat.return_value = Reply(action + '\n\nTool (read, call_id=call_placeholder): validated but not executed.', 'owned:2')
+            with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, '_MAX_CONTINUATIONS', 0), patch.object(api, 'get_client', return_value=fake):
+                response = await self.post(tools=FLAT_TOOLS, stream=stream)
+            fake.chat.assert_called_once()
+            self.assertIn('"error":', response.text)
+            self.assertNotIn('"tool_calls":', response.text)
+
+    async def test_missing_call_boundary_requires_normal_stop_and_never_replays(self):
+        first = json.dumps({'name': 'read', 'arguments': {'file_path': '/first'}})
+        second = json.dumps({'name': 'read', 'arguments': {'file_path': '/second'}})
+        answer = '```tool_calls\n[' + first[:-1] + ',' + second + ']\n```'
+        for stream in (False, True):
+            for finish in ('stop', 'length'):
+                fake = Mock(); fake.chat.return_value = Reply(answer, 'owned:2', finish)
+                with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, '_MAX_CONTINUATIONS', 0), patch.object(api, 'get_client', return_value=fake):
+                    response = await self.post(tools=FLAT_TOOLS, stream=stream)
+                fake.chat.assert_called_once()
+                self.assertEqual('"tool_calls":' in response.text, finish == 'stop')
+                self.assertEqual('"error":' in response.text, finish != 'stop')
+
+    async def test_multiple_missing_call_boundaries_require_normal_stop_and_never_replays(self):
+        first = json.dumps({'name': 'read', 'arguments': {'file_path': '/first'}})
+        second = json.dumps({'name': 'read', 'arguments': {'file_path': '/second'}})
+        answer = '```tool_calls\n[' + first[:-1] + ',' + second[:-1] + ']\n```'
+        for stream in (False, True):
+            for finish in ('stop', 'length'):
+                fake = Mock(); fake.chat.return_value = Reply(answer, 'owned:2', finish)
+                with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, '_MAX_CONTINUATIONS', 0), patch.object(api, 'get_client', return_value=fake):
+                    response = await self.post(tools=FLAT_TOOLS, stream=stream)
+                fake.chat.assert_called_once()
+                self.assertEqual('"tool_calls":' in response.text, finish == 'stop')
+                self.assertEqual('"error":' in response.text, finish != 'stop')
+
+    async def test_prose_quotes_accept_only_top_level_protocol_without_replay(self):
+        action = block([{'name': 'read', 'arguments': {'file_path': '/fixture'}}])
+        for stream in (False, True):
+            for answer, finish, choice, valid in (
+                ('Docs:\n\n> Quoted prose.\n\n' + action, 'stop', 'auto', True),
+                ('Docs:\n\n> Quoted prose.\n\n' + action, 'length', 'auto', False),
+                ('Docs:\n\n> Quoted prose.\n\n' + action, 'stop', 'none', False),
+                ('\n'.join('> ' + line for line in action.splitlines()), 'stop', 'auto', False),
+                ('> Quote\n' + action, 'stop', 'auto', False),
+            ):
+                with self.subTest(stream=stream, answer=answer, finish=finish, choice=choice):
+                    fake = Mock(); fake.chat.return_value = Reply(answer, 'owned:2', finish)
+                    with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, '_MAX_CONTINUATIONS', 0), patch.object(api, 'get_client', return_value=fake):
+                        response = await self.post(tools=FLAT_TOOLS, stream=stream, tool_choice=choice)
+                    fake.chat.assert_called_once()
+                    self.assertEqual('"tool_calls":' in response.text, valid)
+
     async def test_terminal_transposition_requires_normal_stop_and_never_replays(self):
         args = {'command': 'python -m pytest tests/unit/test_gate.py -q',
                 'description': 'Run gate tests', 'timeoutMs': 900000}

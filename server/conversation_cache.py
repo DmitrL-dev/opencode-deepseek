@@ -14,6 +14,7 @@ from pathlib import Path
 from settings import ROOT
 from .schemas import ChatMessage
 from .openai_format import _text_of
+from .recovery_status import RECOVERY_STOP_TEXT
 
 
 class ConversationStateError(RuntimeError):
@@ -93,6 +94,21 @@ class ConversationCache:
         if req.conversation_id:
             return req, 0
         positions = [i for i, m in enumerate(req.messages) if m.role == 'assistant']
+        # A local recovery notice has no upstream reply ID. Resolve the original
+        # delivered action instead, retaining ALL tool results for the next
+        # real continuation. The original exact history hash, result IDs and
+        # one-use claim are still checked below; never create an alias claim.
+        if positions:
+            last = positions[-1]
+            message = req.messages[last]
+            if not message.tool_calls and _text_of(message.content) == RECOVERY_STOP_TEXT:
+                if (not any(m.role == 'user' for m in req.messages[last + 1:])
+                        or any(m.role != 'user' for m in req.messages[last + 1:])):
+                    raise ConversationStateError('Recovery is stopped; explicit continuation is required.')
+                req = req.model_copy(update={'messages': [*req.messages[:last], *req.messages[last + 1:]]})
+                positions = [i for i, m in enumerate(req.messages) if m.role == 'assistant']
+                if not positions:
+                    raise ConversationStateError('Recovery parent unavailable; no request sent.')
         if not positions:
             if any(m.role == 'tool' for m in req.messages):
                 raise ConversationStateError('Tool history has no known assistant; no new chat was created.')

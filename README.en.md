@@ -194,7 +194,10 @@ arguments are accepted only when the schema permits them. Every call undergoes
 JSON Schema validation (types, required fields, nested structures and constraints);
 one invalid call rejects the entire batch. Duplicate keys, unknown tools,
 ambiguous envelopes, trailing text and incomplete data are rejected. Generic JSON
-fences and quotations do not become calls. An explicit `tool_calls` block is an
+fences and quotations do not become calls. Prose quotations may precede a separate
+top-level `tool_calls` block with a blank line before its opening fence. Quoted,
+nested and ambiguous code blocks are not executed; `>` markers are never stripped
+from code. An explicit `tool_calls` block is an
 action protocol: do not use it for explanatory examples. Remote schemas are never
 fetched; local `$ref` references work. On update, install `requirements.txt`
 (the new dependency is `jsonschema`) and restart the bridge.
@@ -204,6 +207,56 @@ only when a string-aware scan confirms that arguments are complete and only the
 call object and outer array remain open. No values or delimiters are added. The
 entire corrected batch must pass JSON Schema validation; damaged strings, nested
 arguments and ambiguous endings are rejected.
+
+A normally finished DeepSeek reply with a closed fence may also recover
+missing envelope `}` delimiters between calls or before the array end (up to 32),
+only after each complete `arguments` object, with exactly
+`name` and `arguments` in that call. Both the prefix and entire batch must parse
+strictly after insertion. Argument values are never added or guessed. Every call
+is validated against its schema; other syntax defects or damage inside arguments
+reject the whole batch without partial execution.
+
+Every reply passes one offline contract in `server/tool_protocol.py`: envelope
+parsing → schema validation for every call → tool-choice and finish policy →
+release of the entire batch. Transport and private regression replay share this
+validator. Incomplete arguments and fabricated tool results remain errors.
+This emulates calls through web-chat text, not a native tool API; passing offline
+tests does not guarantee that the model's next response will be valid.
+
+Opt-in private diagnostics retain up to 32 distinct failures in
+`session/toolcall-failures/` (up to 4 MiB each), without deleting old evidence;
+`last-toolcall-error.json` still updates. Replies may contain source code: the
+directory is private and excluded from Git. Run sanitized shared regressions:
+`python -m unittest tests.test_tool_protocol tests.test_api tests.test_diagnostics`.
+Replay a private corpus with reviewed expectations and pinned SHA-256 hashes:
+`python -m server.offline_corpus session/protocol-corpus.json`.
+This manifest is private, prepared during diagnostic review and not shipped in
+the repository; parser output alone must not establish the expected result.
+
+An intentional stop after delivering a recovered answer returns a normal message
+with `finish_reason=stop`, no error and no new provider call. It finishes the
+recovery turn, not the user's goal. Existing historical `Failed` entries are not
+rewritten. JSON and SSE behavior is checked offline; automatic goal continuation
+in live Harness has not been verified by these tests.
+On explicit continuation, the local notice does not replace the upstream reply
+ID: the bridge verifies the original binding and all tool results, preserving
+the single-use claim. No duplicate binding that could replay actions is created.
+
+The offline audit also fixed Qwen session construction during login and renewal:
+`expires_at` is passed by name instead of occupying the conversation-binding
+field. Existing session files are not automatically changed; no live login was
+performed for this verification.
+
+Before each reply, the model receives a compact required-field checklist derived
+from the schemas and a reminder to wait for a write result before its verifier.
+This is guidance, not a guarantee: missing `file_path` or another required field
+still rejects the batch. The bridge never infers a path from content or another
+command and does not automatically retry.
+
+The prompt separates past transcript data from the next assistant message and
+forbids simulated tool results. Only Harness supplies actual execution results.
+A `Tool (...):` suffix after a call block is never stripped: the entire batch is
+rejected without execution. Prompt guidance does not guarantee model compliance.
 
 Verified offline against saved replies without another generation. The fix does
 not resume a stopped goal, replay an old reply, or reset history or counters.

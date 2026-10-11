@@ -17,6 +17,33 @@ from tests.test_tools import block, FLAT_TOOLS
 
 
 class ConversationTests(unittest.TestCase):
+    def test_local_stop_preserves_original_results_and_single_use_claim(self):
+        from server.recovery_status import RECOVERY_STOP_TEXT
+        self.cache.remember(self.req, self.reply, '', self.calls, 0)
+        history = self.history() + [ChatMessage(role='assistant', content=RECOVERY_STOP_TEXT)]
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(self.req.model_copy(update={'messages': history}))
+        history.append(ChatMessage(role='user', content='Continue manually'))
+        req = self.req.model_copy(update={'messages': history})
+        continued, steps = self.cache.prepare(req)
+        self.assertEqual(continued.conversation_id, self.reply.conversation_id)
+        self.assertEqual(steps, 1)
+        self.assertIn('fixture result', [m.content for m in continued.messages])
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(req)
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(self.req.model_copy(update={'messages': self.history()}))
+
+    def test_local_stop_cannot_hide_changed_history_or_missing_results(self):
+        from server.recovery_status import RECOVERY_STOP_TEXT
+        self.cache.remember(self.req, self.reply, '', self.calls, 0)
+        for history in (self.history()[:-1],
+                        [ChatMessage(role='user', content='changed'), *self.history()[1:]]):
+            history += [ChatMessage(role='assistant', content=RECOVERY_STOP_TEXT),
+                        ChatMessage(role='user', content='Continue')]
+            with self.assertRaises(ConversationStateError):
+                self.cache.prepare(self.req.model_copy(update={'messages': history}))
+
     def setUp(self):
         isolated_access(self)
         self.cache = api.conversation_cache
