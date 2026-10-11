@@ -4,7 +4,7 @@ import unittest
 
 from server.openai_format import (
     ToolCallError, enforce_tool_choice, looks_truncated, messages_to_prompt,
-    parse_tool_calls, validate_tool_choice,
+    parse_tool_calls, validate_tool_choice, has_tool_call_markup,
 )
 from server.schemas import ChatMessage
 
@@ -23,6 +23,20 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_generic_call_array_can_request_correction_but_never_execute(self):
+        payload = [{"name": "bash", "arguments": {"command": "pwd && ls -la"}}]
+        for language in ('json', ''):
+            text = 'I will explore the project.\n```' + language + '\n' + json.dumps(payload) + '\n```'
+            self.assertTrue(has_tool_call_markup(text, {'bash'}))
+            self.assertFalse(has_tool_call_markup(text, {'read'}))
+            self.assertFalse(has_tool_call_markup(text))
+            self.assertEqual(parse_tool_calls(text, {'bash'}), (text, None))
+        for body in ('[]', '{}', '[{"name":"bash","arguments":{},"extra":true}]',
+                     '[{"name":"bash","arguments":{},"name":"read"}]',
+                     '[{"name":"bash","arguments":{}} ,',
+                     '[{"name":"bash","arguments":{}},{"name":"unknown","arguments":{}}]'):
+            self.assertFalse(has_tool_call_markup('```json\n' + body + '\n```', {'bash'}))
+
     def test_missing_outer_array_closer_preserves_complete_objects_only(self):
         items = [{"name": "todo_write", "arguments": {"todos": [
             {"content": 'quoted "todo" and \\slash }]}', "status": "pending"}]}}]

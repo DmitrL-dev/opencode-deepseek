@@ -96,6 +96,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         good = block([{"name": "bash", "arguments": {"command": "printf verified"}}])
         broken = '```tool_calls\n[{"name":"write","arguments":{}},'
         for first in (broken, 'I will run it.\n' + good,
+                      'I will explore the project.\n' + good.replace('```tool_calls', '```json'),
+                      'I will explore the project.\n' + good.replace('```tool_calls', '```'),
                       '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="bash">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'):
             for stream in (False, True):
                 for corrected in (good, broken, 'Finished without tools.'):

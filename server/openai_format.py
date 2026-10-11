@@ -40,13 +40,30 @@ class ToolCallError(RuntimeError):
     """The model emitted an invalid or disallowed explicit tool reply."""
 
 
-def has_tool_call_markup(text: str) -> bool:
+def has_tool_call_markup(text: str, allowed_names=None) -> bool:
     """Recognize call framing, not inline protocol names in a final report.
 
     Detection alone never authorizes execution: callers may request one fresh
     formatted response, which must pass the full parser and tool-choice policy.
     """
-    return bool(_TOOL_MARKUP_RE.search(text))
+    if _TOOL_MARKUP_RE.search(text):
+        return True
+    if not allowed_names:
+        return False
+    # A generic fenced call array is only a signal to ask for a fresh,
+    # explicit protocol response. It must never authorize execution itself.
+    for match in re.finditer(r"(?m)^```(?:json)?[ \t]*\r?\n(.*?)\r?\n```[ \t]*$",
+                             text, re.DOTALL):
+        try:
+            data = _tool_json(match.group(1))
+        except (ValueError, TypeError):
+            continue
+        if (isinstance(data, list) and data and all(
+                isinstance(item, dict) and set(item) == {"name", "arguments"}
+                and isinstance(item["name"], str) and item["name"] in allowed_names
+                and isinstance(item["arguments"], dict) for item in data)):
+            return True
+    return False
 
 
 def _text_of(content) -> str:

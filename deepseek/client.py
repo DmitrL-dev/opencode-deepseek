@@ -44,6 +44,8 @@ _log = logging.getLogger(__name__)
 
 def _failure_kind(exc):
     # Never log exception text, upstream bodies, headers, or account values.
+    if isinstance(exc, DeepSeekStreamError):
+        return exc.diagnostic_code
     if isinstance(exc, ProviderRejected):
         return exc.code
     if isinstance(exc, httpx.HTTPStatusError):
@@ -341,6 +343,44 @@ _CONTENT_PATH = re.compile(r"^response/fragments/(-?\d+)/content$")
 class DeepSeekStreamError(RuntimeError):
     """An upstream stream failed or ended without a terminal marker."""
 
+    @property
+    def diagnostic_code(self):
+        # Match only messages owned by this parser. Never derive log fields
+        # from an upstream value or fall back to the exception's raw text.
+        return _STREAM_FAILURE_CODES.get(str(self), "stream_error")
+
+
+_STREAM_FAILURE_CODES = {
+    "DeepSeek changed completion status": "stream_changed_completion_status",
+    "DeepSeek response status: ERROR": "stream_response_error",
+    "DeepSeek response status: FAILED": "stream_response_failed",
+    "DeepSeek response status: CANCELLED": "stream_response_cancelled",
+    "DeepSeek changed status after completion": "stream_status_after_completion",
+    "DeepSeek fragment content is not text": "stream_nontext_fragment",
+    "DeepSeek rewrote an already emitted response prefix": "stream_rewritten_prefix",
+    "DeepSeek extended a response fragment after later text was emitted": "stream_fragment_order",
+    "DeepSeek emitted an error event": "stream_error_event",
+    "Invalid JSON in DeepSeek SSE event": "stream_invalid_json",
+    "Unexpected DeepSeek SSE event shape": "stream_invalid_event_shape",
+    "Invalid final snapshot": "stream_invalid_final_snapshot",
+    "DeepSeek changed response after completion": "stream_changed_final_snapshot",
+    "Unexpected DeepSeek response snapshot": "stream_invalid_snapshot",
+    "Invalid DeepSeek snapshot fragments": "stream_invalid_snapshot_fragments",
+    "DeepSeek replaced an already emitted response fragment": "stream_replaced_fragment",
+    "DeepSeek sent fragments after completion": "stream_fragments_after_completion",
+    "Unsupported DeepSeek fragment list patch": "stream_unsupported_fragment_patch",
+    "DeepSeek sent content after completion": "stream_content_after_completion",
+    "Unsupported DeepSeek content patch": "stream_unsupported_content_patch",
+    "DeepSeek content patch references an unknown fragment": "stream_unknown_fragment",
+    "DeepSeek stream ended before a terminal marker": "stream_missing_terminal",
+    "Invalid DeepSeek fragment JSON": "stream_invalid_fragment_json",
+    "Invalid DeepSeek fragment descriptors": "stream_invalid_fragment_descriptors",
+    "Invalid DeepSeek fragment type": "stream_invalid_fragment_type",
+    "Invalid DeepSeek response message_id": "stream_invalid_message_id",
+    "DeepSeek changed response message_id within one stream": "stream_changed_message_id",
+    "Missing or stale DeepSeek response message_id": "stream_missing_or_stale_message_id",
+}
+
 
 def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
     """Emit RESPONSE text while retaining the current patch path and operation.
@@ -356,7 +396,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
     current_path, current_operation = None, None
     terminal = False
 
-    def status(value):
+    def status(value, source="patch", present=True):
         nonlocal terminal
         if value in ("FINISHED", "INCOMPLETE"):
             reason = "length" if value == "INCOMPLETE" else "stop"
@@ -367,6 +407,20 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         elif value in ("ERROR", "FAILED", "CANCELLED"):
             raise DeepSeekStreamError(f"DeepSeek response status: {value}")
         elif terminal:
+            # Only fixed categories and booleans: never log upstream strings,
+            # arbitrary keys, paths, contents, or identifiers.
+            event_kind = event if event in ("", "message", "finish", "update") else "other"
+            value_kind = ("missing" if not present else "null" if value is None
+                          else "string" if isinstance(value, str)
+                          else "bool" if isinstance(value, bool)
+                          else "number" if isinstance(value, (int, float))
+                          else "object" if isinstance(value, dict) else "array")
+            _log.warning(
+                "DeepSeek status shape: event=%s source=%s value=%s "
+                "explicit_path=%s explicit_operation=%s has_v=%s terminal_before_event=%s",
+                event_kind or "default", source, value_kind,
+                "p" in obj, "o" in obj, "v" in obj, was_terminal,
+            )
             raise DeepSeekStreamError("DeepSeek changed status after completion")
 
     def claim(index, fragment):
@@ -416,6 +470,16 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         if event == "finish":
             terminal = True
             meta.setdefault("finish_reason", "stop")
+            if not obj:
+                # An empty transport marker is not a patch with v=None.
+                # Keep reading so later errors/mutations are still rejected.
+                continue
+
+        # Service events are not compact patches. A compact patch may inherit
+        # its path/operation, but must still carry at least one patch field.
+        # Error envelopes above are checked before ignoring metadata.
+        if not any(key in obj for key in ("p", "o", "v")):
+            continue
 
         value = obj.get("v")
         if isinstance(value, dict) and "response" in value:
@@ -430,12 +494,12 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
                 if final_types != types or final_text != emitted:
                     raise DeepSeekStreamError("DeepSeek changed response after completion")
                 _capture_message_id(meta, value)
-                status(response.get("status"))
+                status(response.get("status"), "snapshot", "status" in response)
                 continue
             if not isinstance(response, dict):
                 raise DeepSeekStreamError("Unexpected DeepSeek response snapshot")
             _capture_message_id(meta, value)
-            status(response.get("status"))
+            status(response.get("status"), "snapshot", "status" in response)
             fragments = response.get("fragments", [])
             if not isinstance(fragments, list):
                 raise DeepSeekStreamError("Invalid DeepSeek snapshot fragments")
@@ -454,7 +518,7 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         if "o" in obj:
             current_operation = obj["o"]
         if current_path == "response/status":
-            status(value)
+            status(value, present="v" in obj)
             continue
         if current_path in ("response/message_id", "response/id"):
             _set_message_id(meta, value)

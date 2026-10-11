@@ -103,12 +103,14 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.conversation_args.append(args)
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior in ("format_correction", "dsml_correction"):
+        if self.behavior in ("format_correction", "dsml_correction", "generic_correction"):
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if len(self.prompts) == 1:
                 answer = "I will read the file.\n" + answer
                 if self.behavior == "dsml_correction":
                     answer = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="read">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'
+                elif self.behavior == "generic_correction":
+                    answer = answer.replace('```tool_calls', '```json')
             elif len(self.prompts) == 2:
                 self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
                 self.assertEqual(args[:2], ("owned-fixture:2", None))
@@ -187,7 +189,7 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertTrue(any(message["role"] == "tool" for message in self.calls[1]["messages"]))
 
     def test_opt_in_format_correction_executes_native_tool_once(self):
-        for self.behavior in ("format_correction", "dsml_correction"):
+        for self.behavior in ("format_correction", "dsml_correction", "generic_correction"):
             with self.subTest(behavior=self.behavior), patch.object(api, "_FORMAT_REPAIR", True):
                 self.calls.clear()
                 self.prompts.clear()

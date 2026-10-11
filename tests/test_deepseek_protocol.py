@@ -1,11 +1,92 @@
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import httpx
 
-from deepseek.client import DeepSeekClient
+from deepseek.client import DeepSeekClient, DeepSeekStreamError, _failure_kind
 from providers.access import AccessGuard, ProviderRejected
+from tests.test_stream import event, snapshot, mock_client
+
+
+class StreamDiagnosticsTests(unittest.TestCase):
+    def test_late_status_shape_is_useful_without_logging_upstream_data(self):
+        completed = snapshot('PRIVATE_REPLY') + event({'p': 'response/status', 'v': 'FINISHED'})
+        cases = [
+            (event({'p': 'response/status'}, 'finish'),
+             'event=finish source=patch value=missing explicit_path=True'),
+            (event({'v': None}), 'event=default source=patch value=null'),
+            (event({'p': 'response/status', 'v': 'PRIVATE_STATUS'}, 'PRIVATE_EVENT'),
+             'event=other source=patch value=string explicit_path=True'),
+            (snapshot('PRIVATE_REPLY'), 'event=default source=snapshot value=missing'),
+        ]
+        for tail, expected in cases:
+            with self.subTest(expected=expected):
+                client = mock_client(completed + tail)
+                self.addCleanup(client.close)
+                client.access_guard = AccessGuard(path=None, interval=0)
+                with self.assertLogs('deepseek.client', level='WARNING') as log:
+                    with self.assertRaises(DeepSeekStreamError):
+                        client.chat('PRIVATE_PROMPT')
+                output = '\n'.join(log.output)
+                self.assertIn(expected, output)
+                self.assertIn('terminal_before_event=True', output)
+                self.assertIn('reason=stream_status_after_completion', output)
+                self.assertNotIn('PRIVATE_', output)
+                self.assertEqual(client.access_guard.status(), {'deepseek': 'upstream_failure'})
+
+    def test_protocol_failures_have_safe_codes_and_do_not_replay(self):
+        cases = [
+            (snapshot('PRIVATE_REPLY') + 'data: {PRIVATE_TOKEN\n\n', 'stream_invalid_json', 'existing:4'),
+            (snapshot('PRIVATE_REPLY'), 'stream_missing_terminal', 'existing:4'),
+            (snapshot('PRIVATE_REPLY') + event({'p': 'response/fragments/0/content', 'o': 'SET', 'v': 'PRIVATE_TOKEN'}),
+             'stream_unsupported_content_patch', 'existing:4'),
+            (snapshot('PRIVATE_REPLY', 'FINISHED'), 'stream_missing_or_stale_message_id', 'existing:2'),
+        ]
+        for payload, code, cid in cases:
+            with self.subTest(code=code):
+                client = mock_client(payload)
+                self.addCleanup(client.close)
+                client.access_guard = AccessGuard(path=None, interval=0)
+                with patch.object(client._http, 'send', wraps=client._http.send) as send:
+                    with self.assertLogs('deepseek.client', level='WARNING') as log, self.assertRaises(DeepSeekStreamError):
+                        client.chat('PRIVATE_PROMPT', conversation_id=cid)
+                    self.assertIn('phase=parse_stream http_status=200 reason=' + code, log.output[0])
+                    self.assertNotIn('PRIVATE_', '\n'.join(log.output))
+                    self.assertEqual(client.access_guard.status(), {'deepseek': 'upstream_failure'})
+                    with self.assertRaises(ProviderRejected):
+                        client.chat('must not retry', conversation_id=cid)
+                    self.assertEqual(send.call_count, 1)
+
+    def test_unknown_exception_text_never_becomes_a_diagnostic_field(self):
+        self.assertEqual(_failure_kind(DeepSeekStreamError('PRIVATE_TOKEN')), 'stream_error')
+        self.assertEqual(_failure_kind(RuntimeError('PRIVATE_TOKEN')), 'unexpected_failure')
+
+    def test_empty_finish_allows_two_mocked_turns_without_pausing(self):
+        import json
+        client = mock_client('')
+        client._http.close()
+        client.access_guard = AccessGuard(path=None, interval=0)
+        requests = []
+
+        def respond(request):
+            body = json.loads(request.content)
+            requests.append(body)
+            message_id = 2 * len(requests)
+            payload = event({'v': {'response': {'message_id': message_id, 'fragments': [
+                {'type': 'RESPONSE', 'content': 'fixture answer'}]}}})
+            payload += event({'p': 'response/status', 'o': 'SET', 'v': 'FINISHED'})
+            payload += event({}, 'finish')
+            return httpx.Response(200, text=payload, headers={'content-type': 'text/event-stream'})
+
+        client._http = httpx.Client(base_url='https://offline.invalid', transport=httpx.MockTransport(respond))
+        self.addCleanup(client.close)
+        first = client.chat('first')
+        second = client.chat('second', conversation_id=first.conversation_id)
+        self.assertEqual((first.text, second.text), ('fixture answer', 'fixture answer'))
+        self.assertEqual((first.conversation_id, second.conversation_id), ('fake-session:2', 'fake-session:4'))
+        self.assertEqual([r['parent_message_id'] for r in requests], [None, 2])
+        self.assertEqual(client.access_guard.status(), {})
 
 
 class ChatCreationTests(unittest.TestCase):
