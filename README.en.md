@@ -199,6 +199,12 @@ action protocol: do not use it for explanatory examples. Remote schemas are neve
 fetched; local `$ref` references work. On update, install `requirements.txt`
 (the new dependency is `jsonschema`) and restart the bridge.
 
+A normal stop with a closed fence also permits swapping the final `]}` to `}]`
+only when a string-aware scan confirms that arguments are complete and only the
+call object and outer array remain open. No values or delimiters are added. The
+entire corrected batch must pass JSON Schema validation; damaged strings, nested
+arguments and ambiguous endings are rejected.
+
 Verified offline against saved replies without another generation. The fix does
 not resume a stopped goal, replay an old reply, or reset history or counters.
 

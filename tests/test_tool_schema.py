@@ -21,6 +21,47 @@ def parse(text, tools=FLAT_TOOLS):
 
 
 class SchemaProtocolTests(unittest.TestCase):
+    def test_outer_closer_transposition_preserves_values_and_batch(self):
+        arguments = {'command': 'printf "]} \\\" [ { \\n"', 'description': 'Run tests'}
+        batch = [{'name': 'read', 'arguments': {'file_path': '/fixture'}},
+                 {'name': 'bash', 'arguments': arguments}]
+        payload = json.dumps(batch, ensure_ascii=False)
+        broken = payload[:-2] + ']}'
+        text = '```tool_calls\n' + broken + '\n```'
+        with self.assertRaises(ToolCallError):
+            parse(text)
+        for tail in (']}', '] \n }  '):
+            _, calls = parse_tool_calls('```tool_calls\n' + payload[:-2] + tail + '\n```',
+                                       {'read', 'bash'}, flat_argument_tools=FLAT_TOOLS,
+                                       allow_outer_closer_transposition=True)
+            self.assertEqual([json.loads(c['function']['arguments']) for c in calls],
+                             [c['arguments'] for c in batch])
+
+    def test_transposition_never_repairs_arguments_or_partial_data(self):
+        good = '[{"name":"bash","arguments":{"command":"pwd","description":"test"}}]'
+        for payload in (
+            good[:-2] + ']} trailing', good[:-2] + ']',
+            good.replace('"test"}}]', '"test"]}}'),
+            good.replace('"test"}}]', '"test"}]}'),  # valid normalization, invalid schema below
+            good.replace('"command":"pwd"', '"command":7')[:-2] + ']}',
+            good.replace('"command":"pwd"', '"command":"pwd","command":"ls"')[:-2] + ']}',
+            good.replace('"test"', '"unterminated')[:-2] + ']}',
+            good[:-2] + ']}\n[]',
+        ):
+            # The ordinary valid normalization is tested with an incompatible
+            # schema to prove that normalization cannot skip schema validation.
+            tools = FLAT_TOOLS
+            if payload == good[:-2] + ']}':
+                tools = [{'name': 'bash', 'parameters': {'type': 'object', 'required': ['missing']}}]
+            with self.subTest(payload=payload), self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + payload + '\n```', {'bash'},
+                                 flat_argument_tools=tools, allow_outer_closer_transposition=True)
+        for schemas, fence in ((None, '\n```'), (FLAT_TOOLS, '')):
+            with self.assertRaises(ToolCallError):
+                parse_tool_calls('```tool_calls\n' + good[:-2] + ']}' + fence, {'bash'},
+                                 flat_argument_tools=schemas, allow_unclosed_fence=True,
+                                 allow_outer_closer_transposition=True)
+
     def test_saved_reply_values_preserved(self):
         _, calls = parse(SAVED_REPLY)
         self.assertEqual(len(calls), 1)

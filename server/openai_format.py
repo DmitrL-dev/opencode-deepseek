@@ -328,6 +328,47 @@ def _tool_block_after_preamble(text):
     return text[starts[0].start():]
 
 
+def _transpose_outer_closers(payload, error):
+    """Swap only the last call/array closers after complete arguments.
+
+    The JSON decoder must fail at the terminal ]}; a string-aware stack must
+    show that only the call object and outer batch remain open. Never repair
+    an argument container, add a delimiter or change a value.
+    """
+    tail = payload[error.pos:]
+    if error.msg != "Expecting ',' delimiter" or not re.fullmatch(r'\]\s*\}\s*', tail):
+        return None
+    stack, quoted, escaped = [], False, False
+    for char in payload[:error.pos]:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in '[{':
+            stack.append(char)
+        elif char in ']}':
+            if not stack or stack.pop() != {']': '[', '}': '{'}[char]:
+                return None
+    if quoted or stack != ['[', '{'] or not payload[:error.pos].rstrip().endswith('}'):
+        return None
+    # Replace the two existing bytes in place; retain all other bytes.
+    corrected = payload[:error.pos] + '}' + tail[1:].replace('}', ']', 1)
+    try:
+        data = _tool_json(corrected)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, list) or not data or not isinstance(data[-1], dict):
+        return None
+    if not isinstance(data[-1].get('arguments'), dict):
+        return None
+    return data
+
+
 def parse_tool_calls(
     text: str, allowed_names: Optional[Iterable[str]] = None, *,
     allow_unclosed_fence: bool = False,
@@ -335,6 +376,7 @@ def parse_tool_calls(
     allow_missing_array_closer: bool = False,
     flat_argument_tools: Optional[List[dict]] = None,
     allow_tool_preamble: bool = False,
+    allow_outer_closer_transposition: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, with explicit narrow tolerances.
 
@@ -369,7 +411,12 @@ def parse_tool_calls(
     try:
         data = _tool_json(payload)
     except json.JSONDecodeError as exc:
-        if (allow_missing_array_closer and exc.msg == "Expecting ',' delimiter"
+        transposed = (_transpose_outer_closers(payload, exc)
+                      if allow_outer_closer_transposition and match
+                      and flat_argument_tools is not None else None)
+        if transposed is not None:
+            data = transposed
+        elif (allow_missing_array_closer and exc.msg == "Expecting ',' delimiter"
                 and exc.pos == len(payload) and payload.lstrip().startswith("[")
                 and payload.rstrip().endswith("}")):
             # A normal-stop reply can omit exactly the outer array closer.

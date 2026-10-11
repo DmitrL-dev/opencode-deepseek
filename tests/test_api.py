@@ -44,6 +44,30 @@ def sse_objects(text):
 
 
 class ApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_terminal_transposition_requires_normal_stop_and_never_replays(self):
+        args = {'command': 'python -m pytest tests/unit/test_gate.py -q',
+                'description': 'Run gate tests', 'timeoutMs': 900000}
+        tools = [{'name': 'bash', 'parameters': {'type': 'object', 'properties': {
+            'command': {'type': 'string'}, 'description': {'type': 'string'},
+            'timeoutMs': {'type': 'number'}}, 'required': ['command', 'description'],
+            'additionalProperties': False}}]
+        body = json.dumps([{'name': 'bash', 'arguments': args}])
+        answer = '```tool_calls\n' + body[:-2] + ']}\n```'
+        for stream in (False, True):
+            for finish, choice in (('stop', 'auto'), ('length', 'auto'), ('stop', 'none')):
+                with self.subTest(stream=stream, finish=finish, choice=choice):
+                    fake = Mock(); fake.chat.return_value = Reply(answer, 'owned:2', finish)
+                    with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api, '_MAX_CONTINUATIONS', 0), patch.object(api, 'get_client', return_value=fake):
+                        response = await self.post(tools=tools, stream=stream, tool_choice=choice)
+                    fake.chat.assert_called_once()
+                    valid = finish == 'stop' and choice == 'auto'
+                    self.assertEqual('"error":' in response.text, not valid)
+                    self.assertEqual('"tool_calls":' in response.text, valid)
+                    if valid and not stream:
+                        calls = response.json()['choices'][0]['message']['tool_calls']
+                        self.assertEqual(len(calls), 1)
+                        self.assertEqual(json.loads(calls[0]['function']['arguments']), args)
+
     async def asyncSetUp(self):
         isolated_access(self)
         api._request_gate = asyncio.Lock()

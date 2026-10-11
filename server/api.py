@@ -438,6 +438,8 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
                     allow_closing_artifacts=reply.finish_reason == "stop",
                     allow_missing_array_closer=reply.finish_reason == "stop",
                     flat_argument_tools=req.tools if reply.finish_reason == "stop" else None,
+                    allow_outer_closer_transposition=(reply.finish_reason == "stop"
+                                                      and model_provider(req.model) == "deepseek"),
                     allow_tool_preamble=(reply.finish_reason == "stop"
                                          and model_provider(req.model) == "deepseek"))
                 if (req.tool_choice != "none" and tool_calls is None
