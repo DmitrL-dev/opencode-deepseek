@@ -618,6 +618,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Account providers OpenAI-compatible API", version="0.2.0", lifespan=lifespan)
 app.include_router(browser_router)
+from server.budgets import router as budget_router
+app.include_router(budget_router)
 install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
 
 

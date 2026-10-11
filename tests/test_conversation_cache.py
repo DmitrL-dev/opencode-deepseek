@@ -271,7 +271,7 @@ class BudgetTests(unittest.TestCase):
             self.charge(AccessGuard(self.path, interval=0), 'generation')
 
     def test_invalid_budget_configuration_is_rejected(self):
-        for value in ('0', '-1', '1001', '1.5', 'nan', '', '１２', '61'):
+        for value in ('0', '-1', '2001', '1.5', 'nan', '', '１２', '61'):
             with self.subTest(value=value), patch.dict('os.environ',
                     {'DEEPSEEK_MAX_GENERATIONS_PER_HOUR': value}):
                 with self.assertRaises(ValueError):

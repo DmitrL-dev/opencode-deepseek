@@ -3,6 +3,7 @@ import argparse
 import contextlib
 from contextvars import ContextVar
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -18,6 +19,8 @@ if os.name == 'nt':
     import msvcrt
 else:
     import fcntl
+
+MAX_BUDGET = 2000
 
 PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini'))
 MESSAGES = {
@@ -66,7 +69,7 @@ def _file_lock(file, unlock=False):
 
 
 def _configured_budgets():
-    """Bounded rolling ceilings; 1000 is also the persisted ledger size limit."""
+    """Bounded rolling ceilings; MAX_BUDGET is also the persisted ledger size limit."""
     limits = []
     for name, category, defaults in (
         ('HTTP', None, (40, 200)), ('CHATS', 'chat', (3, 6)),
@@ -76,8 +79,8 @@ def _configured_budgets():
         for suffix, default in zip(('HOUR', 'DAY'), defaults):
             key = f'DEEPSEEK_MAX_{name}_PER_{suffix}'
             raw = os.getenv(key, str(default))
-            if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= 1000:
-                raise ValueError(f'{key} must be an integer between 1 and 1000')
+            if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= MAX_BUDGET:
+                raise ValueError(f'{key} must be an integer between 1 and {MAX_BUDGET}')
             values.append(int(raw))
         if values[0] > values[1]:
             raise ValueError(f'DEEPSEEK_MAX_{name}_PER_DAY must be >= PER_HOUR')
@@ -125,7 +128,7 @@ class AccessGuard:
                     or not math.isfinite(next_http_at) or next_http_at < 0):
                 raise ValueError('Invalid HTTP pacing state')
             usage = item.get('usage', [])
-            if (not isinstance(usage, list) or len(usage) > 1000
+            if (not isinstance(usage, list) or len(usage) > MAX_BUDGET
                     or any(not isinstance(entry, list) or len(entry) != 2
                            or entry[1] not in ('http', 'chat', 'generation')
                            or isinstance(entry[0], bool) or not isinstance(entry[0], (int, float))
@@ -250,6 +253,40 @@ class AccessGuard:
             record.pop('dispatched', None)
             self._save(state)
             self._failed.discard(provider)
+
+    @staticmethod
+    def _usage_revision(record):
+        return hashlib.sha256(json.dumps(record.get('usage', []), separators=(',', ':')).encode()).hexdigest()
+
+    def budget_status(self):
+        now = time.time()
+        with self._state() as state:
+            record = state.get('deepseek', {})
+            usage = record.get('usage', [])
+            rows = []
+            for window, category, limit in self.budget_limits:
+                entries = sorted(t for t, kind in usage if t > now - window
+                                 and (category is None or kind == category))
+                needed = max(0, len(entries) + 1 - limit)
+                rows.append({'category': category or 'http', 'window_seconds': window,
+                             'used': len(entries), 'limit': limit,
+                             'remaining': max(0, limit - len(entries)),
+                             'next_available_at': entries[needed - 1] + window if needed else now})
+            return {'provider': 'deepseek', 'at': now, 'budgets': rows,
+                    'revision': self._usage_revision(record),
+                    'paused': record.get('pause'), 'busy': bool(record.get('pending')),
+                    'min_interval_seconds': self.interval}
+
+    def reset_budget(self, revision):
+        with self._state() as state:
+            record = state.setdefault('deepseek', {})
+            if record.get('pending'):
+                raise RuntimeError('A request is active or unresolved; counters were not reset')
+            if self._usage_revision(record) != revision:
+                raise RuntimeError('Counters changed; inspect them again before resetting')
+            # Only usage changes. Provider pauses and pacing survive this operation.
+            record['usage'] = []
+            self._save(state)
 
     def status(self):
         with self._state() as state:

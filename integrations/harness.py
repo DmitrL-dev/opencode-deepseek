@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import copy
 import io
 import ipaddress
@@ -150,6 +151,10 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
             raise ValueError("Unsupported Harness patch entry")
         # Nested patches and dynamic config require the Harness editor. Do not
         # attempt to evaluate !!js or infer a custom composition here.
+        if (set(row) == {"insert"} and isinstance(row["insert"], list)
+                and len(row["insert"]) == 1 and isinstance(row["insert"][0], dict)
+                and row["insert"][0].get("id") == "local-bridge-budget"):
+            continue
         if "id" not in row:
             raise ValueError("Install supports id-targeted patches only; use --output for custom profiles")
         key = row["id"]
@@ -248,7 +253,25 @@ def write_private(path: Path, data: bytes, before=None) -> Path | None:
     return backup
 
 
-def install(home: Path, profile: str, base_url: str, models: list, default_model=None,
+@contextmanager
+def profile_lock(home, profile):
+    from providers.access import _file_lock
+    path = Path(home) / ('.bridge-install-' + profile + '.lock')
+    with path.open('a+') as lock:
+        os.chmod(path, 0o600)
+        _file_lock(lock)
+        try:
+            yield
+        finally:
+            _file_lock(lock, unlock=True)
+
+
+def install(home, profile, *args, **kwargs):
+    with profile_lock(home, profile):
+        return _install_unlocked(home, profile, *args, **kwargs)
+
+
+def _install_unlocked(home: Path, profile: str, base_url: str, models: list, default_model=None,
             without_browser=False):
     """Edit a standard initialized profile, retaining other provider settings."""
     directory = home / "profiles" / profile

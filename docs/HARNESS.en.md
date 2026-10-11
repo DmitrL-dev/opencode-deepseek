@@ -217,7 +217,7 @@ DEEPSEEK_MAX_CONVERSATION_REPLIES=100
 
 This is an expanded local budget example, not DeepSeek's allowance. Defaults
 remain 12/60 generations, 3/6 new chats and 40/200 HTTP requests. Values must be
-integers from 1 to 1000; each daily ceiling must be at least its hourly ceiling.
+integers from 1 to 2000; each daily ceiling must be at least its hourly ceiling.
 Invalid settings stop startup. HTTP usage includes chat creation, challenge and
 generation; preflight checks space for the whole sequence. Changing limits
 preserves usage, pauses and pacing.
@@ -241,3 +241,23 @@ large live Expert task has not been qualified after these changes.
 `DEEPSEEK_MAX_CONVERSATION_REPLIES` separately controls the conversation cap (default 20, range 1–1000). It counts accepted replies, not all upstream generations: format correction also consumes the rolling budget. After raising it and restarting, exact saved history can continue in the same conversation. Counters and one-use protection are preserved; unknown or edited histories remain rejected.
 
 An empty or whitespace-only tool-mode reply is rejected instead of reported as success. With `TOOLCALL_FORMAT_REPAIR=1`, normal completion permits one correction in the same conversation; a second empty reply returns an explicit error. Output limits, refusals and `tool_choice=none` never trigger correction.
+
+### Local budget commands
+
+Install the offline command plugin with:
+
+```bash
+python -m integrations.harness_budget --profile desktop --token-file /absolute/private/budget-token
+```
+
+Create a private (0600) file containing a random 64-character hex token and set
+`BRIDGE_BUDGET_TOKEN_FILE` to that path in the bridge environment. Restart the bridge.
+The plugin receives only the file path, never provider credentials.
+
+`/bridge-budget` displays all six rolling counters and next availability times.
+`/bridge-budget-reset` previews the counters. Confirm explicitly with
+`/bridge-budget-reset CONFIRM` in the same session within 60 seconds. Changes
+between preview and confirmation reject the reset. Commands run without an LLM.
+Reset clears only local usage, preserving provider pauses, pacing and conversation
+history. Active or unresolved requests prevent reset. The authenticated loopback
+admin endpoint rejects browser Origin requests. Harness reloads its profile patch.
