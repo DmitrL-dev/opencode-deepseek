@@ -69,7 +69,7 @@ class HarnessSetupTests(unittest.TestCase):
 
     def test_without_browser_filters_all_providers_and_preserves_advertised_order(self):
         rows = [{"id": provider + "-test", "owned_by": provider}
-                for provider in ("glm", "deepseek", "kimi", "qwen", "grok", "gemini", "mistral")]
+                for provider in ("glm", "deepseek", "kimi", "qwen", "grok", "gemini", "mistral", "chatgpt", "claude")]
         catalog = {"data": rows}
         self.assertEqual([model["id"] for model in harness.catalog_models(catalog)],
                          [row["id"] for row in rows])

@@ -464,12 +464,12 @@ credentials are not added, but the response itself may contain private code or
 secrets. Capture is off by default; the last file remains until replaced or
 manually removed. Do not publish it. Capture failures do not mask the tool error.
 
-Legacy diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
+Legacy diagnostics: start the server with `TOOLCALL_DEBUG=1` — on an unrecognized call
 the raw model reply is written to the log (`logs/server.log` or stdout).
 This can include file contents and secrets; leave it disabled for normal use.
 
 ```bash
-DEBUG_TOOLCALLS=1 python app.py
+TOOLCALL_DEBUG=1 python app.py
 ```
 
 Test the bridge directly (without opencode):
@@ -643,9 +643,10 @@ variables take precedence.
 | `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
 | `PROVIDER_MIN_INTERVAL` | `30` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
+| `QWEN_MODELS` | `qwen3.8-omni-flash`, `qwen3.8-max`, `qwen3.7-plus` | JSON map of public id → website wire model (HTTP transport) |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
 | `TOOLCALL_MAX_CONTINUATIONS` | `0` | Explicit opt-in continuation budget for provider-confirmed output limits; normal stops never trigger continuation |
-| `DEBUG_TOOLCALLS` | — | `1` — log the raw model reply when a call can't be parsed |
+| `TOOLCALL_DEBUG` | — | `1` — log the raw model reply when a call can't be parsed |
 
 Example:
 
@@ -741,7 +742,7 @@ and point `baseURL` of the opencode provider at `http://127.0.0.1:8080/v1`.
    [opencode integration](#opencode-integration)): you should get
    `"finish_reason": "tool_calls"` and a non-empty `message.tool_calls`.
 3. Install the `deepseek-tool-discipline.js` plugin (globally or in the project).
-4. Start the server with `DEBUG_TOOLCALLS=1` and inspect the raw model reply in
+4. Start the server with `TOOLCALL_DEBUG=1` and inspect the raw model reply in
    the log.
 5. Increase the agent's `steps` and use `deepseek-expert`.
 

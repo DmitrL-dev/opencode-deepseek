@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import threading
 import time
@@ -49,6 +50,7 @@ from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
 from providers.access import guard, ProviderRejected, rejection
+from providers.common import ProviderUnavailable
 from .tool_protocol import validate_reply
 from .diagnostics import save_tool_failure
 from .conversation_cache import conversation_cache, ConversationStateError
@@ -65,6 +67,7 @@ from .config import (
     is_known_model,
     resolve_model_type,
     model_provider,
+    qwen_uses_browser,
 )
 from .openai_format import (
     completion_response,
@@ -79,10 +82,14 @@ from .ratelimit import RateLimiter, install_rate_limit
 from .browser_routes import router as browser_router
 from .schemas import ChatCompletionRequest
 
+_log = logging.getLogger(__name__)
+
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
 _client_identity = None
 _bound_deepseek = ContextVar("bound_deepseek", default=None)
+# Non-DeepSeek conversation_cache turns track attempt.dispatch for one-use release.
+_bound_conversation = ContextVar("bound_conversation", default=None)
 _client_lock = threading.Lock()
 _stop_refresh = threading.Event()
 _request_gate = asyncio.Lock()
@@ -121,8 +128,8 @@ def _tool_names(tools) -> set:
     return names
 
 
-def _debug_toolcalls() -> bool:
-    return os.getenv("DEBUG_TOOLCALLS", "").strip().lower() not in (
+def _toolcall_debug() -> bool:
+    return os.getenv("TOOLCALL_DEBUG", "").strip().lower() not in (
         "", "0", "false", "no", "off",
     )
 
@@ -190,22 +197,28 @@ def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
 def _request_client(req, force_refresh=False, rejected_client=None):
     provider = model_provider(req.model)
     guard.check(provider)
+    # Direct Qwen HTTP keeps its own client; browser transport shares TabClient.
+    if provider == "qwen" and not qwen_uses_browser():
+        if force_refresh:
+            return get_qwen_client(True, rejected_client=rejected_client)
+        return get_qwen_client()
     if provider in PROVIDERS:
         # Browser routes run in another worker context. Bind the originating
         # request's Event now so they see cancellation before this worker wakes.
         signal = _worker_cancellation.get()
         return build_provider_client(provider, lambda: _check_cancellation(signal))
-    factory = get_qwen_client if provider == "qwen" else get_client
     if force_refresh:
-        return factory(True, rejected_client=rejected_client)
-    return factory()
+        return get_client(True, rejected_client=rejected_client)
+    return get_client()
 
 
 def _request_queue(req):
     provider = model_provider(req.model)
+    if provider == "qwen" and not qwen_uses_browser():
+        return _qwen_request_gate
     if provider in PROVIDERS:
         return _provider_request_gates[provider]
-    return _qwen_request_gate if provider == "qwen" else _request_gate
+    return _request_gate
 
 
 async def _run_worker(function, *args):
@@ -271,10 +284,11 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     attempt = None
     try:
         with guard.attempt(provider, _cancellation_check()) as attempt:
-            binding = _bound_deepseek.get() if provider == 'deepseek' else None
+            binding = (_bound_deepseek.get() if provider == "deepseek"
+                       else _bound_conversation.get())
             if binding is not None:
                 binding['attempts'].append(attempt)
-            client = binding['client'] if binding is not None else _request_client(req)
+            client = binding['client'] if binding is not None and 'client' in binding else _request_client(req)
             attempt.check()  # Recheck a pause that happened while building a client.
             return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
     except LoginRequired:
@@ -284,6 +298,10 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         # A contender that never owned an attempt cannot mutate its peer state.
         if attempt is not None:
             _invalidate_client(provider, client)
+        # Browser tab-visible failures clear without pause; keep them as
+        # ProviderUnavailable (HTTP 400) so clients are not told the account is paused.
+        if getattr(exc, "clear_without_pause", False):
+            raise
         error = exc if isinstance(exc, ProviderRejected) else rejection(exc)
         raise error from exc
 
@@ -338,27 +356,60 @@ def _plain_conversation_reply(prompt, req, model_type):
     return reply, reply.text, None
 
 
+def _conversation_scope(provider, client=None):
+    """Namespace one-use history links per account/transport snapshot."""
+    if conversation_cache.account_file is None:
+        return "isolated"
+    if provider == "deepseek":
+        # Prefer pinned continuation_scope after Safari/session transfer so
+        # history links survive identity rotation without resetting threads.
+        return "session-v2:" + (
+            client.session.continuation_scope or _session_identity(client.session)
+        )
+    if provider == "qwen" and not qwen_uses_browser():
+        return "qwen-v1:" + _session_identity(client.session)
+    # Browser tab bridge: one local machine / provider, not DeepSeek session.json.
+    return "web:" + provider
+
+
 def _conversation_tool_chat(prompt, req, model_type):
-    if model_provider(req.model) != "deepseek":
-        return _tool_chat_with_retry(prompt, req, model_type)
+    """Resume provider threads for DeepSeek and web providers via conversation_cache.
+
+    Stateless OpenAI clients (OpenCode) resend full messages[]; the cache maps an
+    exact prior history to conversation_id and forwards only the new tail so the
+    browser/HTTP thread continues instead of opening another chat.
+    """
+    provider = model_provider(req.model)
     original = req
     claim = {}
-    binding = {'attempts': []}
-    token = None
+    binding = {"attempts": []}
+    deepseek_token = None
+    conversation_token = None
     succeeded = False
     try:
-        guard.check('deepseek')
+        guard.check(provider)
         _check_cancelled()
-        client = get_client()
-        # Test caches deliberately have no account file. Production scopes
-        # derive only from this pinned client's Session, never a later file.
-        scope = ('isolated' if conversation_cache.account_file is None else
-                 'session-v2:' + (client.session.continuation_scope or _session_identity(client.session)))
-        binding['client'] = client
-        token = _bound_deepseek.set(binding)
+        if provider == "deepseek":
+            client = get_client()
+            # Test caches deliberately have no account file. Production scopes
+            # derive only from this pinned client's Session, never a later file.
+            scope = _conversation_scope(provider, client)
+            binding["client"] = client
+            deepseek_token = _bound_deepseek.set(binding)
+        elif provider == "qwen" and not qwen_uses_browser():
+            client = get_qwen_client()
+            scope = _conversation_scope(provider, client)
+            binding["client"] = client
+            conversation_token = _bound_conversation.set(binding)
+        else:
+            scope = _conversation_scope(provider)
+            conversation_token = _bound_conversation.set(binding)
         req, steps = conversation_cache.prepare(req, scope=scope, claim=claim)
         if req is not original:
-            prompt = messages_to_prompt(req.messages, req.tools, req.tool_choice)
+            # Continuation of a saved provider chat: browser light mode may shorten tools.
+            prompt = messages_to_prompt(
+                req.messages, req.tools, req.tool_choice,
+                tools_continuation=True, provider=provider)
             model_type = None
         result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
                   _plain_conversation_reply(prompt, req, model_type))
@@ -368,14 +419,17 @@ def _conversation_tool_chat(prompt, req, model_type):
     except ConversationStateError as exc:
         raise ToolCallError(str(exc)) from exc
     finally:
-        if token is not None:
-            _bound_deepseek.reset(token)
-        # An explicit challenge auth rejection is also pre-generation, but an
-        # earlier generation (e.g. format correction) must keep the claim used.
-        # The provider pause/pending state and all charges remain unchanged.
+        if deepseek_token is not None:
+            _bound_deepseek.reset(deepseek_token)
+        if conversation_token is not None:
+            _bound_conversation.reset(conversation_token)
+        # Pre-dispatch failures may release. DeepSeek challenge-auth rejection
+        # before generation is also pre-generation; an earlier generation
+        # (e.g. format correction) keeps the claim used. Browser/HTTP dispatch
+        # without that flag still consumes the reservation.
         if not succeeded and all(
             not a.dispatched or (a.challenge_auth_rejected and not a.generation_dispatched)
-            for a in binding['attempts']
+            for a in binding["attempts"]
         ):
             conversation_cache.release(claim)
 
@@ -437,10 +491,10 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
                 )
             except ToolCallError:
                 save_tool_failure(reply, req)
-                if _debug_toolcalls():
+                if _toolcall_debug():
                     print(f"[toolcalls] invalid explicit reply:\n{reply.text}\n", flush=True)
                 raise
-            if tool_calls is None and _debug_toolcalls():
+            if tool_calls is None and _toolcall_debug():
                 print(f"[toolcalls] no call parsed; raw reply:\n{reply.text}\n", flush=True)
             return reply, content, tool_calls
         if req.tool_choice == "none":
@@ -475,9 +529,48 @@ def _sse_error(message: str, err_type: str = "server_error") -> str:
     return f"data: {json.dumps(obj, ensure_ascii=False)}\n\ndata: [DONE]\n\n"
 
 
+def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
+    """Client-facing pause text. Never includes upstream bodies or secrets."""
+    provider = model_provider(model)
+    resume = f"python -m providers.access resume {provider}"
+    if getattr(exc, "source", "upstream") == "local_pause":
+        # Durable local pause — no upstream call; agents must clear it manually.
+        return (
+            f"Manual providers.access pause is blocking `{provider}` "
+            f"(pause={exc.code}): {exc} "
+            f"No request was sent to the upstream provider. "
+            f"Inspect the normal website, then clear the pause with: `{resume}`"
+        )
+    # Fresh allowlisted upstream refusal that just latched a durable pause.
+    return (
+        f"Upstream provider `{provider}` refused this request "
+        f"(mapped={exc.code}): {exc} "
+        f"This bridge enabled a durable providers.access pause for `{provider}`. "
+        f"Further requests stay blocked until you clear it with: `{resume}`"
+    )
+
+
+def _provider_rejected_response(exc: ProviderRejected, model: str):
+    # Local pause uses 400 so agents show our message instead of a generic
+    # "invalid API key" wrapper that many clients attach to HTTP 403.
+    status = 400 if getattr(exc, "source", "upstream") == "local_pause" else 403
+    return _error(_provider_pause_message(exc, model), status=status, err_type=exc.code)
+
+
 # How often to emit an SSE keep-alive comment while a buffered tool reply is
 # still generating. Must stay below the client's idle read timeout.
 _KEEPALIVE_SECONDS = 10.0
+
+
+def _completion_failure_message(exc: BaseException) -> str:
+    """Return a client-visible failure; log the real exception (was previously silent)."""
+    if isinstance(exc, ProviderUnavailable):
+        detail = str(exc).strip()
+        _log.warning("Completion failed without durable pause: %s", detail or type(exc).__name__)
+        if detail and len(detail) <= 300:
+            return detail
+    _log.exception("Completion failed; automatic replay is disabled")
+    return "Provider request failed; automatic replay is disabled."
 
 
 async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
@@ -504,10 +597,10 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
             yield _sse_error(str(e), "invalid_tool_response")
             return
         except ProviderRejected as e:
-            yield _sse_error(str(e), e.code)
+            yield _sse_error(_provider_pause_message(e, req.model), e.code)
             return
-        except Exception:
-            yield _sse_error("Provider request failed; automatic replay is disabled.")
+        except Exception as e:
+            yield _sse_error(_completion_failure_message(e))
             return
 
         for frame in sse_frames(req.model, content, tool_calls, reply.conversation_id,
@@ -552,7 +645,7 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             attempt.abort(exc)
             _invalidate_client(model_provider(req.model), client)
         error = exc if isinstance(exc, ProviderRejected) else rejection(exc)
-        yield _sse_error(str(error), error.code)
+        yield _sse_error(_provider_pause_message(error, req.model), error.code)
     finally:
         if iterator is not None and hasattr(iterator, "close"):
             iterator.close()
@@ -591,10 +684,10 @@ async def _buffered_plain_stream(req, prompt, model_type):
             yield _sse_error(str(exc), "login_required")
             return
         except ProviderRejected as exc:
-            yield _sse_error(str(exc), exc.code)
+            yield _sse_error(_provider_pause_message(exc, req.model), exc.code)
             return
-        except Exception:
-            yield _sse_error("Provider request failed; automatic replay is disabled.")
+        except Exception as exc:
+            yield _sse_error(_completion_failure_message(exc))
             return
         for frame in sse_frames(req.model, reply.text, None, reply.conversation_id,
                                 finish_reason=reply.finish_reason):
@@ -704,15 +797,15 @@ async def _chat_completions(req: ChatCompletionRequest):
         # external attempts and real pauses must still fail before any factory.
         await _run_worker(guard.check, model_provider(req.model), None, True)
     except ProviderRejected as exc:
-        return _error(str(exc), status=403, err_type=exc.code)
+        return _provider_rejected_response(exc, req.model)
 
     if req.conversation_id:
         try:
             provider = model_provider(req.model)
-            if provider in PROVIDERS:
-                decode_provider_cid(req.conversation_id, provider)
-            elif provider == "qwen":
+            if provider == "qwen" and not qwen_uses_browser():
                 decode_qwen_cid(req.conversation_id)
+            elif provider in PROVIDERS:
+                decode_provider_cid(req.conversation_id, provider)
             else:
                 decode_deepseek_cid(req.conversation_id)
         except ValueError as exc:
@@ -729,49 +822,33 @@ async def _chat_completions(req: ChatCompletionRequest):
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
     model_type = None if req.conversation_id else resolve_model_type(req.model)
-    prompt = messages_to_prompt(req.messages, req.tools, req.tool_choice)
+    prompt = messages_to_prompt(
+        req.messages, req.tools, req.tool_choice,
+        tools_continuation=bool(req.conversation_id),
+        provider=model_provider(req.model),
+    )
 
-    # Tool calls are emulated by buffering the reply and parsing it, so we use the
-    # non-streaming call and then emit SSE frames when the client asked to stream.
+    # Tool calls and all account providers use conversation_cache so stateless
+    # OpenAI clients resume the same upstream/browser thread. Buffer the reply
+    # (tools and web providers validate before exposing text), then emit SSE.
     # The provider worker latches upstream failures before exposing the result.
-    if req.tools or model_provider(req.model) == "deepseek":
-        if req.stream:
-            return StreamingResponse(
-                _tool_stream(req, prompt, model_type),
-                media_type="text/event-stream",
-            )
-        try:
-            reply, content, tool_calls = await _run_tool_chat(prompt, req, model_type)
-        except LoginRequired as e:
-            return _error(str(e), status=401, err_type="login_required")
-        except ToolCallError as e:
-            return _error(str(e), status=400, err_type="invalid_tool_response")
-        except ProviderRejected as e:
-            return _error(str(e), status=403, err_type=e.code)
-        except Exception:
-            return _error("Provider request failed; automatic replay is disabled.", status=400)
-
-        return completion_response(
-            req.model, content, prompt, reply.conversation_id, tool_calls,
-            finish_reason=reply.finish_reason,
-        )
-
-    # Plain chat: one incremental stream or one buffered completion.
     if req.stream:
-        if model_provider(req.model) in PROVIDERS:
-            return StreamingResponse(_buffered_plain_stream(req, prompt, model_type),
-                                     media_type="text/event-stream")
-        return StreamingResponse(_plain_stream(None, prompt, req, model_type),
-                                 media_type="text/event-stream")
-
+        return StreamingResponse(
+            _tool_stream(req, prompt, model_type),
+            media_type="text/event-stream",
+        )
     try:
-        reply = await _run_chat_with_retry(prompt, req, model_type)
+        reply, content, tool_calls = await _run_tool_chat(prompt, req, model_type)
     except LoginRequired as e:
         return _error(str(e), status=401, err_type="login_required")
+    except ToolCallError as e:
+        return _error(str(e), status=400, err_type="invalid_tool_response")
     except ProviderRejected as e:
-        return _error(str(e), status=403, err_type=e.code)
-    except Exception:
-        return _error("Provider request failed; automatic replay is disabled.", status=400)
+        return _provider_rejected_response(e, req.model)
+    except Exception as e:
+        return _error(_completion_failure_message(e), status=400)
 
-    return completion_response(req.model, reply.text, prompt, reply.conversation_id,
-                               finish_reason=reply.finish_reason)
+    return completion_response(
+        req.model, content, prompt, reply.conversation_id, tool_calls,
+        finish_reason=reply.finish_reason,
+    )

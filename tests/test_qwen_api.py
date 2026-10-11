@@ -217,7 +217,8 @@ class QwenClientCacheTests(unittest.TestCase):
             with self.subTest(enabled=enabled):
                 result = subprocess.run(
                     [sys.executable, "-c", "import json; from server.config import MODEL_MAP; print(json.dumps(list(MODEL_MAP)))"],
-                    env=dict(os.environ, QWEN_ENABLED=enabled, DEEPSEEK_ENABLED="0"), check=True, capture_output=True, text=True,
+                    env=dict(os.environ, QWEN_ENABLED=enabled, DEEPSEEK_ENABLED="0",
+                             QWEN_TRANSPORT="http"), check=True, capture_output=True, text=True,
                 )
                 models = json.loads(result.stdout)
                 self.assertNotIn("deepseek-chat", models)

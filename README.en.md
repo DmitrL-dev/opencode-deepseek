@@ -291,8 +291,9 @@ not resume a stopped goal, replay an old reply, or reset history or counters.
 | Missing group or model | Check `.env`, the running server and `/v1/models`, then reinstall the catalog |
 
 DeepSeek defaults are **12/60 generations, 3/6 new chats and 40/200 HTTP requests
-per hour/day**, with 20 accepted replies per conversation and a 30-second
-interval. `DEEPSEEK_MAX_*` settings belong to the bridge process environment.
+per hour/day**, with a shared 20 accepted replies per conversation
+(`CONVERSATION_MAX_REPLIES`) and a 30-second interval. `DEEPSEEK_MAX_*` budget
+ceilings and `CONVERSATION_MAX_REPLIES` belong to the bridge process environment.
 Raising a local ceiling does not raise the website's allowance.
 [Configuration and error guide](docs/HARNESS.en.md#local-limits-and-errors).
 
@@ -321,14 +322,17 @@ Provider documentation retains detailed qualification results.
 
 | Provider / model ID | Browser during requests | Status |
 | --- | --- | --- |
-| DeepSeek · `deepseek-chat`, `deepseek-expert` | Not needed after manual sign-in | Small Harness tasks passed; repeated account restrictions occurred. No automatic renewal |
-| Qwen · `qwen3.8-omni-flash`, `qwen3.8-max` | Not needed after sign-in | Tested in Harness; Max reached a daily limit. [Session](docs/HARNESS.en.md#qwen-session) |
+| DeepSeek · `deepseek-chat`, `deepseek-expert` | Not needed after manual sign-in | Browserless HTTP; small Harness tasks passed; repeated account restrictions occurred. No automatic renewal |
+| Qwen · HTTP via `QWEN_MODELS` / `qwen-web` | HTTP: not needed after sign-in; `qwen-web`: connected tab | HTTP Flash/Max and the browser adapter verified; Max hit a daily limit. `qwen3.7-plus` is catalogued without a separate live check. [Session](docs/HARNESS.en.md#qwen-session) |
 | Kimi · `kimi-instant` | Not needed after capture | Experimental HTTP: reply, renewal and Harness `read` passed |
-| Kimi · `kimi-k3`, `kimi-k2.8` | Not needed after capture | Implemented, not qualified end to end: K3 refused free-user capacity; K2.8 was not attempted afterward. [Details](docs/KIMI.md) |
-| GLM · `glm-web` | Connected tab required | Previously tested with GLM-5.3-Flash; browserless access remains incomplete. [Blockers](docs/GLM.md) |
-| Kimi · `kimi-web` | Connected tab required | Older tab adapter; model selected on the website |
-| Mistral / Grok | Tab required | Experimental: Mistral continuation returned `429`; Grok capture did not complete |
-| Gemini / Antigravity | Official CLI | Request rejected by region in our test; working access not established |
+| Kimi · `kimi-k3`, `kimi-k2.8` | Not needed after capture | HTTP implemented, not qualified end to end: K3 refused free-user capacity; K2.8 was not attempted afterward. [Details](docs/KIMI.md) |
+| Kimi · `kimi-web` | Connected tab required | Browser adapter verified; large composer pastes (~4KB+, system+tools) become a TXT attachment on the site — confirmed. See `browser/README.md` and `.env.example` |
+| GLM · `glm-web` | Connected tab required | Browser adapter verified; browserless access remains incomplete. [Blockers](docs/GLM.md) |
+| Mistral · `mistral-web` | Connected tab required | Browser adapter verified — see `browser/README.md` |
+| Grok · `grok-web` | Connected tab required | Browser adapter verified — see `browser/README.md` |
+| ChatGPT · `chatgpt-web` | Connected tab required | Browser adapter verified — see `browser/README.md` |
+| Claude · `claude-web` | Connected tab required | Browser adapter verified (ProseMirror + `/api/*` / DOM fallback) — see `browser/README.md` |
+| Gemini · `gemini-web` / Antigravity CLI | `gemini-web`: connected tab; CLI: `agy` | Browser adapter verified. CLI was rejected by region in our test |
 
 All connections start disabled. Website versions, quotas and availability may
 change. Chinese providers also have limits; the exact Qwen Max daily allowance
@@ -350,7 +354,8 @@ not clear account restrictions or quotas. Inspect pauses with
 `python -m providers.access status`.
 [Resume rules](docs/ACCOUNT_SAFETY.md).
 
-The API binds to `127.0.0.1`; `session/` and `.env` are excluded from Git.
+The API binds to `127.0.0.1` by default (local only). Set `HOST=0.0.0.0` for
+network or Docker access. `session/` and `.env` are excluded from Git.
 Do not publish them, personalized Userscripts or budget credentials.
 Supported: text and emulated tool calls. Images, audio and video are not uploaded,
 even for models named Omni.
@@ -382,3 +387,8 @@ Locally: `python -m unittest discover -s tests -t . -v`.
 [Tsuev/opencode-deepseek](https://github.com/Tsuev/opencode-deepseek) and
 [sums001/Deepseek-API](https://github.com/sums001/Deepseek-API).
 Use accounts under each service's terms. [License](LICENSE).
+
+Browser adapters (userscripts, tab protocol, ChatGPT / Claude / Gemini / Qwen /
+Kimi / GLM / Mistral / Grok providers and related checks) are reworked in the
+[SimolSem/opencode-deepseek](https://github.com/SimolSem/opencode-deepseek) fork
+and contributed here via pull requests.

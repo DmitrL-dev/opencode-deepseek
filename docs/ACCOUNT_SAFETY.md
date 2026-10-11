@@ -59,13 +59,21 @@ a pause, but cancellation after dispatch without a verified result does. An acco
 reason to create another conversation, switch models, relogin automatically,
 rotate accounts, change fingerprints or try another regional route.
 
-A paused provider returns HTTP `403` with an error `code` and `retryable: false`
-before any client, browser job or CLI completion is created. If streaming headers
-are already sent, the first failure is a terminal SSE error; subsequent attempts
-get HTTP `403` before provider access. Invalid local tool responses use HTTP
-`400`, and missing sessions use `401` or a terminal SSE error, so standard SDKs cannot replay a turn on
-an upstream-shaped `5xx` error. No raw upstream error payload is published or
-stored in the pause file.
+A fresh upstream refusal returns HTTP `403` with an allowlisted `code`,
+`retryable: false`, and a `message` that names the provider, the mapped pause
+reason (never a raw upstream body), states that this bridge enabled a durable
+`providers.access` pause, and gives the exact
+`python -m providers.access resume PROVIDER` command.
+
+Later requests hit that local pause before any browser job or CLI process is
+created and return HTTP `400` (same allowlisted `code`, `retryable: false`) with
+an explicit “manual providers.access pause” message and the same resume command.
+Using `400` here avoids clients that rewrite every `403` into a generic “API key”
+warning. If streaming headers are already sent, the first failure is a terminal
+SSE error with the same wording. Invalid local tool responses use HTTP `400`,
+and missing sessions use `401` or a terminal SSE error, so standard SDKs cannot
+replay a turn on an upstream-shaped `5xx` error. No raw upstream error payload is
+published or stored in the pause file.
 
 Attempts, including valid tool continuations, are spaced by 30 seconds by
 default (`PROVIDER_MIN_INTERVAL`); the reservation is shared between processes
@@ -79,6 +87,13 @@ expiry during pacing and immediately before authorization to submit. Manual
 resume revokes the previous attempt; it cannot authorize an old job or let it
 pause a new owner. Rejected cached sessions are invalidated
 so a manual sign-in plus explicit resume can load the new token.
+
+Browser tab transport is different for most operational failures: captcha,
+observe/send/editor/tab errors and other tab-visible bridge problems fail that
+turn without writing a durable pause. Inspect and fix the normal website UI,
+then the next agent request may proceed without `providers.access resume`.
+Non-200 completion status (quota/access) and uncertain cancellation after
+dispatch still pause and still require an explicit resume.
 
 ## Manual recovery
 
@@ -120,10 +135,13 @@ establish account safety. Keep `TOOLCALL_FORMAT_REPAIR=0` and
 model generation. The following changes are qualified using offline transports
 and an isolated Harness CLI, not by further requests to the restricted account.
 
-Stateless OpenAI clients now continue a saved DeepSeek conversation when their
-history exactly matches a delivered reply. Only new tool results/user messages
-and current tool instructions are sent. A private SQLite file in `session/`
-stores history hashes and provider conversation IDs, never message bodies.
+Stateless OpenAI clients continue a saved provider conversation when their
+history exactly matches a delivered reply. This applies to DeepSeek and to
+opt-in web providers (including Qwen browser tab bridge): only new tool
+results/user messages and current tool instructions are sent, so the browser
+tab resumes `/c/<id>` instead of opening another chat with the full system
+prompt. A private SQLite file in `session/` stores history hashes and provider
+conversation IDs, never message bodies.
 Links are reserved atomically before dispatch. A reservation is released only
 when the current request fails with a proven absence of HTTP dispatch. Once any
 HTTP request was dispatched, or after a process crash, the link stays consumed. Unknown, edited, compacted,
@@ -144,7 +162,7 @@ older file-hash implementation. Such histories stop locally; the migration
 does not create a new chat, reset usage, or clear provider pauses. Plain
 DeepSeek SSE is buffered so incomplete replies cannot become resumable history.
 A stateless conversation defaults to stopping after 20 accepted replies.
-`DEEPSEEK_MAX_CONVERSATION_REPLIES` configures this cap (integer 1..1000).
+`CONVERSATION_MAX_REPLIES` configures this cap (integer 1..1000).
 Raising it preserves existing counts and one-use links. This is a safety cap,
 not unlimited autonomous operation; continuing a capped/compacted task needs a
 separate deliberate workflow, not an automatic new-chat fallback.

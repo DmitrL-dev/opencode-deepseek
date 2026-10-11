@@ -14,6 +14,7 @@ from unittest.mock import patch
 import httpx
 
 from providers import tab_bridge
+from providers.access import AccessGuard, ProviderRejected
 from providers.common import ProviderUnavailable
 from server import api, config
 from server.schemas import ChatCompletionRequest
@@ -129,12 +130,46 @@ class BrokerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(tab_bridge, "token_path", return_value=Path(directory)/"token"):
             destination = tab_bridge.export_scripts()
             token = (Path(directory)/"token").read_text()
-            text = (destination/"opencode-controller.user.js").read_text()
+            text = (destination/"opencode-controller.user.js").read_text(encoding="utf-8")
             self.assertEqual(text.count(token), 1)
             self.assertIn('TOKEN === "__BRIDGE_TOKEN__"', text)
             for file in destination.iterdir():
                 self.assertEqual(file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+
+    def test_tab_visible_bridge_failure_does_not_durable_pause(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        guard = AccessGuard(Path(directory.name) / "pauses.json", interval=0)
+        client = tab_bridge.TabClient("qwen")
+        with patch.dict(os.environ, {"BROWSER_BRIDGE_ENABLED": "1"}), \
+             patch.object(tab_bridge, "broker") as broker, \
+             patch("providers.tab_bridge.provider_attempt", guard.attempt):
+            broker.submit.return_value = {
+                "error": "Provider response could not be observed",
+            }
+            with self.assertRaises(ProviderUnavailable) as err:
+                client.chat("marker")
+            self.assertTrue(getattr(err.exception, "clear_without_pause", False))
+            self.assertEqual(guard.status(), {})
+            guard.check("qwen")
+
+    def test_browser_quota_status_still_durable_pauses(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        guard = AccessGuard(Path(directory.name) / "pauses.json", interval=0)
+        client = tab_bridge.TabClient("qwen")
+        with patch.dict(os.environ, {"BROWSER_BRIDGE_ENABLED": "1"}), \
+             patch.object(tab_bridge, "broker") as broker, \
+             patch("providers.tab_bridge.provider_attempt", guard.attempt):
+            broker.submit.return_value = {"status": 429, "body": "", "path": "/"}
+            with self.assertRaises(ProviderUnavailable) as err:
+                client.chat("marker")
+            self.assertFalse(getattr(err.exception, "clear_without_pause", False))
+            # Abort converts the annotated failure into a durable pause.
+            with self.assertRaises(ProviderRejected):
+                guard.check("qwen")
+            self.assertEqual(guard.status().get("qwen"), "quota_exceeded")
 
 
 class TabApiTests(unittest.IsolatedAsyncioTestCase):
@@ -309,6 +344,29 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
                     choice = response.json()['choices'][0]
                     self.assertEqual(choice['message']['tool_calls'][0]['function']['name'],'read')
                     self.assertEqual(choice['finish_reason'],'tool_calls')
+
+    async def test_tab_visible_failure_is_400_without_pause_next_turn_may_retry(self):
+        api.guard.resume("qwen")
+        with patch.dict(os.environ, {"BROWSER_BRIDGE_ENABLED": "1"}), \
+             patch.dict(config.MODEL_MAP, {"qwen-web": "default"}), \
+             patch.dict(config.OPTIONAL_MODEL_PROVIDERS, {"qwen-web": "qwen"}), \
+             patch.object(api, "build_provider_client", return_value=tab_bridge.TabClient("qwen")), \
+             patch.object(tab_bridge.broker, "submit", return_value={
+                 "error": "Provider response could not be observed",
+             }):
+            first = await self.client.post("/v1/chat/completions", json={
+                "model": "qwen-web",
+                "messages": [{"role": "user", "content": "marker"}],
+            })
+            second = await self.client.post("/v1/chat/completions", json={
+                "model": "qwen-web",
+                "messages": [{"role": "user", "content": "retry"}],
+            })
+        self.assertEqual(first.status_code, 400)
+        self.assertNotEqual(first.json()["error"].get("code"), "upstream_failure")
+        # Second request is not blocked by a durable pause (would be 403).
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(api.guard.status(), {})
 
     async def test_failed_grok_terminal_never_becomes_tool_calls(self):
         tools = [{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]

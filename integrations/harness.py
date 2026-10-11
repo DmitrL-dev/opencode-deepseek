@@ -22,7 +22,7 @@ from providers.kimi_models import MODELS as KIMI_MODELS, PUBLIC_MODELS as KIMI_P
 
 
 ROUTE = "local-browser-bridge"
-PROVIDERS = {"deepseek", "qwen", "glm", "kimi", "grok", "mistral", "gemini"}
+PROVIDERS = {"deepseek", "qwen", "glm", "kimi", "grok", "mistral", "gemini", "chatgpt", "claude"}
 BROWSERLESS_PROVIDERS = {"deepseek", "qwen", "gemini"}
 LABELS = {
     "deepseek-chat": "DeepSeek Chat · web",
@@ -34,8 +34,16 @@ LABELS = {
     "kimi-instant": "Kimi Instant · web",
     "grok-web": "Grok · experimental",
     "mistral-web": "Mistral · experimental",
+    "qwen-web": "Qwen · selected website model",
+    "gemini-web": "Gemini · selected website model",
+    "chatgpt-web": "ChatGPT · selected website model",
+    "claude-web": "Claude · selected website model",
 }
 LABELS.update({spec['public_id']: spec['label'] for spec in KIMI_MODELS.values()})
+BRIDGE_ONLY_MODELS = frozenset({
+    "qwen-web", "gemini-web", "grok-web", "mistral-web", "glm-web", "kimi-web",
+    "chatgpt-web", "claude-web",
+})
 
 
 def local_url(value: str) -> str:
@@ -83,8 +91,9 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
     # Validate the entire advertised catalog before excluding any provider.
     if without_browser:
         models = [model for row, model in zip(rows, models)
-                  if row["owned_by"] in BROWSERLESS_PROVIDERS
-                  or (row['owned_by'] == 'kimi' and row['id'] in KIMI_PUBLIC_MODELS)]
+                  if row["id"] not in BRIDGE_ONLY_MODELS
+                  and (row["owned_by"] in BROWSERLESS_PROVIDERS
+                       or (row['owned_by'] == 'kimi' and row['id'] in KIMI_PUBLIC_MODELS))]
         if not models:
             raise ValueError("Bridge advertises no browserless models for --without-browser")
     return models

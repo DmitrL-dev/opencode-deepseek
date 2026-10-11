@@ -6,7 +6,9 @@ import base64
 import asyncio
 import hmac
 import json
+import logging
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -17,13 +19,71 @@ from typing import Callable
 
 from chat_protocol import Reply
 from settings import ROOT
-from .browser_protocol import glm_answer, grok_answer, mistral_answer
+from .browser_protocol import (
+    chatgpt_answer, chatgpt_conversation_path, claude_answer, claude_conversation_path,
+    gemini_answer, gemini_conversation_path, gemini_paths_compatible,
+    glm_answer, grok_answer, mistral_answer, qwen_answer, qwen_conversation_path,
+)
 from .kimi_protocol import kimi_answer
 from .common import BufferedStream, ProviderUnavailable, completion_timeout
 from .access import provider_attempt, current_attempt, ProviderRejected
 from .conversations import decode, encode
 
-BROWSER_PROVIDERS = frozenset(("grok", "mistral", "kimi", "glm"))
+BROWSER_PROVIDERS = frozenset(("grok", "mistral", "kimi", "glm", "qwen", "gemini", "chatgpt", "claude"))
+_log = logging.getLogger(__name__)
+_SAFE_BRIDGE_DETAIL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 .,:;!?_+/'\-]{0,159}$")
+_BRIDGE_PROTOCOL = (
+    ("browser verification", "browser_verify"),
+    ("did not return an SSE", "browser_json"),
+    ("no conversation path", "browser_path"),
+    ("empty completion", "browser_empty"),
+    ("disconnected before", "browser_incomplete"),
+    ("send control is unavailable", "browser_send"),
+    ("did not retain", "browser_editor"),
+    ("could not be observed", "browser_observe"),
+    ("was not observed", "browser_observe"),
+    ("not observed over REST", "browser_observe"),
+    ("observation stalled", "browser_observe"),
+    ("observation failed", "browser_observe"),
+    ("unsent draft", "browser_draft"),
+    ("Tab unavailable", "browser_tab"),
+    ("rejected access or quota", "browser_status"),
+    ("changed the resumed conversation", "browser_route"),
+    ("did not complete the request", "browser_timeout"),
+)
+# Fixed bridge messages that still warrant a durable pause + manual resume.
+# Everything else is visible in the signed-in tab; the turn fails without pause.
+_BRIDGE_PAUSE = (
+    "rejected access or quota",
+)
+
+
+def _bridge_detail(value):
+    """Log/raise only short fixed bridge messages; never free-form page text."""
+    if isinstance(value, str) and _SAFE_BRIDGE_DETAIL.fullmatch(value):
+        return value
+    return None
+
+
+def _annotate_bridge_failure(exc, detail=None):
+    """Attach allowlisted diagnostics; skip durable pause for tab-visible failures."""
+    if not isinstance(exc, ProviderUnavailable):
+        return exc
+    if not getattr(exc, "phase", None):
+        exc.phase = "browser_result"
+    text = detail or str(exc)
+    if not getattr(exc, "protocol", None):
+        for needle, token in _BRIDGE_PROTOCOL:
+            if needle in text:
+                exc.protocol = token
+                break
+        else:
+            exc.protocol = "browser_bridge"
+    # Quota/access status still pauses. Captcha, observe/send/tab errors do not —
+    # the user inspects the normal site UI and the next agent turn may retry.
+    if not any(needle in text for needle in _BRIDGE_PAUSE):
+        exc.clear_without_pause = True
+    return exc
 
 
 def bridge_enabled():
@@ -214,14 +274,22 @@ broker = Broker()
 
 
 def parse_browser_result(provider, result, path=None, prompt=None):
-    if not isinstance(result, dict) or result.get("error"):
+    if not isinstance(result, dict):
         raise ProviderUnavailable(f"{provider} browser did not complete the request")
+    if result.get("error"):
+        detail = _bridge_detail(result.get("error"))
+        raise ProviderUnavailable(
+            f"{provider} browser did not complete the request"
+            + (f": {detail}" if detail else "")
+        )
     if result.get("status") != 200:
         raise ProviderUnavailable(f"{provider} rejected access or quota; inspect its normal browser tab")
     reference = result.get("path")
     if path is not None and reference != path:
-        raise ProviderUnavailable("Browser changed the resumed conversation")
-    token = encode(provider, "default", reference)
+        # Gemini AI Mode: first turn stores /app/aimode while the tab still
+        # reports /search — same thread, not a route change.
+        if provider != "gemini" or not gemini_paths_compatible(path, reference):
+            raise ProviderUnavailable("Browser changed the resumed conversation")
     encoded = result.get("body")
     if not isinstance(encoded, str) or len(encoded) > 12 * 1024 * 1024:
         raise ProviderUnavailable("Invalid browser response size")
@@ -231,6 +299,18 @@ def parse_browser_result(provider, result, path=None, prompt=None):
         raise ProviderUnavailable("Invalid browser response encoding") from None
     if len(body) > 8 * 1024 * 1024:
         raise ProviderUnavailable("Browser response exceeded the size limit")
+    if provider == "qwen":
+        # SPA may still show "/" when the stream already carries chat_id.
+        reference = qwen_conversation_path(body, reference)
+    elif provider == "chatgpt":
+        # SPA may still show "/" until the stream carries conversation_id.
+        reference = chatgpt_conversation_path(body, reference)
+    elif provider == "claude":
+        # New chats may still show "/" until the SPA/API exposes /chat/<id>.
+        reference = claude_conversation_path(body, reference)
+    elif provider == "gemini":
+        # SPA often stays on /app until the stream carries the conversation id.
+        reference = gemini_conversation_path(body, reference)
     if provider in ("glm", "grok"):
         turn = result.get("request_turn")
         if (not isinstance(turn, dict) or set(turn) != {"chat_id", "prompt", "endpoint"}
@@ -248,21 +328,62 @@ def parse_browser_result(provider, result, path=None, prompt=None):
                 raise ProviderUnavailable("Unexpected Grok request endpoint")
         elif turn["endpoint"] not in ("/api/chat/completions", "/api/v2/chat/completions"):
             raise ProviderUnavailable("Unexpected GLM request endpoint")
+    token = encode(provider, "default", reference)
     if provider == "glm":
         text = glm_answer(body)
     elif provider == "grok":
         text = grok_answer(body, reference.rsplit("/", 1)[-1])
+    elif provider == "qwen":
+        text = qwen_answer(body)
+    elif provider == "gemini":
+        text = gemini_answer(body, prompt)
+    elif provider == "chatgpt":
+        text = chatgpt_answer(body)
+    elif provider == "claude":
+        text = claude_answer(body, prompt)
     elif provider == "mistral":
-        if not body.lstrip().startswith(b"15:"):
-            raise ProviderUnavailable("Mistral browser response lacks verifiable turn binding")
         request_turn = result.get("request_turn")
-        if path is not None and (not isinstance(request_turn, dict)
-                                 or request_turn.get("chat_id") != reference.rsplit("/", 1)[-1]):
-            raise ProviderUnavailable("Mistral resumed request does not match its conversation")
-        text = mistral_answer(body, prompt, reference.rsplit("/", 1)[-1], request_turn)
+        # 15: patch streams are preferred; SSE (network or DOM fallback) is OK.
+        # Exclusive-tab capture may omit request_turn; bootstrap/prompt binds.
+        if path is not None and request_turn is not None:
+            if (not isinstance(request_turn, dict)
+                    or request_turn.get("chat_id") not in (None, reference.rsplit("/", 1)[-1])):
+                raise ProviderUnavailable("Mistral resumed request does not match its conversation")
+        chat_ref = reference.rsplit("/", 1)[-1] if isinstance(reference, str) and "/" in reference else None
+        text = mistral_answer(body, prompt, chat_ref, request_turn)
     else:
         text = kimi_answer(body, prompt, reference.rsplit("/", 1)[-1])
+    if provider in ("gemini", "claude") and _browser_text_echoes_prompt(text, prompt):
+        # DOM scrapes can echo the pasted OpenCode prompt before a real answer.
+        label = "Gemini" if provider == "gemini" else "Claude"
+        raise ProviderUnavailable(f"{label} browser returned the request prompt instead of an answer")
     return Reply(text, token)
+
+
+def _browser_text_echoes_prompt(text, prompt):
+    if not isinstance(text, str) or not isinstance(prompt, str) or not text.strip():
+        return False
+
+    def norm(value):
+        return " ".join(value.replace("\u200b", "").replace("\ufeff", "").split())
+
+    got, wanted = norm(text), norm(prompt)
+    if not got or not wanted:
+        return False
+    if got == wanted:
+        return True
+    if wanted.startswith(got) and len(got) >= 64:
+        return True
+    if got.startswith(wanted) and len(got) <= len(wanted) + 64:
+        return True
+    head = wanted[:120]
+    if len(head) >= 48 and head in got and len(got) <= len(wanted) + 96:
+        return True
+    if "Available tools, given as JSON Schema" in got:
+        return True
+    if "```tool_calls" in got and "You can call functions" in got:
+        return True
+    return False
 
 
 class TabClient:
@@ -273,7 +394,11 @@ class TabClient:
 
     def chat(self, prompt, conversation_id=None, model=None, thinking=False, search=False):
         with provider_attempt(self.provider, self.check_cancelled):
-            return self._chat(prompt, conversation_id, model, thinking, search)
+            try:
+                return self._chat(prompt, conversation_id, model, thinking, search)
+            except ProviderUnavailable as exc:
+                # Tab-visible bridge failures skip durable pause; quota/access still pause.
+                raise _annotate_bridge_failure(exc) from exc
 
     def _chat(self, prompt, conversation_id, model, thinking, search):
         if not bridge_enabled():
@@ -286,8 +411,53 @@ class TabClient:
         if model not in (None, "default"):
             raise ValueError("Browser providers use the account's selected web model")
         self.check_cancelled()
-        result = broker.submit(self.provider, prompt, path, self.check_cancelled, completion_timeout())
-        return parse_browser_result(self.provider, result, path, prompt)
+        try:
+            result = broker.submit(self.provider, prompt, path, self.check_cancelled, completion_timeout())
+        except ProviderUnavailable as exc:
+            # Timeouts never reach parse_browser_result; log them the same way.
+            detail = _bridge_detail(str(exc)) or type(exc).__name__
+            _log.warning(
+                "Browser result rejected: provider=%s detail=%s status=%s path=%s body_kind=%s",
+                self.provider, detail, None, path, "none",
+            )
+            raise _annotate_bridge_failure(exc, detail) from exc
+        try:
+            return parse_browser_result(self.provider, result, path, prompt)
+        except (ProviderUnavailable, ValueError) as exc:
+            # Fixed bridge/parser messages only; never log response bodies.
+            detail = _bridge_detail(str(exc)) or type(exc).__name__
+            body = result.get("body") if isinstance(result, dict) else None
+            kind = "none"
+            body_len = 0
+            shape = ""
+            if isinstance(body, str) and body:
+                try:
+                    raw = base64.b64decode(body, validate=True)
+                    body_len = len(raw)
+                    kind = "json" if raw[:1] in (b"{", b"[") else "sse_or_other"
+                    if self.provider == "gemini" and raw:
+                        probe = raw[:65536].decode("utf-8", errors="replace")
+                        shape = ",".join(flag for flag, ok in (
+                            ("lt", "<" in probe),
+                            ("u003c", "\\u003c" in probe),
+                            ("aim", "n6owBd" in probe or "data-subtree" in probe),
+                            ("tools", "Available tools, given as JSON Schema" in probe),
+                            ("wrb", "wrb.fr" in probe),
+                        ) if ok) or "empty_shape"
+                except (ValueError, UnicodeError):
+                    kind = "invalid_b64"
+            _log.warning(
+                "Browser result rejected: provider=%s detail=%s status=%s path=%s "
+                "body_kind=%s body_len=%s shape=%s",
+                self.provider, detail, result.get("status") if isinstance(result, dict) else None,
+                result.get("path") if isinstance(result, dict) else None, kind, body_len, shape,
+            )
+            if isinstance(exc, ValueError):
+                raise _annotate_bridge_failure(
+                    ProviderUnavailable(f"{self.provider} browser returned an invalid conversation route"),
+                    "invalid conversation route",
+                ) from exc
+            raise _annotate_bridge_failure(exc, detail)
 
     def stream(self, *args, **kwargs):
         return BufferedStream(self.chat(*args, **kwargs))
@@ -302,8 +472,8 @@ def export_scripts():
     for name in ("opencode-observer.user.js", "opencode-controller.user.js"):
         source = ROOT / "browser" / name
         target = destination / name
-        value = source.read_text().replace("__BRIDGE_TOKEN__", token, 1)
-        target.write_text(value)
+        value = source.read_text(encoding="utf-8").replace("__BRIDGE_TOKEN__", token, 1)
+        target.write_text(value, encoding="utf-8")
         target.chmod(0o600)
     return destination
 

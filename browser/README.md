@@ -1,10 +1,15 @@
 # Experimental providers using your signed-in browser
 
-Grok, Mistral, Kimi and GLM use the normal site's send handler in an existing
-signed-in tab. They do not copy cookies, passwords or Google OAuth tokens into
-the bridge. Each provider has a separate queue and scoped conversation ids.
-All four integrations are opt-in, use the selected web model, and remain
-experimental until verified with the provider's current frontend and account.
+Grok, Mistral, Kimi, GLM, ChatGPT, Qwen and Gemini use the normal site's send
+handler in an existing signed-in tab. They do not copy cookies, passwords or
+Google OAuth tokens into the bridge. Each provider has a separate queue and
+scoped conversation ids. All integrations are opt-in and use the selected web model. Browser adapters for
+Qwen, Kimi, GLM, Mistral, Grok, ChatGPT, Claude and Gemini have been live-checked;
+DeepSeek stays HTTP-only. Website frontends and account limits can still break a
+session at any time. For Qwen set `QWEN_ENABLED=1` and `QWEN_TRANSPORT=browser`
+(the default `http` transport still uses `python -m qwen.auth` plus the direct
+API client). For Gemini set `GEMINI_ENABLED=1` and `GEMINI_TRANSPORT=browser`
+(the default `cli` transport still uses the Antigravity CLI and `GEMINI_MODELS`).
 Kimi's JSON Connect parser binds root answer blocks to the matching user and
 successfully completed assistant message; thinking blocks are excluded.
 Only this verified wire text can be parsed as requested OpenCode tool calls;
@@ -22,15 +27,23 @@ content context and keeps its local pairing key out of page JavaScript.
    Never upload, commit or share that directory: the controller contains your
    local pairing key. The generic files in `browser/` contain no key.
 2. Install Userscripts and add the two exported `.user.js` files to its scripts
-   directory. Grant access only to `chat.z.ai`, `grok.com`, `chat.mistral.ai`, and
-   `www.kimi.com` (or `www.kimi.ai` for the international site); the bridge does not need access to Google sign-in pages.
+   directory. Grant access only to `chat.z.ai`, `grok.com`, `chat.mistral.ai`,
+   `www.kimi.com` (or `www.kimi.ai`), `chat.qwen.ai`, `chatgpt.com` (and
+   `chat.openai.com` if still used), `claude.ai`, `gemini.google.com`, and
+   `www.google.com`; the bridge does not need access to Google Account settings
+   pages beyond the chat UI.
    After adding or replacing files, open the Userscripts toolbar popup and wait
    until both script names appear. The extension must rescan externally edited
    files before the next page load, as described in its linked README.
    After upgrading the bridge, export and replace the scripts again. The current
-   controller is 0.2.5; older loaded scripts do not include all lease checks.
+   controller is 0.3.33 and observer is 0.3.17 (Claude thinking streamDone).
+   On a failed job the badge shows `ERROR: …` with the reason (hover for full text).
+   Older loaded scripts do not include all lease checks.
 3. Keep the API bound to `127.0.0.1:8000`. Set `BROWSER_BRIDGE_ENABLED=1` and enable
-   the provider you want, e.g. `GLM_ENABLED=1`, then restart the API.
+   the provider you want, e.g. `GROK_ENABLED=1`, `MISTRAL_ENABLED=1`,
+   `GLM_ENABLED=1`, `CHATGPT_ENABLED=1`, or `CLAUDE_ENABLED=1` (browser-only —
+   no transport flag). For Qwen use `QWEN_TRANSPORT=browser`; for Gemini
+   `GEMINI_TRANSPORT=browser`. Then restart the API.
 4. Open the provider in your normal signed-in browser and reload once to load
    both scripts. Click **Подключить вкладку к OpenCode**. Keep that tab open.
    Userscripts may separately ask for `127.0.0.1` access for local job exchange;
@@ -38,8 +51,14 @@ content context and keeps its local pairing key out of page JavaScript.
    that its observer is ready before sending a prompt.
    Do not use it for manual chat while a bridge request is running.
 5. Point an OpenAI-compatible client at the same `/v1` URL. Model ids are
-   `grok-web`, `mistral-web`, `kimi-web`, and `glm-web`. They deliberately do not
-   claim a specific model version; select the desired model in the site's UI.
+   `grok-web`, `mistral-web`, `kimi-web`, `glm-web`, `chatgpt-web`, `claude-web`,
+   `qwen-web`, and `gemini-web`. They deliberately do not claim a specific model
+   version; select the desired model in the site's UI. Stateless clients
+   (OpenCode) that resend full `messages[]` resume the same browser chat via the
+   local conversation cache; only the new user/tool turn is typed into the tab
+   after the first reply. Tab-visible failures (captcha, observe/send issues) do
+   not durable-pause the provider — fix the site UI and retry. Quota/access HTTP
+   status still pauses until `python -m providers.access resume <provider>`.
 
 Requests to the local job endpoints require the private pairing key and a
 loopback client address. There is no CORS grant. A claimed job is tied to one
@@ -86,7 +105,10 @@ model turn. A resumed conversation consumes allowance too.
   documents a conversation frequency limit and peak-load throttling. Selected
   membership features/models also consume a [shared credit pool](https://www.kimi.com/en/help/membership/membership-overview).
   Kimi Code limits apply to Kimi Code and must not be presented as this browser
-  chat adapter's quota.
+  chat adapter's quota. Large composer pastes (~4KB+, typical OpenCode
+  system+tools) are turned into a TXT attachment by the site instead of chat
+  text — keep bridge prompts shorter, or use the HTTP transport after session
+  capture.
 - **DeepSeek:** our account received a temporary restriction (`biz_code=5`,
   `user is muted`) on 2026-10-02. The exact trigger is unknown; no live retest
   was attempted after the safety changes. Automated website access can restrict
@@ -102,7 +124,53 @@ switch accounts or models, create another conversation to evade the quota,
 purchase credits or retry the rejected turn. Limits can change; check the
 provider's current plan before relying on it for sustained agent work.
 
+## ChatGPT
+
+ChatGPT is browser-only (`CHATGPT_ENABLED=1`, no transport flag). Pair a signed-in
+tab on `https://chatgpt.com/` (or `https://chat.openai.com/`), use model id
+`chatgpt-web`, and select the model in the site UI. The observer captures
+`/backend-api/conversation` and `/backend-api/f/conversation` SSE only for the
+active bridge job. Conversation tokens use `/c/<id>`. Captchas, Sentinel
+challenges and plan limits must be resolved in the normal tab; the bridge does
+not automate them. Live browser-adapter checks for this provider have passed;
+account quotas, captchas and Sentinel challenges still apply per session.
+
+## Claude
+
+Claude is browser-only (`CLAUDE_ENABLED=1`, no transport flag). Pair a signed-in
+tab on `https://claude.ai/`, use model id `claude-web`, and select the model in
+the site UI. The controller fills the ProseMirror composer
+(`[data-testid="chat-input"]`) and clicks Send. The observer captures only
+`/api/organizations/.../chat_conversations/<id>/completion` SSE for the active
+job (line-oriented `content_block_delta` / `message_stop`; thinking frames with
+`"stop_reason": null` are not treated as done). If the wire body is incomplete,
+the controller can finish from a late DOM scrape. Conversation tokens use
+`/chat/<id>`. Do not point OpenCode `small_model` / session-title at `claude-web`
+while a long turn is running — use another provider or disable title LLM
+(Harness already disables `session-title-llm`). Captchas and plan limits must be
+resolved in the normal tab. Live browser-adapter checks for this provider have
+passed; account quotas and challenges still apply per session.
+
 ## Gemini
+
+### Browser tab (`GEMINI_TRANSPORT=browser`)
+
+Set `GEMINI_ENABLED=1`, `GEMINI_TRANSPORT=browser`, and `BROWSER_BRIDGE_ENABLED=1`.
+Export and install the userscripts, open a signed-in Gemini tab — either
+`https://www.google.com/search?udm=50` (AI Mode empty chat) or
+`https://gemini.google.com/app` — connect it, and use model id `gemini-web`.
+The site UI selects the model. Conversation tokens use `/app/<id>` when the
+SPA exposes one (not Antigravity UUIDs).
+
+**Answer capture (intentional fork).** Other tab providers finish from a
+network completion body that already holds assistant text. Google AI Mode
+often streams `/async/folif` HTML with early prompt-echo shells, so the
+controller prefers a late DOM→Markdown scrape; the server still accepts
+StreamGenerate text, folif HTML, or that plain Markdown. Prefer wire-first
+again only when a late frame is stable plain text/Markdown without echo —
+see the comment above `gemini_answer` in `providers/browser_protocol.py`.
+
+### Antigravity CLI (`GEMINI_TRANSPORT=cli`, default)
 
 Install the [official Antigravity CLI](https://antigravity.google/docs/cli/)
 and complete its Google account sign-in yourself. Individual free access to the
@@ -149,10 +217,15 @@ qualifies that account/session and test, not all GLM models or arbitrary tasks.
 With both 0.2.4 scripts on 2026-10-02, Kimi passed an exact new completion and
 resumed SSE with the same conversation id, `stop` and `[DONE]`, followed by an
 OpenCode `plan` request with a completed native `read` and the exact owned fixture
-contents. This qualifies that account/session and controlled test. Mistral passed a new completion, while continuation was
-blocked by HTTP `429`; native agent qualification remains pending. Grok's normal
-frontend sent the owned prompt and displayed the exact response, but the bridge
-could not capture a completed network result, so its live API qualification
-failed. Mistral and Grok's partial checks must not be advertised as working agent integrations.
-Official Antigravity login and model listing succeeded, but completion was
-rejected by Google's regional eligibility check; further attempts stopped.
+contents. This qualifies that account/session and controlled test. Large Kimi
+composer pastes (~4KB+, typical OpenCode system+tools) are still turned into a
+TXT attachment by the site — confirmed on later live checks; keep bridge prompts
+shorter or use HTTP after session capture.
+As of 2026-10-11, live browser-adapter checks also passed for Mistral
+(`mistral-web`), Grok (`grok-web`), ChatGPT (`chatgpt-web`), Claude
+(`claude-web`), Qwen (`qwen-web`) and Gemini (`gemini-web`). Earlier partial
+failures (Mistral `429` on continuation, Grok capture gaps) do not overturn those
+later adapter checks; quotas and UI challenges still apply per account.
+Official Antigravity CLI login and model listing succeeded, but completion was
+rejected by Google's regional eligibility check; further CLI attempts stopped.
+Prefer `GEMINI_TRANSPORT=browser` / `gemini-web` when the tab path works.
