@@ -482,6 +482,10 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             raise DeepSeekStreamError("Invalid JSON in DeepSeek SSE event") from exc
         if not isinstance(obj, dict):
             raise DeepSeekStreamError("Unexpected DeepSeek SSE event shape")
+        if event == "hint" and obj.get("type") == "error":
+            if obj.get("finish_reason") == "context_length_exceeded":
+                raise ProviderRejected("conversation_context_exceeded")
+            raise _deepseek_rejection(obj)
         envelope = obj
         if isinstance(obj.get("v"), dict) and ("error" in obj["v"] or "code" in obj["v"]):
             envelope = obj["v"]

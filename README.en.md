@@ -179,6 +179,11 @@ and never resumes goals. Missing completion markers or interrupted captures are
 refused. An old failure without captured bytes cannot be reconstructed this way.
 [Details](docs/HARNESS.en.md#private-stream-diagnostics).
 
+DeepSeek `context_length_exceeded` means the provider conversation has exhausted
+its context. It is not a local budget or expired session; resetting counters or
+signing in again will not fix it. The bridge preserves history and stops, without
+creating a new chat. Migrating the goal requires a separate manual decision.
+
 ### If Harness stops
 
 | Message / symptom | Check |

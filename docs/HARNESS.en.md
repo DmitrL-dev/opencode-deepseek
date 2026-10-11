@@ -358,3 +358,13 @@ history would require a separately authorized request; no new generation is used
 
 Offline checks: `python -m unittest tests.test_stream_capture tests.test_deepseek_protocol tests.test_stream`.
 This feature has not been tested against a live account.
+
+### DeepSeek conversation context exhausted
+
+An SSE `hint` with `type=error` and `finish_reason=context_length_exceeded`
+means the provider conversation has reached its context limit. The bridge retains
+a `conversation_context_exceeded` pause. Signing in again, resetting local
+budgets or increasing the reply cap does not resolve the cause. No new chat or
+repeated generation is started automatically. Continuing requires a separately
+authorized migration of the goal and necessary context to a new conversation;
+preserve the old history.

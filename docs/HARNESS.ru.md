@@ -375,3 +375,12 @@ python -m deepseek.stream_diagnostics session/failed-streams/<id>.json
 
 Офлайн-проверки: `python -m unittest tests.test_stream_capture tests.test_deepseek_protocol tests.test_stream`.
 Живой аккаунт для проверки этой функции не использовался.
+
+### Исчерпан контекст диалога DeepSeek
+
+Событие SSE `hint` с `type=error` и `finish_reason=context_length_exceeded`
+означает предел контекста текущего диалога у провайдера. Мост сохраняет паузу
+`conversation_context_exceeded`; перевход, сброс локальных бюджетов или увеличение
+лимита ответов не устраняют её причину. Новый чат и повторная генерация
+автоматически не запускаются. Для продолжения нужен отдельно согласованный
+перенос цели и необходимого контекста в новый диалог. Старую историю сохраняют.

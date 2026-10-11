@@ -27,6 +27,7 @@ MESSAGES = {
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
     'quota_exceeded': 'The provider rejected the request because of a quota or usage limit.',
+    'conversation_context_exceeded': 'DeepSeek conversation context limit reached. This is not a local budget or session expiry. No automatic new chat or replay; preserve the goal before manually migrating to a new conversation.',
     'capacity_unavailable': 'The provider has no capacity for this free account right now. Automatic retries are disabled.',
     'access_denied': 'The provider denied access. Inspect sign-in, security and regional restrictions manually.',
     'session_expired': 'The provider rejected the session. Sign in manually before resuming.',

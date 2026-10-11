@@ -10,6 +10,32 @@ from tests.test_stream import event, snapshot, mock_client
 
 
 class StreamDiagnosticsTests(unittest.TestCase):
+    def test_context_limit_hint_is_a_durable_refusal_not_missing_terminal(self):
+        payload = event({'request_message_id':301,'response_message_id':302,'model_type':'default'}, 'ready')
+        payload += event({'type':'error','content':'PRIVATE_PROVIDER_DETAIL',
+                         'clear_response':True,'finish_reason':'context_length_exceeded'}, 'hint')
+        payload += event({'click_behavior':'none','auto_resume':False}, 'close')
+        client = mock_client(payload)
+        self.addCleanup(client.close)
+        client.access_guard = AccessGuard(path=None, interval=0)
+        with patch.object(client._http,'send',wraps=client._http.send) as send:
+            with self.assertLogs('deepseek.client',level='WARNING') as logs, self.assertRaises(ProviderRejected) as error:
+                client.chat('fixture',conversation_id='existing:298')
+            self.assertEqual(error.exception.code,'conversation_context_exceeded')
+            self.assertNotIn('PRIVATE_PROVIDER_DETAIL','\n'.join(logs.output))
+            self.assertEqual(client.access_guard.status(),{'deepseek':'conversation_context_exceeded'})
+            with self.assertRaises(ProviderRejected):
+                client.chat('must not replay',conversation_id='existing:298')
+            self.assertEqual(send.call_count,1)
+
+    def test_error_hint_cannot_be_hidden_by_terminal_status_or_unknown_reason(self):
+        from deepseek.client import _parse_sse
+        for prefix in ('', snapshot(status='FINISHED')):
+            for reason in ('context_length_exceeded','unknown'):
+                payload=prefix+event({'type':'error','finish_reason':reason},'hint')+event({},'finish')
+                with self.subTest(prefix=bool(prefix),reason=reason), self.assertRaises(ProviderRejected):
+                    list(_parse_sse(payload.splitlines()))
+
     def test_late_status_shape_is_useful_without_logging_upstream_data(self):
         completed = snapshot('PRIVATE_REPLY') + event({'p': 'response/status', 'v': 'FINISHED'})
         cases = [
