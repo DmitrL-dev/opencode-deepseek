@@ -187,6 +187,51 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         'Do not batch a mutation with commands that depend on its success. '
         'Wait for the mutation tool result before running its verifier.'
     )
+    instructions += (
+        '\n\nVerification reuse contract:\n'
+        '- Before proposing a test run, inspect the established execution results '
+        'and what changed since the most recent applicable successful run. Reuse '
+        'that result when the tested behavior, test code, dependencies, configuration '
+        'and execution environment have not materially changed.\n'
+        '- Repeat or broaden a check only for a concrete reason: a relevant code '
+        'or test change, a relevant dependency/configuration/environment change, '
+        'a new failure or unresolved concern that this check can investigate, '
+        'or an explicit user request for a fresh run. Record the concrete reason '
+        'in the tool description when that field exists; never invent a reason.\n'
+        '- A README-only wording change does not invalidate application/parser '
+        'tests unless those tests actually consume that documentation. Final '
+        'verification, confidence, a new turn, recovery, resume, a restart alone, '
+        'or preparing a summary is not a reason to rerun unchanged passing tests.\n'
+        '- Do not hide a repeated run inside a compound shell command with git '
+        'status, git diff, tail, or another check. Inspect status/diffs on their '
+        'own when the tests have already passed. A larger suite containing the '
+        'same tests also needs a concrete new justification. Prefer the smallest '
+        'check that resolves the actual change or uncertainty.\n'
+        '- Report reused evidence as previously observed, not freshly rerun. '
+        'Skipped tests are not passes. Unknown, failed, interrupted or ambiguous '
+        'results are not successful evidence; resolve their status without '
+        'automatically repeating actions. Stop-on-error and no-retry instructions '
+        'take precedence over any reason to test again.'
+    )
+    file_tools = {spec['name'] for spec in specs
+                  if isinstance(spec['parameters'], dict)
+                  and isinstance(spec['parameters'].get('properties'), dict)
+                  and 'file_path' in spec['parameters'].get('properties', {})}
+    if {'read', 'edit'} <= file_tools:
+        instructions += (
+            '\n\nFile-edit prerequisite enforced by the host: before calling `edit`, '
+            'successfully call the advertised `read` tool on that same `file_path` '
+            'in this session and wait for its actual result. Reading through `bash` '
+            '(cat, sed, grep, git diff, or any shell command) does NOT satisfy this '
+            'prerequisite. A file excerpt in a user message or previous summary '
+            'does not establish a successful `read` either. Do not batch the '
+            'prerequisite `read` and dependent `edit` in one reply. If a successful '
+            '`read` of the same file is already established, do not repeat it '
+            'unless the host requires a fresh read or the target content changed. '
+            'Never work around a read-before-edit rejection with bash, write, or '
+            'another mutation tool. If instructed to stop on errors, stop and '
+            'report the rejection instead of reading and retrying automatically.'
+        )
     if _forced_tool_name(tool_choice) is not None:
         instructions += f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
         instructions += " Reply with ONLY the fenced tool_calls block."

@@ -248,7 +248,26 @@ field. Existing session files are not automatically changed; no live login was
 performed for this verification.
 
 Before each reply, the model receives a compact required-field checklist derived
-from the schemas and a reminder to wait for a write result before its verifier.
+from the schemas. Harness `edit` requires a successful native `read` of the same
+`file_path` first. Viewing a file through `bash` (`cat`, `grep`, `git diff`, etc.)
+does not count. The dependent `edit` must wait for the `read` result in a separate
+reply; an already satisfied read must not be repeated without a reason. Harness's
+own guard stays enabled; using another writer to bypass it is forbidden. When
+instructed to stop on errors, the model must not automatically read and retry.
+The contract was checked offline and in one real Harness continuation: README
+`read` → successful result → a separate `edit` → normal `Completed`, with no tool
+errors. This does not guarantee full plan compliance: the same turn unnecessarily
+repeated an already passed test run despite instructions not to rerun unchanged tests.
+The verification reuse contract now keeps successful evidence valid until relevant
+code, tests, dependencies, configuration or environment change, a concrete new
+concern appears, or the user explicitly requests a fresh run. README wording alone,
+a new turn or "final verification" is not a reason to repeat tests. Repeats must
+not be hidden in commands with `git diff` or `git status`; a justified repeat
+states its reason in the command description. Reused results must be identified
+as previous evidence, and skipped tests are not passes. This contract is checked
+offline. It is model guidance, not a semantic shell blocker; compliance in a new
+live turn after this change has not yet been verified.
+The model also receives a reminder to wait for a write result before its verifier.
 This is guidance, not a guarantee: missing `file_path` or another required field
 still rejects the batch. The bridge never infers a path from content or another
 command and does not automatically retry.

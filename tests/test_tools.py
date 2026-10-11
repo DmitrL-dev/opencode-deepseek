@@ -23,6 +23,59 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_verification_reuse_contract_follows_actual_results(self):
+        messages = [
+            ChatMessage(role='user', content='Update README wording only'),
+            ChatMessage(role='tool', name='bash', tool_call_id='tests',
+                        content='83 passed, 126 skipped in 0.64s'),
+            ChatMessage(role='tool', name='edit', tool_call_id='docs',
+                        content='README.md updated successfully'),
+        ]
+        for choice in ('auto', 'none', 'required'):
+            prompt = messages_to_prompt(messages, FLAT_TOOLS, choice)
+            rule = prompt[prompt.index('Verification reuse contract:'):]
+            self.assertLess(prompt.index('83 passed, 126 skipped'), prompt.index(rule))
+            for required in ('README-only wording change', 'compound shell command',
+                             'git status', 'Final verification', 'explicit user request',
+                             'tool description', 'Skipped tests are not passes',
+                             'not freshly rerun', 'no-retry instructions'):
+                self.assertIn(required, rule)
+            self.assertTrue(prompt.endswith('Assistant:'))
+            self.assertEqual(prompt.count('83 passed, 126 skipped'), 1)
+
+    def test_reuse_contract_keeps_legitimate_revalidation_and_unknown_outcomes(self):
+        for result in ('FAILED', 'interrupted', 'exit status unknown', '20 passed'):
+            prompt = messages_to_prompt([ChatMessage(role='tool', name='bash',
+                                         tool_call_id='fixture', content=result)], FLAT_TOOLS)
+            rule = prompt.split('Verification reuse contract:', 1)[1]
+            for reason in ('code or test change', 'dependency/configuration/environment change',
+                           'new failure or unresolved concern', 'Unknown, failed, interrupted'):
+                self.assertIn(reason, rule)
+            self.assertIn('take precedence', rule)
+            self.assertIn('concrete new justification', rule)
+
+    def test_edit_requires_native_read_even_when_shell_already_displayed_file(self):
+        tools = [*FLAT_TOOLS, {'type': 'function', 'function': {'name': 'edit',
+                 'parameters': {'type': 'object', 'properties': {
+                     'file_path': {'type': 'string'}, 'old_string': {'type': 'string'},
+                     'new_string': {'type': 'string'}},
+                     'required': ['file_path', 'old_string', 'new_string']}}}]
+        messages = [ChatMessage(role='tool', name='bash', tool_call_id='shell',
+                    content='git diff /fixture: displayed file content')]
+        prompt = messages_to_prompt(messages, tools)
+        rule = prompt[prompt.index('File-edit prerequisite enforced by the host:'):]
+        self.assertIn('advertised `read` tool on that same `file_path`', rule)
+        self.assertIn('wait for its actual result', rule)
+        self.assertIn('does NOT satisfy', rule)
+        self.assertIn('Do not batch', rule)
+        self.assertIn('do not repeat it', rule)
+        self.assertIn('instead of reading and retrying automatically', rule)
+        self.assertTrue(prompt.endswith('Assistant:'))
+        # Do not invent dependencies for unrelated tools with the same names.
+        self.assertNotIn('File-edit prerequisite', messages_to_prompt(messages, FLAT_TOOLS))
+        tools[-1]['function']['parameters']['properties'].pop('file_path')
+        self.assertNotIn('File-edit prerequisite', messages_to_prompt(messages, tools))
+
     def test_prompt_separates_historical_results_from_next_assistant_turn(self):
         prompt = messages_to_prompt([ChatMessage(role='tool', name='read',
             tool_call_id='past', content='historical result')], FLAT_TOOLS)
