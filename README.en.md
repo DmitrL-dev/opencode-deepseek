@@ -378,6 +378,16 @@ CI covers Python 3.9/3.12, PoW WASM, shell/JavaScript and isolated browser fixtu
 Locally: `python -m unittest discover -s tests -t . -v`.
 [Real Harness CLI fixtures with mocked providers](docs/HARNESS.en.md#offline-verification).
 
+### Model identifiers
+
+`GET /v1/models` lists bare IDs and `provider/model` aliases, for example
+`qwen3.8-max` and `qwen/qwen3.8-max`, or `deepseek-chat` and
+`deepseek/deepseek-chat`. Both forms work with the API and Harness catalog.
+The prefix must match the provider and does not enable disabled models.
+DeepSeek aliases share the same history binding and continuation accounting:
+changing the spelling neither creates a new chat nor resets replay protection.
+Verified offline; this does not verify model access for a live account.
+
 **MIT · unofficial project.** Based on
 [Tsuev/opencode-deepseek](https://github.com/Tsuev/opencode-deepseek) and
 [sums001/Deepseek-API](https://github.com/sums001/Deepseek-API).

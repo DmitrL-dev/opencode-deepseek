@@ -378,6 +378,16 @@ CI проверяет Python 3.9/3.12, PoW WASM, shell/JavaScript и изоли�
 сценарии. Локально: `python -m unittest discover -s tests -t . -v`.
 [Сценарии настоящего Harness CLI с подменённым провайдером](docs/HARNESS.ru.md#проверка-без-аккаунтов).
 
+### Идентификаторы моделей
+
+`GET /v1/models` показывает короткие имена и алиасы `провайдер/модель`: например,
+`qwen3.8-max` и `qwen/qwen3.8-max`, `deepseek-chat` и `deepseek/deepseek-chat`.
+Оба варианта принимаются API и каталогом Harness. Префикс должен соответствовать
+провайдеру; он не включает отключённую модель. Алиасы DeepSeek используют одну
+привязку истории и один учёт продолжения: смена написания не создаёт новый чат
+и не сбрасывает защиту от повторов. Проверено офлайн; это не проверка доступа
+к моделям аккаунта.
+
 **MIT · неофициальный проект.** Основан на
 [Tsuev/opencode-deepseek](https://github.com/Tsuev/opencode-deepseek) и
 [sums001/Deepseek-API](https://github.com/sums001/Deepseek-API).
