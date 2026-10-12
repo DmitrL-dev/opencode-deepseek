@@ -39,6 +39,16 @@ class BrowserFailureSafetyTests(unittest.TestCase):
         with self.assertRaises(ProviderUnavailable):
             claude_answer((delta + 'data: {"type":"message_stop"}\n' + delta).encode())
 
+    def test_claude_truncation_is_not_success_even_with_terminal(self):
+        for frame in (
+            {'type': 'completion', 'completion': 'partial', 'stop_reason': 'max_tokens'},
+            {'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}},
+            {'choices': [{'delta': {'content': 'partial'}, 'finish_reason': 'length'}]},
+        ):
+            wire = 'data: ' + json.dumps(frame) + '\ndata: {"type":"message_stop"}\n'
+            with self.subTest(frame=frame), self.assertRaises(ProviderUnavailable):
+                claude_answer(wire.encode())
+
     @unittest.skipUnless(shutil.which('node'), 'Node required')
     def test_stale_dom_cannot_complete_a_new_request(self):
         run = subprocess.run(['node', str(Path(__file__).with_name('controller_stall_fixture.cjs'))],

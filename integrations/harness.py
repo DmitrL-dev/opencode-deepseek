@@ -73,7 +73,8 @@ def discover(base_url: str, without_browser=False) -> list:
 
 def catalog_models(catalog: dict, without_browser=False) -> list:
     rows = catalog.get("data") if isinstance(catalog, dict) else None
-    if not isinstance(rows, list) or not rows or len(rows) > 100:
+    # Bare ids plus owner/id aliases roughly double the catalog size.
+    if not isinstance(rows, list) or not rows or len(rows) > 200:
         raise ValueError("Bridge advertises no models or an invalid catalog; enable a provider first")
     models, seen = [], set()
     for row in rows:
@@ -81,19 +82,26 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
             raise ValueError("Invalid bridge model entry")
         model = row.get("id")
         owner = row.get("owned_by")
-        if (not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", model)
+        # Bare ids and matching `owner/id` aliases from the bridge catalog.
+        if (not isinstance(model, str)
+                or not re.fullmatch(
+                    r"(?:[a-z][a-z0-9-]{0,31}/)?[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", model)
                 or model in seen or not isinstance(owner, str) or owner not in PROVIDERS):
             raise ValueError("Invalid or duplicate bridge model identity")
+        bare = model.split("/", 1)[-1]
+        if "/" in model and not model.startswith(owner + "/"):
+            raise ValueError("Invalid or duplicate bridge model identity")
         seen.add(model)
-        models.append({"id": model, "name": LABELS.get(model, model + " · bridge"),
+        models.append({"id": model, "name": LABELS.get(bare, LABELS.get(model, model + " · bridge")),
                        "input": ["text"], "reasoningEfforts": False,
                        "contextWindow": 32768, "maxTokens": 4096})
     # Validate the entire advertised catalog before excluding any provider.
     if without_browser:
         models = [model for row, model in zip(rows, models)
-                  if row["id"] not in BRIDGE_ONLY_MODELS
+                  if row["id"].split("/", 1)[-1] not in BRIDGE_ONLY_MODELS
                   and (row["owned_by"] in BROWSERLESS_PROVIDERS
-                       or (row['owned_by'] == 'kimi' and row['id'] in KIMI_PUBLIC_MODELS))]
+                       or (row["owned_by"] == "kimi"
+                           and row["id"].split("/", 1)[-1] in KIMI_PUBLIC_MODELS))]
         if not models:
             raise ValueError("Bridge advertises no browserless models for --without-browser")
     return models
@@ -162,7 +170,8 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
         # attempt to evaluate !!js or infer a custom composition here.
         if (set(row) == {"insert"} and isinstance(row["insert"], list)
                 and len(row["insert"]) == 1 and isinstance(row["insert"][0], dict)
-                and row["insert"][0].get("id") == "local-bridge-budget"):
+                and row["insert"][0].get("id") in
+                {"local-bridge-budget", "local-bridge-shell-safety"}):
             continue
         if "id" not in row:
             raise ValueError("Install supports id-targeted patches only; use --output for custom profiles")

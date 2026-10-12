@@ -157,7 +157,7 @@ if GEMINI_ENABLED:
             OPTIONAL_MODEL_PROVIDERS[name] = "gemini"
 
 
-def model_provider(name: str) -> str:
+def _bare_owner(name: str) -> str:
     return OPTIONAL_MODEL_PROVIDERS.get(name, "qwen" if name in QWEN_MODEL_MAP else "deepseek")
 
 
@@ -187,9 +187,30 @@ def _default_qwen_http_model():
 DEFAULT_MODEL = "qwen-web" if qwen_uses_browser() else _default_qwen_http_model()
 
 
+def canonical_model(name: str):
+    """Bare public id for a known model, or None.
+
+    Accepts both `qwen3.8-omni-flash` and `qwen/qwen3.8-omni-flash` when the
+    author segment matches the model's provider.
+    """
+    if name in MODEL_MAP:
+        return name
+    if "/" not in name:
+        return None
+    owner, _, bare = name.partition("/")
+    if "/" in bare or bare not in MODEL_MAP or _bare_owner(bare) != owner:
+        return None
+    return bare
+
+
+def model_provider(name: str) -> str:
+    bare = canonical_model(name)
+    return _bare_owner(bare if bare is not None else name)
+
+
 def is_known_model(name: str) -> bool:
     """Whether `name` is a model id we accept (used to 404 unknown models)."""
-    return name in MODEL_MAP
+    return canonical_model(name) is not None
 
 
 def resolve_model_type(name: str) -> str:
@@ -197,4 +218,14 @@ def resolve_model_type(name: str) -> str:
 
     Caller must check `is_known_model` first; this raises KeyError otherwise.
     """
-    return MODEL_MAP[name]
+    bare = canonical_model(name)
+    if bare is None:
+        raise KeyError(name)
+    return MODEL_MAP[bare]
+
+
+def advertised_model_ids():
+    """Bare ids plus matching `owner/id` aliases for OpenAI-compatible clients."""
+    for name in MODEL_MAP:
+        yield name
+        yield f"{_bare_owner(name)}/{name}"

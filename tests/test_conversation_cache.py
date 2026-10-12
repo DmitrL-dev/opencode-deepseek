@@ -70,6 +70,20 @@ class ConversationTests(unittest.TestCase):
         self.assertNotIn('fixture result', self.cache.path.read_bytes().decode(errors='ignore'))
         self.assertEqual(self.cache.path.stat().st_mode & 0o777, 0o600)
 
+    def test_owner_prefixed_model_alias_reuses_the_same_history(self):
+        self.cache.remember(self.req, self.reply, '', self.calls, 0)
+        req = self.req.model_copy(update={
+            'model': 'deepseek/deepseek-chat', 'messages': self.history(),
+        })
+        continuation, steps = self.cache.prepare(req)
+        self.assertEqual(continuation.conversation_id, 'owned:2')
+        self.assertEqual(steps, 1)
+        # A different bare model still must not share the link.
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(self.req.model_copy(update={
+                'model': 'deepseek/deepseek-expert', 'messages': self.history(),
+            }))
+
     def test_unknown_changed_scope_and_edited_histories_never_start_chat(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
         for update in ({'model': 'deepseek-expert'}, {'user': 'other'}, {'tools': []},

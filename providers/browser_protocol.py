@@ -1028,6 +1028,11 @@ def _claude_delta_text(frame):
     kind = frame.get("type")
     if kind in ("error", "message_error") or frame.get("error"):
         raise ProviderUnavailable("Claude rejected the completion")
+    reason = frame.get("stop_reason")
+    if kind == "message_delta" and isinstance(frame.get("delta"), dict):
+        reason = frame["delta"].get("stop_reason")
+    if reason not in (None, "", "end_turn", "stop_sequence", "tool_use"):
+        raise ProviderUnavailable("Claude completion did not finish normally")
     if kind in ("message_stop", "message.completed", "message.end"):
         return None, True, False
     if kind == "content_block_delta":
@@ -1057,6 +1062,8 @@ def _claude_delta_text(frame):
             if isinstance(delta, dict) and isinstance(delta.get("content"), str):
                 chunk = delta["content"]
             finish = choice.get("finish_reason")
+            if finish not in (None, "stop", "tool_calls"):
+                raise ProviderUnavailable("Claude completion did not finish normally")
             return chunk, finish is not None, True
     return None, False, False
 
