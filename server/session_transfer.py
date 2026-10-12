@@ -131,16 +131,10 @@ class SessionTransfer:
                 self.ticket = None
                 self.result = 'failed'
                 fresh.save(self.path)
-                if record.get('pause') == 'session_expired':
-                    for key in ('pause', 'pending', 'dispatched', 'recoverable_auth'):
-                        record.pop(key, None)
-                    try:
-                        guard._save(state)
-                    except OSError:
-                        guard._failed.add('deepseek')
-                        raise
-                self.result = 'saved'
-            return {'status': 'saved', 'goal_resumed': False}
+                # A new credential is not evidence that account restrictions ended.
+                # Preserve pending ownership, pacing, usage and the entire pause record.
+                self.result = 'saved_paused' if record.get('pause') else 'saved'
+            return {'status': self.result, 'goal_resumed': False}
 
 
 transfer = SessionTransfer()

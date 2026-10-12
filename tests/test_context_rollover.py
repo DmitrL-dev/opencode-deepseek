@@ -286,9 +286,68 @@ class ContextRolloverTests(unittest.TestCase):
             list(_parse_sse(event({'type': 'error', 'finish_reason': 'context_length_exceeded'}, 'hint').splitlines()))
         self.assertFalse(error.exception.empty_context_refusal)
 
-    def test_missing_tool_result_and_oversized_instructions_refuse_checkpoint(self):
+    def test_missing_tool_result_and_unrepresentable_instructions_refuse_checkpoint(self):
         root = api.conversation_cache.path.parent / 'checkpoints'
-        for messages in (self.req.messages[:-1], [ChatMessage(role='user', content='x' * 33000)]):
+        for messages in (self.req.messages[:-1], [ChatMessage(role='user', content='x' * 200000)]):
             with self.subTest(length=len(messages)), self.assertRaises((ValueError, RuntimeError)):
                 checkpoint(self.req.model_copy(update={'messages': messages}), 'old:2', root)
         self.assertFalse(root.exists())
+
+
+class LargeCheckpointTests(unittest.TestCase):
+    def request(self, size=45000, results=120):
+        instruction = ChatMessage(role='user', content='Точная инструкция 😀 ' + 'x' * size)
+        messages = [ChatMessage(role='system', content='Preserve restrictions.'), instruction]
+        for i in range(results):
+            call = {'id': f'call_{i}', 'type': 'function', 'function': {
+                'name': 'read', 'arguments': json.dumps({'file_path': f'file-{i}.txt'})}}
+            messages.extend([ChatMessage(role='assistant', tool_calls=[call]),
+                ChatMessage(role='tool', tool_call_id=call['id'], content=('FAILED ' if i % 2 else 'OK ') + 'result' * 200)])
+        messages.append(instruction.model_copy())
+        return ChatCompletionRequest(model='deepseek-chat', messages=messages, tools=[{
+            'type': 'function', 'function': {'name': 'read', 'parameters': {
+                'type': 'object', 'properties': {'file_path': {'type': 'string'}}, 'required': ['file_path']}}}])
+
+    def test_large_packet_restores_instructions_and_indexes_every_exact_result(self):
+        import tempfile
+        from pathlib import Path
+        q = self.request()
+        with tempfile.TemporaryDirectory() as tmp:
+            text, filename = checkpoint(q, 'old:400', Path(tmp) / 'archives', max_text_bytes=60000)
+            data = json.loads(text.split('Checkpoint data:\n', 1)[1])
+            restored = [data['instruction_dictionary'][i] for i in data['instruction_sequence']]
+            self.assertEqual(restored, [m.model_dump(exclude_none=True) for m in q.messages
+                                       if m.role in ('system', 'developer', 'user')])
+            saved = json.loads(Path(filename).read_text())
+            self.assertEqual(saved['request'], q.model_dump(exclude_none=True))
+            messages = saved['request']['messages']
+            self.assertEqual(len(data['completed_result_refs']), 120)
+            for result, assistant, ordinal in data['completed_result_refs']:
+                self.assertEqual(messages[result]['tool_call_id'], messages[assistant]['tool_calls'][ordinal]['id'])
+                self.assertEqual(messages[result], q.messages[result].model_dump(exclude_none=True))
+            self.assertLessEqual(len(text.encode()), 60000)
+            self.assertIn('If the archive cannot be read, stop', text)
+            self.assertIn('Do not rerun any action', text)
+            if os.name != 'nt':
+                self.assertEqual(Path(filename).stat().st_mode & 0o777, 0o600)
+
+    def test_unique_instructions_above_32k_are_preserved_inline(self):
+        import tempfile
+        from pathlib import Path
+        q = self.request(size=40000, results=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            text, _ = checkpoint(q, 'old:400', Path(tmp) / 'archive')
+            data = json.loads(text.split('Checkpoint data:\n', 1)[1])
+            self.assertEqual(data['instructions'][1]['content'], q.messages[1].content)
+
+    def test_insufficient_budget_or_no_read_tool_refuses_before_writing(self):
+        import tempfile
+        from pathlib import Path
+        q = self.request()
+        for request, budget in [(q, 1000), (q.model_copy(update={'tools': None}), 60000),
+                                (q.model_copy(update={'tool_choice': 'none'}), 60000)]:
+            with self.subTest(budget=budget), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / 'archive'
+                with self.assertRaises(RuntimeError):
+                    checkpoint(request, 'old:400', root, max_text_bytes=budget)
+                self.assertFalse(root.exists())

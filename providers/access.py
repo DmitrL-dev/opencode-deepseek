@@ -28,6 +28,11 @@ PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'ge
 MESSAGES = {
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
     'local_prompt_too_large': 'The prompt exceeds the local per-request size limit (128 KiB). Shorten the context; waiting or resetting budgets does not help.',
+    'account_muted': 'DeepSeek temporarily disabled sending for this account. Signing in again does not clear this restriction.',
+    'account_banned': 'DeepSeek banned this account. Stop and review the restriction manually.',
+    'ip_restricted': 'DeepSeek restricted access from this network. Automatic retries are disabled.',
+    'gateway_challenge': 'The browser security gateway requires verification. This is not session expiry; automatic retries are disabled.',
+    'pow_rejected': 'DeepSeek rejected the proof of work. Automatic retries are disabled.',
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
     'quota_exceeded': 'The provider rejected the request because of a quota or usage limit.',
     'conversation_context_exceeded': 'DeepSeek conversation context limit reached. This is not a local budget or session expiry. No automatic new chat or replay; preserve the goal before manually migrating to a new conversation.',
@@ -449,7 +454,12 @@ class AccessGuard:
                     return ProviderRejected('upstream_failure')
                 record = state.setdefault(provider, {})
                 previous = record.get('pause')
-                record.setdefault('pause', error.code)
+                restriction = error.code in ('account_restricted', 'account_muted', 'account_banned', 'ip_restricted', 'gateway_challenge')
+                if restriction and previous == 'session_expired':
+                    record['pause'] = error.code
+                    record.pop('recoverable_auth', None)
+                else:
+                    record.setdefault('pause', error.code)
                 self._save(state)
                 # First latch is upstream-driven; later hits are the durable local pause.
                 local = (isinstance(exc, ProviderRejected) and exc.source == 'local_limit'
@@ -541,7 +551,7 @@ class Attempt:
         self.completed = False
         self.dispatched = False
         self.generation_dispatched = False
-        self.challenge_auth_rejected = False
+        self.pre_generation_auth_rejected = False
 
     @contextlib.contextmanager
     def bind(self):
@@ -673,7 +683,7 @@ class Attempt:
         # outcome remains durably pending even if writing the pause fails.
         if self.dispatched or isinstance(exc, Exception) and not isinstance(exc, ValueError) and not getattr(exc, 'before_dispatch', False):
             self.guard.reject(self.provider, exc or ProviderRejected(), owner=self.id)
-            if (self.provider == 'deepseek' and self.challenge_auth_rejected
+            if (self.provider == 'deepseek' and self.pre_generation_auth_rejected
                     and not self.generation_dispatched):
                 with self.guard._state() as state:
                     record = state[self.provider]

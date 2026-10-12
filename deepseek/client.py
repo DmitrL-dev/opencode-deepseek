@@ -37,6 +37,7 @@ from providers.access import ProviderRejected, rejection, guard, current_attempt
 from .auth import Session, get_session
 from .pow import DeepSeekPow
 from .stream_diagnostics import StreamCapture
+from . import refusals
 
 BASE = "https://chat.deepseek.com"
 COMPLETION_PATH = "/api/v0/chat/completion"
@@ -87,26 +88,23 @@ def _decode_cid(conversation_id: Optional[str]) -> tuple[Optional[str], Optional
     return match[1], int(match[2])
 
 
-def _deepseek_rejection(data):
-    """Classify observed site auth codes without relying on error wording."""
-    if isinstance(data, dict) and data.get("code") in (40002, 40003, "40002", "40003"):
-        return ProviderRejected("session_expired")
-    return rejection(data)
+def _deepseek_rejection(data, *, completion=False):
+    return refusals.classify(data, completion=completion)
 
 
-def _biz(data: dict) -> dict:
+def _biz(data: dict, *, completion=False) -> dict:
     """Unwrap DeepSeek's `data.biz_data` envelope, raising on API-level errors."""
     if not isinstance(data, dict):
         raise ProviderRejected()
     envelope = data.get("data")
     if data.get("code") != 0:
-        raise _deepseek_rejection(data)
+        raise _deepseek_rejection(data, completion=completion)
     if not isinstance(envelope, dict):
         raise ProviderRejected()
     if envelope.get("biz_code", 0) != 0:
-        if envelope.get("biz_code") == 5:
-            raise ProviderRejected("account_restricted")
-        raise rejection(envelope)
+        error = refusals.classify(envelope, completion=completion, business=True)
+        error.raw_code = refusals.number(data.get("code"))
+        raise error
     biz = envelope.get("biz_data")
     if not isinstance(biz, dict):
         raise ProviderRejected()
@@ -174,8 +172,8 @@ class DeepSeekClient:
             access_attempt.dispatch(kind="chat")
         r = self._http.post("/api/v0/chat_session/create", json={})
         self._diagnostic_status = r.status_code
-        r.raise_for_status()
-        return _chat_session_id(_biz(r.json()))
+        refusals.check_response(r, "create_chat")
+        return _chat_session_id(self._pre_generation_biz(r, access_attempt, "create_chat"))
 
     def _pow_header(self, target_path: str = COMPLETION_PATH, access_attempt=None) -> str:
         if access_attempt is None and getattr(self, "access_guard", None) is not None:
@@ -188,22 +186,28 @@ class DeepSeekClient:
             "/api/v0/chat/create_pow_challenge", json={"target_path": target_path}
         )
         self._diagnostic_status = r.status_code
-        r.raise_for_status()
-        data = r.json()
-        try:
-            challenge = _biz(data)["challenge"]
-        except ProviderRejected:
-            # Only an explicit protocol auth rejection proves this challenge
-            # failed before generation. Timeouts/HTTP errors remain ambiguous.
-            if (r.status_code == 200 and isinstance(data, dict)
-                    and data.get("code") in (40002, 40003, "40002", "40003")
-                    and access_attempt is not None
-                    and not access_attempt.generation_dispatched):
-                access_attempt.challenge_auth_rejected = True
-            raise
+        refusals.check_response(r, "challenge")
+        challenge = self._pre_generation_biz(r, access_attempt, "challenge")["challenge"]
         self._diagnostic_phase = "solve_challenge"
         with self._pow_lock:
             return self._pow.make_header(challenge)
+
+    @staticmethod
+    def _pre_generation_biz(response, access_attempt, phase="challenge"):
+        data = response.json()
+        try:
+            return _biz(data)
+        except ProviderRejected as error:
+            error.phase, error.http_status = phase, response.status_code
+            refusals.save(error, phase=phase, status=response.status_code)
+            # Only explicit auth codes before generation permit session refresh.
+            # Transport failures, generic refusals and later failures stay blocked.
+            if (response.status_code == 200 and isinstance(data, dict)
+                    and data.get("code") in (40002, 40003, "40002", "40003")
+                    and access_attempt is not None
+                    and not access_attempt.generation_dispatched):
+                access_attempt.pre_generation_auth_rejected = True
+            raise
 
     # --- public API ---------------------------------------------------------
 
@@ -294,6 +298,7 @@ class _Stream:
                     attempt.empty_context_refusal = True
                 phase = getattr(self._client, "_diagnostic_phase", "before_request")
                 status = getattr(self._client, "_diagnostic_status", None)
+                refusals.save(exc, phase=phase, status=status)
                 _log.warning("DeepSeek request stopped: phase=%s http_status=%s reason=%s",
                              phase, status, _failure_kind(exc))
                 self._capture.save(reason=_failure_kind(exc), session_id=self._session_id,
@@ -334,11 +339,11 @@ class _Stream:
             "POST", COMPLETION_PATH, json=body, headers=headers, timeout=httpx.Timeout(READ_TIMEOUT)
         ) as resp:
             self._client._diagnostic_status = resp.status_code
-            resp.raise_for_status()
+            refusals.check_response(resp, "completion")
             if "text/event-stream" not in resp.headers.get("content-type", "").lower():
                 error_body = "\n".join(bounded_lines(resp, self.access_attempt, started=stream_started))
                 try:
-                    _biz(json.loads(error_body))
+                    _biz(json.loads(error_body), completion=True)
                 except ValueError as exc:
                     raise ProviderRejected() from exc
                 raise ProviderRejected()
@@ -498,12 +503,12 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
         if isinstance(obj.get("v"), dict) and ("error" in obj["v"] or "code" in obj["v"]):
             envelope = obj["v"]
         if "data" in envelope and isinstance(envelope["data"], dict) and envelope["data"].get("biz_code", 0) != 0:
-            _biz(envelope)
+            _biz(envelope, completion=True)
         if event == "error" or "error" in envelope or envelope.get("code", 0) != 0:
             detail = envelope.get("error") or envelope
             if envelope.get("code", 0) != 0:
                 detail = envelope
-            raise _deepseek_rejection(detail)
+            raise _deepseek_rejection(detail, completion=True)
         if event == "finish":
             terminal = True
             meta.setdefault("finish_reason", "stop")

@@ -61,7 +61,7 @@ export function apply(ctx, config, {openSafari = openSessionSafari} = {}) {
     description:'Результат переноса сессии Safari', recordInput:false,
     handler:handler(async () => {
       const data = await request('/admin/session/deepseek/status');
-      const labels = {idle:'Перенос ещё не запускался.', waiting:'Ожидается сессия Safari.', saved:'Сессия сохранена. История и счётчики сохранены. Цель не возобновлялась.', expired:'Время переноса истекло. Повтори /deepseek-login.', cancelled:'Перенос отменён.', state_changed:'Состояние изменилось. Повтори /deepseek-login.', failed:'Перенос не завершён. Проверь состояние моста.'};
+      const labels = {idle:'Перенос ещё не запускался.', waiting:'Ожидается сессия Safari.', saved_paused:'Сессия сохранена; защитная пауза и незавершённый запрос сохранены. Проверьте ограничения аккаунта и исход запроса перед ручным продолжением. История и счётчики не изменены.', saved:'Сессия сохранена. История и счётчики сохранены. Цель не возобновлялась.', expired:'Время переноса истекло. Повтори /deepseek-login.', cancelled:'Перенос отменён.', state_changed:'Состояние изменилось. Повтори /deepseek-login.', failed:'Перенос не завершён. Проверь состояние моста.'};
       return labels[data.status] || 'Неизвестный результат переноса.';
     })});
   ctx.commands.register({definitionId:'local/bridge-budget-reset', name:'bridge-budget-reset',

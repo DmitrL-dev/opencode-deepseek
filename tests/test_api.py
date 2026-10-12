@@ -512,7 +512,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             second = await api.chat_completions(req)
             factory.assert_not_called()
             first_text = "".join([frame async for frame in first.body_iterator])
-            self.assertIn("account_restricted", first_text)
+            self.assertIn("account_muted", first_text)
             api.guard.resume("deepseek")
             second_text = "".join([frame async for frame in second.body_iterator])
         self.assertIn("fresh", second_text)

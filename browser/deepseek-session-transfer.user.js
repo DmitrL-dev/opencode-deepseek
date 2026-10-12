@@ -89,8 +89,8 @@
       if (status === 'new_login_required') {
         show('Этот токен уже отклонён. Выйдите и снова войдите в тот же аккаунт. Перенос продолжится после входа.'); return;
       }
-      if (status !== 'saved') throw new Error('unexpected status');
-      await finish('Сессия обновлена. История и счётчики сохранены. Цель в Harness не запускалась.', owner);
+      if (status !== 'saved' && status !== 'saved_paused') throw new Error('unexpected status');
+      await finish(status === 'saved_paused' ? 'Сессия обновлена. Защитная пауза сохранена: перевход не подтверждает снятие ограничений. Проверьте состояние аккаунта и исход запроса перед ручным продолжением. История и счётчики сохранены.' : 'Сессия обновлена. История и счётчики сохранены. Цель в Harness не запускалась.', owner);
     } catch (_) {
       await finish('Перенос не завершён. Проверьте доступ Userscripts к 127.0.0.1 и /deepseek-login-status. Автоматических повторов нет.', owner);
     } finally { busy = false; }

@@ -188,7 +188,15 @@ private token; installing the model catalog alone does not install these command
 On macOS, select **deepseek-login** in the Harness command menu or enter
 `/deepseek-login`. Safari opens; sign in to the same account if needed. The
 session transfers locally without an inspector or copying tokens. Check the
-result with `/deepseek-login-status` and resume your goal manually.
+result with `/deepseek-login-status`. `saved_paused` means the credentials were
+saved while the entire safety pause and pending request remain. Review account
+restrictions and the previous outcome first; refreshing credentials does not
+authorize replaying a generation.
+
+An explicit `40002/40003` refusal during chat creation or challenge retrieval,
+before generation, permits session refresh. Ambiguous network failures and
+refusals after generation dispatch still require investigation; no automatic replay.
+
 
 One-time setup: update the local budget plugin, install
 [DeepSeek session transfer](browser/deepseek-session-transfer.user.js) in the
@@ -469,9 +477,8 @@ are sent to the selected provider. The bridge validates responses and
 chat. Unknown history stops instead of silently creating a new chat.
 
 Refusal pauses survive restart. Client setup, ordinary sign-in and local budget
-reset do not clear them. The explicit Safari transfer can clear an authentication
-pause after a rejected challenge when there is no uncertain generation; it does
-not clear account restrictions or quotas. Inspect pauses with
+reset do not clear them. Safari transfer also preserves the entire pause, pending
+request and counters. A fresh token does not prove that account restrictions ended. Inspect pauses with
 `python -m providers.access status`.
 [Resume rules](docs/ACCOUNT_SAFETY.md).
 
@@ -598,3 +605,35 @@ commands to execute again. Incomplete/oversized context, archive failure or a ne
 refusal stops migration without automatic regeneration. Disabled mode retains the
 manual stop. Verified offline without account requests; migration happens on the
 next Harness request, not on a timer.
+
+Large histories no longer hit a separate 32 KiB instruction cap. The handoff
+budget includes tool schemas within the unchanged 131072-byte prompt ceiling.
+Every instruction retains its role, order and exact text; only identical
+instruction objects share dictionary storage with an ordered sequence of indexes.
+When result excerpts do not fit, the packet indexes **every** completed call/result
+and the latest reports. Full history and arguments remain in a private, pretty
+JSON archive (0600), without truncation. This mode requires an available `read`
+tool: the agent must read archived context before choosing further work, instead
+of rerunning commands to recover their results. Inaccessible archives or exact
+instructions plus indexes that still exceed the budget stop migration. This does
+not promise unlimited model context. Offline verification used a saved history of
+488 messages, 67 instructions and 218 results; the full API path made one mocked
+request to a new conversation. No account request was sent for this verification.
+
+### DeepSeek refusal diagnostics
+
+The bridge distinguishes invalid tokens (`40002/40003`), temporary sending
+restrictions (`account_muted`), bans (`account_banned`), IP restrictions
+(`ip_restricted`), gateway verification (`gateway_challenge`) and rejected PoW
+(`pow_rejected`). Code `5` denotes muted in the completion context; other
+operations have separate numeric namespaces. None of these errors triggers replay.
+
+Minimal private metadata is saved automatically under `session/refusal-diagnostics/`:
+time, phase, HTTP status, original numeric API/biz codes, gateway category and
+local attempt ID when available. Tokens, cookies, headers, response text and
+prompts are excluded. The directory is private, files use `0600`, and the limit
+is 64 files; existing evidence is not deleted. Full or unwritable storage emits
+a warning while the safety stop remains in effect. Do not publish this directory.
+
+Classification and pause retention were verified offline with synthetic responses.
+This does not verify account availability or guarantee freedom from restrictions.

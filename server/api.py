@@ -465,7 +465,9 @@ def _conversation_tool_chat(prompt, req, model_type):
             from .context_rollover import checkpoint
             _check_cancelled()
             handoff, archive = checkpoint(original, req.conversation_id,
-                conversation_cache.path.parent / 'context-checkpoints', local_limit=True)
+                conversation_cache.path.parent / 'context-checkpoints', local_limit=True,
+                max_text_bytes=131072 - len(messages_to_prompt([], original.tools,
+                    original.tool_choice, tools_continuation=False, provider=provider).encode('utf-8')) - 1024)
             migrated = original.model_copy(update={'conversation_id': None,
                 'messages': [ChatMessage(role='user', content=handoff)]})
             migration_prompt = messages_to_prompt(migrated.messages, migrated.tools,
@@ -504,7 +506,9 @@ def _conversation_tool_chat(prompt, req, model_type):
             from .context_rollover import checkpoint
             _check_cancelled()
             handoff, archive = checkpoint(original, req.conversation_id,
-                                          conversation_cache.path.parent / 'context-checkpoints')
+                                          conversation_cache.path.parent / 'context-checkpoints',
+                max_text_bytes=131072 - len(messages_to_prompt([], original.tools,
+                    original.tool_choice, tools_continuation=False, provider=provider).encode('utf-8')) - 1024)
             migrated = original.model_copy(update={'conversation_id': None,
                 'messages': [ChatMessage(role='user', content=handoff)]})
             migration_prompt = messages_to_prompt(migrated.messages, migrated.tools,
@@ -529,12 +533,12 @@ def _conversation_tool_chat(prompt, req, model_type):
             _bound_deepseek.reset(deepseek_token)
         if conversation_token is not None:
             _bound_conversation.reset(conversation_token)
-        # Pre-dispatch failures may release. DeepSeek challenge-auth rejection
+        # Pre-dispatch failures may release. DeepSeek create/chat challenge auth rejection
         # before generation is also pre-generation; an earlier generation
         # (e.g. format correction) keeps the claim used. Browser/HTTP dispatch
         # without that flag still consumes the reservation.
         if not succeeded and all(
-            not a.dispatched or (a.challenge_auth_rejected and not a.generation_dispatched)
+            not a.dispatched or (a.pre_generation_auth_rejected and not a.generation_dispatched)
             for a in binding["attempts"]
         ):
             conversation_cache.release(claim)
@@ -640,6 +644,14 @@ def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
     """Client-facing pause text. Never includes upstream bodies or secrets."""
     provider = model_provider(model)
     resume = f"python -m providers.access resume {provider}"
+    if exc.code in ('account_restricted', 'account_muted', 'account_banned',
+                    'ip_restricted', 'gateway_challenge', 'pow_rejected'):
+        origin = ('No request was sent to the upstream provider. '
+                  if getattr(exc, 'source', 'upstream') == 'local_pause' else '')
+        return (f"Provider `{provider}` is blocked (code={exc.code}): {exc} "
+                f"{origin}The durable safety pause requires human review of the restriction "
+                "and the previous request outcome. Signing in or resetting budgets does not "
+                "clear it. Do not resume or replay automatically.")
     if getattr(exc, "source", "upstream") == "local_limit":
         if getattr(exc, "paused", False):
             return (f"Local limit stopped `{provider}` after earlier requests of this step "
