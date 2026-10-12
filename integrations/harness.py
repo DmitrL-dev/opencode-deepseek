@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import copy
 import io
 import ipaddress
@@ -21,7 +22,7 @@ from providers.kimi_models import MODELS as KIMI_MODELS, PUBLIC_MODELS as KIMI_P
 
 
 ROUTE = "local-browser-bridge"
-PROVIDERS = {"deepseek", "qwen", "glm", "kimi", "grok", "mistral", "gemini"}
+PROVIDERS = {"deepseek", "qwen", "glm", "kimi", "grok", "mistral", "gemini", "chatgpt", "claude"}
 BROWSERLESS_PROVIDERS = {"deepseek", "qwen", "gemini"}
 LABELS = {
     "deepseek-chat": "DeepSeek Chat · web",
@@ -33,8 +34,16 @@ LABELS = {
     "kimi-instant": "Kimi Instant · web",
     "grok-web": "Grok · experimental",
     "mistral-web": "Mistral · experimental",
+    "qwen-web": "Qwen · selected website model",
+    "gemini-web": "Gemini · selected website model",
+    "chatgpt-web": "ChatGPT · selected website model",
+    "claude-web": "Claude · selected website model",
 }
 LABELS.update({spec['public_id']: spec['label'] for spec in KIMI_MODELS.values()})
+BRIDGE_ONLY_MODELS = frozenset({
+    "qwen-web", "gemini-web", "grok-web", "mistral-web", "glm-web", "kimi-web",
+    "chatgpt-web", "claude-web",
+})
 
 
 def local_url(value: str) -> str:
@@ -52,10 +61,17 @@ def local_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def api_token() -> str:
+    """The bridge's private /v1 bearer token (created on first use, never printed)."""
+    from server.api_auth import ensure_token
+    return ensure_token()
+
+
 def discover(base_url: str, without_browser=False) -> list:
     """Read the bridge catalog only; this does not probe account availability."""
     with httpx.Client(trust_env=False, follow_redirects=False, timeout=5) as client:
-        response = client.get(local_url(base_url) + "/models")
+        response = client.get(local_url(base_url) + "/models",
+                              headers={"Authorization": "Bearer " + api_token()})
         response.raise_for_status()
         if len(response.content) > 128 * 1024:
             raise ValueError("Bridge model catalog is too large")
@@ -64,7 +80,8 @@ def discover(base_url: str, without_browser=False) -> list:
 
 def catalog_models(catalog: dict, without_browser=False) -> list:
     rows = catalog.get("data") if isinstance(catalog, dict) else None
-    if not isinstance(rows, list) or not rows or len(rows) > 100:
+    # Bare ids plus owner/id aliases roughly double the catalog size.
+    if not isinstance(rows, list) or not rows or len(rows) > 200:
         raise ValueError("Bridge advertises no models or an invalid catalog; enable a provider first")
     models, seen = [], set()
     for row in rows:
@@ -72,30 +89,38 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
             raise ValueError("Invalid bridge model entry")
         model = row.get("id")
         owner = row.get("owned_by")
-        if (not isinstance(model, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", model)
+        # Bare ids and matching `owner/id` aliases from the bridge catalog.
+        if (not isinstance(model, str)
+                or not re.fullmatch(
+                    r"(?:[a-z][a-z0-9-]{0,31}/)?[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}", model)
                 or model in seen or not isinstance(owner, str) or owner not in PROVIDERS):
             raise ValueError("Invalid or duplicate bridge model identity")
+        bare = model.split("/", 1)[-1]
+        if "/" in model and not model.startswith(owner + "/"):
+            raise ValueError("Invalid or duplicate bridge model identity")
         seen.add(model)
-        models.append({"id": model, "name": LABELS.get(model, model + " · bridge"),
+        models.append({"id": model, "name": LABELS.get(bare, LABELS.get(model, model + " · bridge")),
                        "input": ["text"], "reasoningEfforts": False,
                        "contextWindow": 32768, "maxTokens": 4096})
     # Validate the entire advertised catalog before excluding any provider.
     if without_browser:
         models = [model for row, model in zip(rows, models)
-                  if row["owned_by"] in BROWSERLESS_PROVIDERS
-                  or (row['owned_by'] == 'kimi' and row['id'] in KIMI_PUBLIC_MODELS)]
+                  if row["id"].split("/", 1)[-1] not in BRIDGE_ONLY_MODELS
+                  and (row["owned_by"] in BROWSERLESS_PROVIDERS
+                       or (row["owned_by"] == "kimi"
+                           and row["id"].split("/", 1)[-1] in KIMI_PUBLIC_MODELS))]
         if not models:
             raise ValueError("Bridge advertises no browserless models for --without-browser")
     return models
 
 
-def provider_config(base_url: str, models: list) -> dict:
+def provider_config(base_url: str, models: list, token: str | None = None) -> dict:
     return {
         "displayName": "Local account bridge",
         "api": "openai-completions", "baseURL": local_url(base_url),
-        # A non-secret placeholder satisfies pi-ai for this keyless loopback API.
-        # Account credentials stay exclusively in the existing bridge.
-        "headers": {"Authorization": "Bearer unused"},
+        # The bridge /v1 token, not a provider credential. The profile file is
+        # written 0600; account credentials stay exclusively in the bridge.
+        "headers": {"Authorization": "Bearer " + (api_token() if token is None else token)},
         "retryPolicy": {"mode": "normal", "maxRetries": 0},
         "timeoutMs": 600000, "streamIdleTimeoutMs": 600000,
         "compat": {"supportsStore": False, "supportsDeveloperRole": False,
@@ -137,7 +162,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
     if without_browser and not models:
         raise ValueError("No browserless models selected for --without-browser")
     result = copy.deepcopy(document)
-    target_ids = {"llm-pi-ai", "session-title-llm"}
+    target_ids = {"llm-pi-ai", "session-title-llm", "agent-default-model"}
     selected_ids = {model["id"] for model in models}
     if default_model is not None:
         if default_model not in selected_ids:
@@ -150,6 +175,11 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
             raise ValueError("Unsupported Harness patch entry")
         # Nested patches and dynamic config require the Harness editor. Do not
         # attempt to evaluate !!js or infer a custom composition here.
+        if (set(row) == {"insert"} and isinstance(row["insert"], list)
+                and len(row["insert"]) == 1 and isinstance(row["insert"][0], dict)
+                and row["insert"][0].get("id") in
+                {"local-bridge-budget", "local-bridge-shell-safety"}):
+            continue
         if "id" not in row:
             raise ValueError("Install supports id-targeted patches only; use --output for custom profiles")
         key = row["id"]
@@ -161,7 +191,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
             raise ValueError("Dynamic Harness config needs manual editing: " + key)
         existing[key] = row
 
-    if without_browser and default_model is None and "agent-default-model" in existing:
+    if default_model is None and "agent-default-model" in existing:
         default = existing["agent-default-model"].get("config", {})
         provider = default.get("provider")
         if not isinstance(provider, str):
@@ -173,7 +203,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
                 raise ValueError("Dynamic or non-string owned default model cannot be checked for --without-browser; "
                                  "select an advertised --default-model explicitly")
             if model not in selected_ids:
-                raise ValueError("Existing default model is excluded by --without-browser; "
+                raise ValueError("Existing default model is absent from the selected catalog; "
                                  "select an advertised --default-model explicitly")
 
     def entry(key):
@@ -198,6 +228,7 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
     entry("session-title-llm")["disabled"] = True
     if default_model is not None:
         entry("agent-default-model")["config"] = {"provider": ROUTE, "model": default_model}
+        entry("agent-default-model")["disabled"] = False
     return result
 
 
@@ -247,7 +278,63 @@ def write_private(path: Path, data: bytes, before=None) -> Path | None:
     return backup
 
 
-def install(home: Path, profile: str, base_url: str, models: list, default_model=None,
+def default_home() -> Path:
+    """Harness home: DSH_HOME when set, else ~/.dsh (shared by every installer)."""
+    return Path(os.getenv("DSH_HOME", "").strip() or "~/.dsh").expanduser()
+
+
+def install_plugin_copy(home, name, sources) -> Path:
+    """Copy plugin files into the Harness home and return the entry path.
+
+    The profile then references a stable private copy, so moving or deleting
+    this repository cannot silently unload a protection plugin.
+    """
+    directory = Path(home) / "plugins" / "opencode-local-bridge" / name
+    if any(part.is_symlink() for part in (directory, *directory.parents) if part.exists()
+           and Path(home) in (part, *part.parents)):
+        raise ValueError("Refusing a symlinked plugin directory")
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    directory.chmod(0o700)
+    for source in sources:
+        source = Path(source)
+        target = directory / source.name
+        if target.is_symlink():
+            raise ValueError("Refusing a symlinked plugin file")
+        data = source.read_bytes()
+        if target.exists() and target.read_bytes() == data:
+            continue
+        descriptor, temporary = tempfile.mkstemp(prefix=".plugin-", dir=str(directory))
+        try:
+            with os.fdopen(descriptor, "wb") as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    return directory / Path(sources[0]).name
+
+
+@contextmanager
+def profile_lock(home, profile):
+    from providers.access import _file_lock
+    path = Path(home) / ('.bridge-install-' + profile + '.lock')
+    with path.open('a+') as lock:
+        os.chmod(path, 0o600)
+        _file_lock(lock)
+        try:
+            yield
+        finally:
+            _file_lock(lock, unlock=True)
+
+
+def install(home, profile, *args, **kwargs):
+    with profile_lock(home, profile):
+        return _install_unlocked(home, profile, *args, **kwargs)
+
+
+def _install_unlocked(home: Path, profile: str, base_url: str, models: list, default_model=None,
             without_browser=False):
     """Edit a standard initialized profile, retaining other provider settings."""
     directory = home / "profiles" / profile
@@ -274,7 +361,7 @@ def main(argv=None):
     parser.add_argument("--default-model", help="Explicitly select the default for new Harness sessions")
     parser.add_argument("--without-browser", action="store_true",
                         help="Select only advertised DeepSeek, Qwen and Gemini adapters")
-    parser.add_argument("--home", type=Path, default=Path(os.getenv("DSH_HOME", "").strip() or "~/.dsh").expanduser())
+    parser.add_argument("--home", type=Path, default=default_home())
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--install", choices=("desktop", "web", "headless"), metavar="PROFILE")
     mode.add_argument("--output", type=Path, help="Export a standalone YAML patch to a new file")

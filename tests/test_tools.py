@@ -1,10 +1,11 @@
 import json
 import re
 import unittest
+from unittest.mock import patch
 
 from server.openai_format import (
     ToolCallError, enforce_tool_choice, looks_truncated, messages_to_prompt,
-    parse_tool_calls, validate_tool_choice,
+    parse_tool_calls, validate_tool_choice, has_tool_call_markup,
 )
 from server.schemas import ChatMessage
 
@@ -23,6 +24,115 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_discovery_search_contract_on_resumed_harness_history(self):
+        messages = [ChatMessage(role='user', content='Check whether PR69 already has platform fixes'),
+                    ChatMessage(role='tool', name='bash', tool_call_id='prior',
+                                content='[exit code: 1] No marker matched')]
+        for continuation in (False, True):
+            prompt = messages_to_prompt(messages, FLAT_TOOLS, tools_continuation=continuation)
+            rule = prompt.split('Shell search contract:', 1)[1]
+            self.assertIn('Discovery searches', rule)
+            self.assertIn('even when you do not know beforehand', rule)
+            self.assertIn('Do not use plain grep for such discovery', rule)
+            self.assertIn('explicit assertion', rule)
+            self.assertIn('bridge_grep_optional -n -E', rule)
+            self.assertIn('failed git show must stop', rule)
+            self.assertIn('Preserve grep status 2', rule)
+            self.assertLess(prompt.index('[exit code: 1] No marker matched'), prompt.index('Shell search contract:'))
+
+    def test_verification_reuse_contract_follows_actual_results(self):
+        messages = [
+            ChatMessage(role='user', content='Update README wording only'),
+            ChatMessage(role='tool', name='bash', tool_call_id='tests',
+                        content='83 passed, 126 skipped in 0.64s'),
+            ChatMessage(role='tool', name='edit', tool_call_id='docs',
+                        content='README.md updated successfully'),
+        ]
+        for choice in ('auto', 'none', 'required'):
+            prompt = messages_to_prompt(messages, FLAT_TOOLS, choice)
+            rule = prompt[prompt.index('Verification reuse contract:'):]
+            self.assertLess(prompt.index('83 passed, 126 skipped'), prompt.index(rule))
+            for required in ('README-only wording change', 'compound shell command',
+                             'git status', 'Final verification', 'explicit user request',
+                             'tool description', 'Skipped tests are not passes',
+                             'not freshly rerun', 'no-retry instructions'):
+                self.assertIn(required, rule)
+            self.assertTrue(prompt.endswith('Assistant:'))
+            self.assertEqual(prompt.count('83 passed, 126 skipped'), 1)
+
+    def test_reuse_contract_keeps_legitimate_revalidation_and_unknown_outcomes(self):
+        for result in ('FAILED', 'interrupted', 'exit status unknown', '20 passed'):
+            prompt = messages_to_prompt([ChatMessage(role='tool', name='bash',
+                                         tool_call_id='fixture', content=result)], FLAT_TOOLS)
+            rule = prompt.split('Verification reuse contract:', 1)[1]
+            for reason in ('code or test change', 'dependency/configuration/environment change',
+                           'new failure or unresolved concern', 'Unknown, failed, interrupted'):
+                self.assertIn(reason, rule)
+            self.assertIn('take precedence', rule)
+            self.assertIn('concrete new justification', rule)
+
+    def test_edit_requires_native_read_even_when_shell_already_displayed_file(self):
+        tools = [*FLAT_TOOLS, {'type': 'function', 'function': {'name': 'edit',
+                 'parameters': {'type': 'object', 'properties': {
+                     'file_path': {'type': 'string'}, 'old_string': {'type': 'string'},
+                     'new_string': {'type': 'string'}},
+                     'required': ['file_path', 'old_string', 'new_string']}}}]
+        messages = [ChatMessage(role='tool', name='bash', tool_call_id='shell',
+                    content='git diff /fixture: displayed file content')]
+        prompt = messages_to_prompt(messages, tools)
+        rule = prompt[prompt.index('File-edit prerequisite enforced by the host:'):]
+        self.assertIn('advertised `read` tool on that same `file_path`', rule)
+        self.assertIn('wait for its actual result', rule)
+        self.assertIn('does NOT satisfy', rule)
+        self.assertIn('Do not batch', rule)
+        self.assertIn('do not repeat it', rule)
+        self.assertIn('instead of reading and retrying automatically', rule)
+        self.assertTrue(prompt.endswith('Assistant:'))
+        # Do not invent dependencies for unrelated tools with the same names.
+        self.assertNotIn('File-edit prerequisite', messages_to_prompt(messages, FLAT_TOOLS))
+        tools[-1]['function']['parameters']['properties'].pop('file_path')
+        self.assertNotIn('File-edit prerequisite', messages_to_prompt(messages, tools))
+
+    def test_prompt_separates_historical_results_from_next_assistant_turn(self):
+        prompt = messages_to_prompt([ChatMessage(role='tool', name='read',
+            tool_call_id='past', content='historical result')], FLAT_TOOLS)
+        boundary = prompt.index('The preceding transcript is past conversation data.')
+        self.assertLess(prompt.index('Tool (read, call_id=past): historical result'), boundary)
+        self.assertIn('Only the external host can execute tools', prompt[boundary:])
+        self.assertIn('Stop your response immediately after the closing tool_calls fence', prompt)
+        self.assertTrue(prompt.endswith('Assistant:'))
+
+    def test_required_fields_reminder_uses_schema_without_inventing_values(self):
+        tools = [{'name': 'write', 'parameters': {'type': 'object',
+                  'required': ['file_path', 'content'], 'properties': {
+                  'file_path': {'type': 'string'}, 'content': {'type': 'string'}}}},
+                 {'name': 'custom', 'parameters': {'type': 'object',
+                  'required': ['destination_id'], 'properties': {'destination_id': {'type': 'string'}}}}]
+        prompt = messages_to_prompt([ChatMessage(role='user', content='fixture')], tools)
+        footer = prompt.split('Required top-level argument fields', 1)[1]
+        self.assertIn('"required_argument_fields": ["file_path", "content"]', footer)
+        self.assertIn('"required_argument_fields": ["destination_id"]', footer)
+        self.assertIn('do not guess', footer)
+        self.assertIn('Wait for the mutation tool result', footer)
+        self.assertNotIn('/fixture', footer)
+        with self.assertRaises(ToolCallError):
+            parse_tool_calls(block([{'name': 'write', 'arguments': {'content': 'data'}}]),
+                             {'write'}, flat_argument_tools=tools)
+
+    def test_generic_call_array_can_request_correction_but_never_execute(self):
+        payload = [{"name": "bash", "arguments": {"command": "pwd && ls -la"}}]
+        for language in ('json', ''):
+            text = 'I will explore the project.\n```' + language + '\n' + json.dumps(payload) + '\n```'
+            self.assertTrue(has_tool_call_markup(text, {'bash'}))
+            self.assertFalse(has_tool_call_markup(text, {'read'}))
+            self.assertFalse(has_tool_call_markup(text))
+            self.assertEqual(parse_tool_calls(text, {'bash'}), (text, None))
+        for body in ('[]', '{}', '[{"name":"bash","arguments":{},"extra":true}]',
+                     '[{"name":"bash","arguments":{},"name":"read"}]',
+                     '[{"name":"bash","arguments":{}} ,',
+                     '[{"name":"bash","arguments":{}},{"name":"unknown","arguments":{}}]'):
+            self.assertFalse(has_tool_call_markup('```json\n' + body + '\n```', {'bash'}))
+
     def test_missing_outer_array_closer_preserves_complete_objects_only(self):
         items = [{"name": "todo_write", "arguments": {"todos": [
             {"content": 'quoted "todo" and \\slash }]}', "status": "pending"}]}}]
@@ -193,6 +303,52 @@ class ToolProtocolTests(unittest.TestCase):
                                         tools=[{"name": "write", "parameters": {}}], tool_choice=choice)
             self.assertTrue(forced.rsplit('Assistant:', 1)[0].rstrip().endswith(
                 'Reply with ONLY the fenced tool_calls block.'))
+
+    def test_light_tool_instructions_use_reminder_only_on_continuation(self):
+        tools = [{
+            "type": "function", "function": {"name": "write", "parameters": {
+                "type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}}]
+        first = messages_to_prompt(
+            [ChatMessage(role="user", content="edit")], tools=tools,
+            tools_continuation=False, tool_instructions="light")
+        follow = messages_to_prompt(
+            [ChatMessage(role="user", content="again")], tools=tools,
+            tools_continuation=True, tool_instructions="light")
+        self.assertIn("Available tools, given as JSON Schema", first)
+        self.assertIn('"name": "write"', first)
+        self.assertIn("Tools remain available from earlier in this chat: write", follow)
+        self.assertNotIn("Available tools, given as JSON Schema", follow)
+        self.assertNotIn('"required": ["path"]', follow)
+
+    def test_none_tool_instructions_omit_block_on_continuation(self):
+        tools = [{
+            "type": "function", "function": {"name": "write", "parameters": {
+                "type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}}]
+        first = messages_to_prompt(
+            [ChatMessage(role="user", content="edit")], tools=tools,
+            tools_continuation=False, tool_instructions="none")
+        follow = messages_to_prompt(
+            [ChatMessage(role="user", content="again")], tools=tools,
+            tools_continuation=True, tool_instructions="none")
+        self.assertIn("Available tools, given as JSON Schema", first)
+        self.assertIn('"name": "write"', first)
+        self.assertNotIn("Available tools, given as JSON Schema", follow)
+        self.assertNotIn("Tools remain available from earlier in this chat", follow)
+        self.assertNotIn('"required": ["path"]', follow)
+
+    def test_browser_provider_defaults_to_light_http_to_full(self):
+        tools = [{"type": "function", "function": {"name": "write", "parameters": {"type": "object"}}}]
+        with patch("server.config.TOOL_INSTRUCTIONS_BROWSER", "light"), \
+             patch("server.config.TOOL_INSTRUCTIONS_HTTP", "full"), \
+             patch("server.config.provider_uses_browser", side_effect=lambda p: p == "grok"):
+            browser_follow = messages_to_prompt(
+                [ChatMessage(role="user", content="again")], tools=tools,
+                tools_continuation=True, provider="grok")
+            http_follow = messages_to_prompt(
+                [ChatMessage(role="user", content="again")], tools=tools,
+                tools_continuation=True, provider="deepseek")
+        self.assertIn("Tools remain available from earlier in this chat", browser_follow)
+        self.assertIn("Available tools, given as JSON Schema", http_follow)
 
     def test_json_diagnostics_report_only_category_and_position(self):
         bodies = [

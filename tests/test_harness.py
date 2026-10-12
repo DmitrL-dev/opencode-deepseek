@@ -69,7 +69,7 @@ class HarnessSetupTests(unittest.TestCase):
 
     def test_without_browser_filters_all_providers_and_preserves_advertised_order(self):
         rows = [{"id": provider + "-test", "owned_by": provider}
-                for provider in ("glm", "deepseek", "kimi", "qwen", "grok", "gemini", "mistral")]
+                for provider in ("glm", "deepseek", "kimi", "qwen", "grok", "gemini", "mistral", "chatgpt", "claude")]
         catalog = {"data": rows}
         self.assertEqual([model["id"] for model in harness.catalog_models(catalog)],
                          [row["id"] for row in rows])
@@ -97,6 +97,32 @@ class HarnessSetupTests(unittest.TestCase):
         models = harness.catalog_models({'data': rows}, without_browser=True)
         self.assertEqual([m['id'] for m in models], ['kimi-instant', 'kimi-k3', 'kimi-k2.8'])
         self.assertEqual(models[0]['name'], 'Kimi Instant · web')
+
+    def test_catalog_accepts_matching_owner_prefixed_aliases(self):
+        catalog = {"data": [
+            {"id": "qwen3.8-omni-flash", "owned_by": "qwen"},
+            {"id": "qwen/qwen3.8-omni-flash", "owned_by": "qwen"},
+            {"id": "kimi/kimi-instant", "owned_by": "kimi"},
+        ]}
+        models = harness.catalog_models(catalog)
+        self.assertEqual([model["id"] for model in models],
+                         ["qwen3.8-omni-flash", "qwen/qwen3.8-omni-flash", "kimi/kimi-instant"])
+        self.assertEqual(models[1]["name"], "Qwen3.8 Omni Flash · web")
+        self.assertEqual(
+            [model["id"] for model in harness.catalog_models(catalog, without_browser=True)],
+            ["qwen3.8-omni-flash", "qwen/qwen3.8-omni-flash", "kimi/kimi-instant"],
+        )
+        with self.assertRaises(ValueError):
+            harness.catalog_models({"data": [{"id": "evil/qwen3.8-omni-flash", "owned_by": "qwen"}]})
+
+    def test_without_browser_excludes_web_aliases_too(self):
+        rows = [{"id": "deepseek/deepseek-chat", "owned_by": "deepseek"}]
+        for model in harness.BRIDGE_ONLY_MODELS:
+            owner = model.removesuffix("-web")
+            rows.extend({"id": value, "owned_by": owner}
+                        for value in (model, owner + "/" + model))
+        models = harness.catalog_models({"data": rows}, without_browser=True)
+        self.assertEqual([row["id"] for row in models], ["deepseek/deepseek-chat"])
 
     def run_cli_catalog(self, catalog, *args):
         requests = []

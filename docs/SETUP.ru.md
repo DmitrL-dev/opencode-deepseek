@@ -1,5 +1,9 @@
 # Подробная настройка
 
+> **Используете Harness?** Начните с [быстрого старта](../README.md#быстрый-старт)
+> и [подключения Harness](HARNESS.ru.md). OpenCode для него не требуется.
+> Эта подробная инструкция также содержит отдельные настройки OpenCode.
+
 [Главная](../README.md) · [English](SETUP.en.md)
 
 Этот справочник сохраняет подробности установки, API, агентов и обслуживания. Статус провайдеров и демонстрации — на главной. Браузерные GLM/Kimi и экспериментальные адаптеры настраиваются по [отдельной инструкции](../browser/README.md).
@@ -167,7 +171,7 @@ python app.py
 Альтернатива через uvicorn с другим адресом:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 python app.py  # token still required
 # или
 uvicorn server.api:app --host 0.0.0.0 --port 8080 --no-proxy-headers
 ```
@@ -235,7 +239,7 @@ Python SDK:
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 r = client.chat.completions.create(
     model="deepseek-chat",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -260,12 +264,12 @@ print(r.choices[0].message.content)
 
 **API-ключ:** любой. Мост **не проверяет** `Authorization` и не читает его
 (`server/api.py` не смотрит заголовок), поэтому в SDK, где ключ обязателен
-синтаксически, пишут заглушку — исторически `api_key="unused"`. В чистом HTTP
+синтаксически, пишут заглушку — исторически `api_key=open("session/api-token").read().strip()`. В чистом HTTP
 через `curl` заголовок `Authorization` вообще не нужен.
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 ```
 
 ```bash
@@ -347,7 +351,7 @@ opencode подключается к мосту как к **OpenAI-совмес�
       "name": "DeepSeek (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "deepseek-chat": {
@@ -369,7 +373,7 @@ opencode подключается к мосту как к **OpenAI-совмес�
 ```
 
 - `npm: "@ai-sdk/openai-compatible"` — универсальный OpenAI-совместимый драйвер.
-- `apiKey` обязателен для SDK, но мост его игнорирует.
+- `apiKey` — токен API моста из `session/api-token` (`python -m server.api_auth path`); без него `/v1` отклоняет запросы.
 - `model` в opencode указывается как `local-deepseek/deepseek-chat` или
   `local-deepseek/deepseek-expert`.
 - `limit.context` — приблизительный; уменьшите, если получаете ошибки о
@@ -391,7 +395,7 @@ opencode подключается к мосту как к **OpenAI-совмес�
       "name": "Qwen (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "qwen3.8-omni-flash": {
@@ -510,12 +514,12 @@ opencode читает конфиг один раз при старте. **Пол
 умолчанию выключен; последний файл остаётся до замены или ручного удаления.
 Не публикуйте его. Ошибка сохранения не подменяет исходную ошибку инструмента.
 
-Старая диагностика: запустите сервер с `DEBUG_TOOLCALLS=1` — при нераспознанном вызове
+Старая диагностика: запустите сервер с `TOOLCALL_DEBUG=1` — при нераспознанном вызове
 в лог (`logs/server.log` или stdout) попадёт сырой ответ модели.
 Он может содержать файлы и секреты; при обычной работе оставляйте режим выключенным.
 
 ```bash
-DEBUG_TOOLCALLS=1 python app.py
+TOOLCALL_DEBUG=1 python app.py
 ```
 
 Проверить мост напрямую (без opencode):
@@ -622,7 +626,7 @@ Qwen подключается к тому же `/v1` отдельным пров
   "name": "Qwen Chat (local bridge)",
   "options": {
     "baseURL": "http://127.0.0.1:8000/v1",
-    "apiKey": "unused"
+    "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
   },
   "models": {
     "qwen3.8-omni-flash": {
@@ -689,14 +693,15 @@ opencode run --model local-qwen/qwen3.8-max "Объясни этот проек�
 | `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
 | `PROVIDER_MIN_INTERVAL` | `30` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Включить модели Qwen Chat на том же `/v1` |
+| `QWEN_MODELS` | `qwen3.8-omni-flash`, `qwen3.8-max`, `qwen3.7-plus` | JSON: публичный id → wire-модель сайта (HTTP-транспорт) |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Отдельный постоянный профиль Qwen Chat |
 | `TOOLCALL_MAX_CONTINUATIONS` | `0` | Явно включаемый лимит продолжений при подтверждённом провайдером обрыве по длине; штатное завершение не вызывает продолжений |
-| `DEBUG_TOOLCALLS` | — | `1` — писать в лог сырой ответ модели, если вызов не распознан |
+| `TOOLCALL_DEBUG` | — | `1` — писать в лог сырой ответ модели, если вызов не распознан |
 
 Пример:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 ```
 
 ---
@@ -787,7 +792,7 @@ PORT=8080 python app.py
    [Интеграция с opencode](#интеграция-с-opencode)): должен вернуться
    `"finish_reason": "tool_calls"` и непустой `message.tool_calls`.
 3. Поставьте плагин `deepseek-tool-discipline.js` (глобально или в проект).
-4. Запустите сервер с `DEBUG_TOOLCALLS=1` и изучите сырой ответ модели в логе.
+4. Запустите сервер с `TOOLCALL_DEBUG=1` и изучите сырой ответ модели в логе.
 5. Увеличьте `steps` у агента и используйте `deepseek-expert`.
 
 **Правки кода не применились после редактирования (launchd)**

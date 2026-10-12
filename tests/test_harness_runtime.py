@@ -22,7 +22,7 @@ from deepseek.client import Reply
 from integrations.harness import ROUTE, catalog_models, patch_document, render, yaml_codec
 from providers import access
 from providers.access import AccessGuard, ProviderRejected
-from server import api
+from server import api, ratelimit
 from server.conversation_cache import ConversationCache
 from tests.test_tools import block
 
@@ -42,6 +42,9 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.calls, self.prompts, self.conversation_args = [], [], []
         self.behavior = "text"
         self.addCleanup(patch.stopall)
+        # The module-level app is shared across tests. Give each isolated
+        # server its own identity rather than sharing localhost's rolling quota.
+        patch.object(ratelimit, '_client_key', return_value=self.id()).start()
         patch.object(api, "conversation_cache", ConversationCache(self.root / "conversations.sqlite3")).start()
         patch.object(api, "guard", self.guard).start()
         patch.object(access, "guard", self.guard).start()
@@ -101,16 +104,48 @@ class HarnessRuntimeTests(unittest.TestCase):
         attempt.dispatch()
         self.prompts.append(prompt)
         self.conversation_args.append(args)
+        if self.behavior in ('shell_failure', 'shell_failure_batch', 'shell_cache', 'shell_grep_empty', 'shell_grep_producer'):
+            if len(self.prompts) == 1:
+                command = ('printf BEFORE; (exit 17) | tail -60; touch should-not-exist'
+                           if self.behavior.startswith('shell_failure') else
+                           'mkdir -p "$XDG_CACHE_HOME/gh" && printf CACHE_OK > "$XDG_CACHE_HOME/gh/fixture" && cat "$XDG_CACHE_HOME/gh/fixture"')
+                if self.behavior == 'shell_grep_empty':
+                    command = 'printf plain | bridge_grep_optional missing | sed -n \'1,40p\'; printf CACHE_OK'
+                elif self.behavior == 'shell_grep_producer':
+                    command = '(exit 1) | bridge_grep_optional missing | cat; touch should-not-exist'
+                answer = block([{'name': 'bash', 'arguments': {'command': command,
+                                'description': 'Owned offline shell safety fixture'}}])
+                if self.behavior == 'shell_failure_batch':
+                    answer = block([
+                        {'name': 'bash', 'arguments': {'command': command,
+                         'description': 'Owned failing pipeline'}},
+                        {'name': 'bash', 'arguments': {'command': 'touch second-call-should-not-run',
+                         'description': 'Must be canceled after the failed pipeline'}}])
+            else:
+                self.assertIn(self.behavior, ('shell_cache', 'shell_grep_empty'), 'Failure must stop before another provider request')
+                self.assertIn('CACHE_OK', prompt)
+                answer = 'HARNESS_BRIDGE_OK'
+            attempt.complete()
+            return Reply(answer, 'owned-fixture:2')
         if self.behavior == "refused":
             raise ProviderRejected("account_restricted")
-        if self.behavior in ("format_correction", "dsml_correction"):
+        if self.behavior in ("format_correction", "dsml_correction", "generic_correction", "json_correction"):
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if len(self.prompts) == 1:
                 answer = "I will read the file.\n" + answer
                 if self.behavior == "dsml_correction":
                     answer = '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="read">unparsed</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>'
+                elif self.behavior == "generic_correction":
+                    answer = answer.replace('```tool_calls', '```json')
+                elif self.behavior == "json_correction":
+                    answer = '```tool_calls\n[{"name":"read","arguments":{"file_path":"PRIVATE_PATH",}}]\n```'
             elif len(self.prompts) == 2:
-                self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
+                if self.behavior == "json_correction":
+                    self.assertTrue(prompt.startswith(api._FORMAT_REPAIR_PROMPT))
+                    self.assertIn('JSON validation failed: invalid_syntax, line 1, column ', prompt)
+                    self.assertNotIn('PRIVATE_PATH', prompt)
+                else:
+                    self.assertEqual(prompt, api._FORMAT_REPAIR_PROMPT)
                 self.assertEqual(args[:2], ("owned-fixture:2", None))
             else:
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
@@ -133,9 +168,11 @@ class HarnessRuntimeTests(unittest.TestCase):
                 answer = "HARNESS_BRIDGE_OK"
             attempt.complete()
             return Reply(answer, "owned-fixture:2")
-        if self.behavior in ("tools", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
+        if self.behavior in ("tools", "calls_alias", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
+            if self.behavior == 'calls_alias':
+                answer = 'Let me read the fixture.\n\n' + answer.replace('```tool_calls', '```calls', 1)
             if self.behavior == "tools_without_fence":
                 answer = answer[:-4]
             elif self.behavior == "redundant_closer":
@@ -177,6 +214,53 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(self.calls[0]["model"], "deepseek-chat")
         self.assertEqual(len(self.prompts), 1)
 
+    def install_shell_safety_fixture(self):
+        document = yaml_codec().load(self.overlay.read_text())
+        document.append({'insert': [{'id': 'local-bridge-shell-safety', 'name': str(
+            Path(__file__).resolve().parents[1] / 'integrations/harness_shell_safety.mjs')}]})
+        self.overlay.write_bytes(render(document))
+
+    def test_native_pipeline_failure_stops_before_next_generation(self):
+        self.behavior = 'shell_failure'
+        self.install_shell_safety_fixture()
+        result = self.run_harness()
+        self.assertIn('BEFORE', result.stdout, result.stdout + result.stderr)
+        self.assertIn('[exit code: 17]', result.stdout)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse((self.workspace / 'should-not-exist').exists())
+
+    def test_native_shell_has_writable_private_cache(self):
+        self.behavior = 'shell_cache'
+        self.install_shell_safety_fixture()
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_native_failed_pipeline_cancels_remaining_batch(self):
+        self.behavior = 'shell_failure_batch'
+        self.install_shell_safety_fixture()
+        result = self.run_harness()
+        self.assertIn('[exit code: 17]', result.stdout, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse((self.workspace / 'second-call-should-not-run').exists())
+
+    def test_native_optional_grep_without_matches_continues(self):
+        self.behavior = 'shell_grep_empty'
+        self.install_shell_safety_fixture()
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_native_optional_grep_does_not_hide_producer_exit_one(self):
+        self.behavior = 'shell_grep_producer'
+        self.install_shell_safety_fixture()
+        result = self.run_harness()
+        self.assertIn('[exit code: 1]', result.stdout, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls), 1)
+        self.assertFalse((self.workspace / 'should-not-exist').exists())
+
     def test_native_read_tool_result_returns_to_bridge(self):
         self.behavior = "tools"
         result = self.run_harness()
@@ -186,8 +270,17 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.prompts), 2)
         self.assertTrue(any(message["role"] == "tool" for message in self.calls[1]["messages"]))
 
+    def test_calls_alias_executes_native_read_after_schema_validation(self):
+        self.behavior = 'calls_alias'
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls), 2)
+        results = [m for m in self.calls[1]['messages'] if m['role'] == 'tool']
+        self.assertEqual(len(results), 1)
+        self.assertIn('HARNESS_OWNED_FILE_73', str(results[0]['content']))
+
     def test_opt_in_format_correction_executes_native_tool_once(self):
-        for self.behavior in ("format_correction", "dsml_correction"):
+        for self.behavior in ("format_correction", "dsml_correction", "generic_correction", "json_correction"):
             with self.subTest(behavior=self.behavior), patch.object(api, "_FORMAT_REPAIR", True):
                 self.calls.clear()
                 self.prompts.clear()

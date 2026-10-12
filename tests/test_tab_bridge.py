@@ -14,6 +14,7 @@ from unittest.mock import patch
 import httpx
 
 from providers import tab_bridge
+from providers.access import AccessGuard, ProviderRejected
 from providers.common import ProviderUnavailable
 from server import api, config
 from server.schemas import ChatCompletionRequest
@@ -114,8 +115,10 @@ class BrokerTests(unittest.TestCase):
 
     def test_result_cannot_change_origin_path_or_resumed_conversation(self):
         body = json.dumps({"result":{"response":{"modelResponse":{"message":"marker","partial":False}}}}).encode()
-        result = {"status":200,"body":base64.b64encode(body).decode(),"path":"/c/abc"}
-        self.assertEqual(tab_bridge.parse_browser_result("grok", result).text, "marker")
+        result = {"status":200,"body":base64.b64encode(body).decode(),"path":"/c/abc",
+                  "request_turn":{"chat_id":"abc","prompt":"marker",
+                                  "endpoint":"/rest/app-chat/conversations/abc/responses"}}
+        self.assertEqual(tab_bridge.parse_browser_result("grok", result, prompt="marker").text, "marker")
         for bad in ({**result,"path":"https://evil.test/c/abc"}, {**result,"status":403},
                     {**result,"body":"!"}, {**result,"error":"blocked"}):
             with self.assertRaises((ProviderUnavailable, ValueError)):
@@ -127,12 +130,47 @@ class BrokerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory, patch.object(tab_bridge, "token_path", return_value=Path(directory)/"token"):
             destination = tab_bridge.export_scripts()
             token = (Path(directory)/"token").read_text()
-            text = (destination/"opencode-controller.user.js").read_text()
+            text = (destination/"opencode-controller.user.js").read_text(encoding="utf-8")
             self.assertEqual(text.count(token), 1)
             self.assertIn('TOKEN === "__BRIDGE_TOKEN__"', text)
             for file in destination.iterdir():
                 self.assertEqual(file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
+
+    def test_tab_visible_bridge_failure_requires_manual_recovery(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        guard = AccessGuard(Path(directory.name) / "pauses.json", interval=0)
+        client = tab_bridge.TabClient("qwen")
+        with patch.dict(os.environ, {"BROWSER_BRIDGE_ENABLED": "1"}), \
+             patch.object(tab_bridge, "broker") as broker, \
+             patch("providers.tab_bridge.provider_attempt", guard.attempt):
+            broker.submit.return_value = {
+                "error": "Provider response could not be observed",
+            }
+            with self.assertRaises(ProviderUnavailable) as err:
+                client.chat("marker")
+            self.assertFalse(getattr(err.exception, "clear_without_pause", False))
+            self.assertEqual(guard.status()["qwen"], "upstream_failure")
+            with self.assertRaises(ProviderRejected):
+                AccessGuard(guard.path, interval=0).check("qwen")
+
+    def test_browser_quota_status_still_durable_pauses(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        guard = AccessGuard(Path(directory.name) / "pauses.json", interval=0)
+        client = tab_bridge.TabClient("qwen")
+        with patch.dict(os.environ, {"BROWSER_BRIDGE_ENABLED": "1"}), \
+             patch.object(tab_bridge, "broker") as broker, \
+             patch("providers.tab_bridge.provider_attempt", guard.attempt):
+            broker.submit.return_value = {"status": 429, "body": "", "path": "/"}
+            with self.assertRaises(ProviderUnavailable) as err:
+                client.chat("marker")
+            self.assertFalse(getattr(err.exception, "clear_without_pause", False))
+            # Abort converts the annotated failure into a durable pause.
+            with self.assertRaises(ProviderRejected):
+                guard.check("qwen")
+            self.assertEqual(guard.status().get("qwen"), "quota_exceeded")
 
 
 class TabApiTests(unittest.IsolatedAsyncioTestCase):
@@ -307,6 +345,30 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
                     choice = response.json()['choices'][0]
                     self.assertEqual(choice['message']['tool_calls'][0]['function']['name'],'read')
                     self.assertEqual(choice['finish_reason'],'tool_calls')
+
+    async def test_unknown_browser_outcome_pauses_and_blocks_the_next_turn(self):
+        api.guard.resume("qwen")
+        def fail(*args, **kwargs):
+            from providers.access import current_attempt
+            current_attempt("qwen").dispatch()
+            return {"error": "Provider response could not be observed"}
+        with patch.dict(os.environ, {"BROWSER_BRIDGE_ENABLED": "1"}), \
+             patch.dict(config.MODEL_MAP, {"qwen-web": "default"}), \
+             patch.dict(config.OPTIONAL_MODEL_PROVIDERS, {"qwen-web": "qwen"}), \
+             patch.object(api, "qwen_uses_browser", return_value=True), \
+             patch.object(config, "qwen_uses_browser", return_value=True), \
+             patch.object(api, "build_provider_client", return_value=tab_bridge.TabClient("qwen")), \
+             patch.object(tab_bridge.broker, "submit", side_effect=fail) as submit:
+            body = {"model": "qwen-web", "messages": [{"role": "user", "content": "marker"}]}
+            first = await self.client.post("/v1/chat/completions", json=body)
+            second = await self.client.post("/v1/chat/completions", json=body)
+        self.assertEqual(first.status_code, 403)
+        self.assertEqual(second.status_code, 400)
+        for response in (first, second):
+            self.assertEqual(response.json()["error"]["code"], "upstream_failure")
+            self.assertFalse(response.json()["error"]["retryable"])
+        submit.assert_called_once()
+        self.assertEqual(api.guard.status()["qwen"], "upstream_failure")
 
     async def test_failed_grok_terminal_never_becomes_tool_calls(self):
         tools = [{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]

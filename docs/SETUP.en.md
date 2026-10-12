@@ -1,5 +1,9 @@
 # Detailed setup
 
+> **Using Harness?** Start with the [quick start](../README.en.md#quick-start)
+> and [Harness setup](HARNESS.en.md). OpenCode is not required.
+> This detailed reference also contains OpenCode-specific configuration.
+
 [Home](../README.en.md) · [Русский](SETUP.ru.md)
 
 This reference covers installation, API usage, agents and maintenance. See the home page for provider status and demos. Follow the [separate guide](../browser/README.md) for GLM/Kimi browser tabs and experimental adapters.
@@ -168,7 +172,7 @@ python app.py
 Alternative via uvicorn with a different address:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 python app.py  # token still required
 # or
 uvicorn server.api:app --host 0.0.0.0 --port 8080 --no-proxy-headers
 ```
@@ -236,7 +240,7 @@ Python SDK:
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 r = client.chat.completions.create(
     model="deepseek-chat",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -261,12 +265,12 @@ The port changes via the `PORT` variable in `.env` / launchd.
 
 **API key:** any value. The bridge does **not** check or read `Authorization`
 (`server/api.py` never looks at the header), so in SDKs where the key is
-syntactically required you pass a placeholder — historically `api_key="unused"`.
+syntactically required you pass a placeholder — historically `api_key=open("session/api-token").read().strip()`.
 With plain HTTP via `curl`, the `Authorization` header is not needed at all.
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 ```
 
 ```bash
@@ -300,7 +304,7 @@ Create `opencode.json` in the root of your working project (or in
       "name": "DeepSeek (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "deepseek-chat": {
@@ -322,7 +326,7 @@ Create `opencode.json` in the root of your working project (or in
 ```
 
 - `npm: "@ai-sdk/openai-compatible"` — the universal OpenAI-compatible driver.
-- `apiKey` is required by the SDK, but the bridge ignores it.
+- `apiKey` must be the bridge API token from `session/api-token` (`python -m server.api_auth path`); `/v1` refuses requests without it.
 - In opencode, `model` is specified as `local-deepseek/deepseek-chat` or
   `local-deepseek/deepseek-expert`.
 - `limit.context` is approximate; reduce it if you get context-overflow errors.
@@ -343,7 +347,7 @@ Create `opencode.json` in the root of your working project (or in
       "name": "Qwen (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "qwen3.8-omni-flash": {
@@ -460,12 +464,12 @@ credentials are not added, but the response itself may contain private code or
 secrets. Capture is off by default; the last file remains until replaced or
 manually removed. Do not publish it. Capture failures do not mask the tool error.
 
-Legacy diagnostics: start the server with `DEBUG_TOOLCALLS=1` — on an unrecognized call
+Legacy diagnostics: start the server with `TOOLCALL_DEBUG=1` — on an unrecognized call
 the raw model reply is written to the log (`logs/server.log` or stdout).
 This can include file contents and secrets; leave it disabled for normal use.
 
 ```bash
-DEBUG_TOOLCALLS=1 python app.py
+TOOLCALL_DEBUG=1 python app.py
 ```
 
 Test the bridge directly (without opencode):
@@ -573,7 +577,7 @@ The web service determines model access and quotas. Support is disabled by defau
   "name": "Qwen Chat (local bridge)",
   "options": {
     "baseURL": "http://127.0.0.1:8000/v1",
-    "apiKey": "unused"
+    "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
   },
   "models": {
     "qwen3.8-omni-flash": {
@@ -639,14 +643,15 @@ variables take precedence.
 | `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
 | `PROVIDER_MIN_INTERVAL` | `30` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
+| `QWEN_MODELS` | `qwen3.8-omni-flash`, `qwen3.8-max`, `qwen3.7-plus` | JSON map of public id → website wire model (HTTP transport) |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
 | `TOOLCALL_MAX_CONTINUATIONS` | `0` | Explicit opt-in continuation budget for provider-confirmed output limits; normal stops never trigger continuation |
-| `DEBUG_TOOLCALLS` | — | `1` — log the raw model reply when a call can't be parsed |
+| `TOOLCALL_DEBUG` | — | `1` — log the raw model reply when a call can't be parsed |
 
 Example:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 ```
 
 ---
@@ -737,7 +742,7 @@ and point `baseURL` of the opencode provider at `http://127.0.0.1:8080/v1`.
    [opencode integration](#opencode-integration)): you should get
    `"finish_reason": "tool_calls"` and a non-empty `message.tool_calls`.
 3. Install the `deepseek-tool-discipline.js` plugin (globally or in the project).
-4. Start the server with `DEBUG_TOOLCALLS=1` and inspect the raw model reply in
+4. Start the server with `TOOLCALL_DEBUG=1` and inspect the raw model reply in
    the log.
 5. Increase the agent's `steps` and use `deepseek-expert`.
 

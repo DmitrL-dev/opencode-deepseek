@@ -32,7 +32,7 @@ def cached():
          "path": "/api/v2/auths", "secure": True, "httpOnly": True, "expires": NOW + 5000},
         {"name": "chat-only", "value": "synthetic-chat", "domain": "chat.qwen.ai",
          "path": "/", "secure": True},
-    ], "synthetic-user-agent", NOW - 900, NOW - 10)
+    ], "synthetic-user-agent", NOW - 900, expires_at=NOW - 10)
 
 
 def success(**changes):

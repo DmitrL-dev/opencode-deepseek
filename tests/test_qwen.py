@@ -24,7 +24,7 @@ SECONDARY = "00000000-0000-4000-8000-000000000003"
 
 
 def session():
-    return Session("fake-qwen-token", [], "test-agent", time.time(), time.time() + 900)
+    return Session("fake-qwen-token", [], "test-agent", time.time(), expires_at=time.time() + 900)
 
 
 def events(*objects, done=True):
@@ -41,6 +41,21 @@ def answer(content, **extra):
 
 
 class QwenSessionTests(unittest.TestCase):
+    def test_capture_keeps_expiry_separate_from_continuation_identity(self):
+        expires = time.time() + 900
+        context = Mock()
+        context.cookies.return_value = []
+        page = Mock(url='https://chat.qwen.ai/')
+        page.evaluate.side_effect = [{'token': 'synthetic-token', 'expires_at': expires}, 'test-agent']
+        captured = _capture(context, page)
+        self.assertTrue(captured.usable)
+        self.assertEqual(captured.expires_at, expires)
+        self.assertIsNone(captured.continuation_scope)
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / 'session.json'
+            captured.save(path)
+            self.assertEqual(Session.load(path), captured)
+
     def test_provider_cookies_never_cross_the_boundary(self):
         qwen = session()
         qwen.cookies = [
@@ -441,11 +456,58 @@ class QwenStreamTests(unittest.TestCase):
 
     def test_named_error_is_sanitized_and_never_treated_as_done(self):
         payload = json.dumps({"error": {"code": "invalid_token", "message": "Access rejected"}})
-        with self.assertRaisesRegex(ProviderRejected, "Sign in manually"):
-            list(_parse_sse(["event: error", "data: " + payload, ""], {}))
+        with self.assertLogs("qwen.client", level="WARNING") as logs:
+            with self.assertRaisesRegex(ProviderRejected, "Sign in manually") as failure:
+                list(_parse_sse(["event: error", "data: " + payload, ""], {}))
+        self.assertEqual(failure.exception.code, "session_expired")
+        self.assertEqual(failure.exception.business_code, "invalid_token")
+        rendered = " ".join(logs.output)
+        self.assertIn("Qwen envelope rejected:", rendered)
+        self.assertIn("business_code=invalid_token", rendered)
+        self.assertIn("raw_code=invalid_token", rendered)
+        self.assertIn("error_keys=code,message", rendered)
+        self.assertNotIn("Access rejected", rendered)
         for payload in ("", "[DONE]", "{broken", "{}"):
             with self.subTest(payload=payload), self.assertRaises((QwenStreamError, ProviderRejected)):
                 list(_parse_sse(["event: error", "data: " + payload, ""], {}))
+
+    def test_envelope_log_exposes_unknown_short_codes_without_message_text(self):
+        from qwen.client import _log_envelope
+        with self.assertLogs("qwen.client", level="WARNING") as logs:
+            business, raw = _log_envelope(
+                {"data": {"code": "RateLimited_V2", "status": 503,
+                          "message": "secret=private please wait"}},
+                "completion_non_sse",
+                content_type="application/json",
+            )
+        self.assertIsNone(business)
+        self.assertEqual(raw, "RateLimited_V2")
+        rendered = " ".join(logs.output)
+        self.assertIn("content_type=application/json", rendered)
+        self.assertIn("data_type=object", rendered)
+        self.assertIn("data_keys=code,status,message", rendered)
+        self.assertIn("data_fields=code:string,message:string,status:number", rendered)
+        self.assertIn("data_key_count=3", rendered)
+        self.assertIn("raw_code=RateLimited_V2", rendered)
+        self.assertIn("raw_status=503", rendered)
+        self.assertIn("code_type=string", rendered)
+        self.assertNotIn("secret", rendered)
+        self.assertNotIn("please wait", rendered)
+
+    def test_envelope_log_lists_safe_data_field_names_for_empty_known_keys(self):
+        from qwen.client import _log_envelope
+        with self.assertLogs("qwen.client", level="WARNING") as logs:
+            _log_envelope(
+                {"data": {"choices": [], "requestId": "abc", "result": {"ok": False}}},
+                "completion_non_sse",
+                content_type="application/json",
+            )
+        rendered = " ".join(logs.output)
+        self.assertIn("data_keys=requestId", rendered)
+        self.assertIn("data_fields=choices:array,requestId:string,result:object", rendered)
+        self.assertIn("data_key_count=3", rendered)
+        self.assertIn("top_fields=data:object", rendered)
+        self.assertNotIn("abc", rendered)
 
     def test_only_answer_text_is_exposed(self):
         meta = {"chat_id": CHAT}
@@ -556,7 +618,8 @@ class QwenStreamTests(unittest.TestCase):
             if request.url.path == "/api/v2/chats/new":
                 return httpx.Response(200, json={"success": True, "data": {"id": CHAT}})
             self.assertEqual(request.url.path, "/api/v2/chat/completions")
-            text = "\n".join(events({"response.created": {"response_id": MESSAGE, "chat_id": CHAT}}, answer("OK")))
+            mid = SECONDARY if json.loads(request.content).get("parent_id") else MESSAGE
+            text = "\n".join(events({"response.created": {"response_id": mid, "chat_id": CHAT}}, {**answer("OK"), "response_id": mid}))
             return httpx.Response(200, text=text, headers={"content-type": "text/event-stream"})
         client = QwenClient(session(), access_guard=None, transport=httpx.MockTransport(handler))
         try:
@@ -580,7 +643,12 @@ class QwenStreamTests(unittest.TestCase):
             return httpx.Response(200, stream=httpx.ByteStream(payload), headers={"content-type": "application/json"})
         client = QwenClient(session(), access_guard=None, transport=httpx.MockTransport(handler))
         try:
-            with self.assertRaisesRegex(ProviderRejected, "Sign in manually"):
-                client.chat("hello")
+            with self.assertLogs("qwen.client", level="WARNING") as logs:
+                with self.assertRaisesRegex(ProviderRejected, "Sign in manually"):
+                    client.chat("hello")
+            rendered = " ".join(logs.output)
+            self.assertIn("phase=completion_non_sse", rendered)
+            self.assertIn("content_type=application/json", rendered)
+            self.assertIn("raw_code=invalid_token", rendered)
         finally:
             client.close()
