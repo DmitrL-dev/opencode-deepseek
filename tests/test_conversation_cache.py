@@ -176,8 +176,35 @@ class ConversationTests(unittest.TestCase):
     def test_ambiguous_identical_histories_are_not_merged(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
         self.cache.remember(self.req, Reply('', 'another:2'), '', self.calls, 0)
-        with self.assertRaises(ConversationStateError):
+        with self.assertRaisesRegex(ConversationStateError, 'already consumed'):
             self.cache.prepare(self.req.model_copy(update={'messages': self.history()}))
+
+    def test_opencode_system_drift_and_reminder_wrappers_still_continue(self):
+        """OpenCode mutates system prompts and may wrap user text between turns."""
+        from server.conversation_cache import digest
+        first = self.req.model_copy(update={'messages': [
+            ChatMessage(role='system', content='env day-1\nAGENTS.md v1'),
+            ChatMessage(role='user', content='Explore owned fixture'),
+        ]})
+        self.cache.remember(first, self.reply, '', self.calls, 0)
+        wrapped = (
+            "<system-reminder>\nThe user sent the following message:\n"
+            "Explore owned fixture\n\n"
+            "Please address this message and continue with your tasks.\n"
+            "</system-reminder>"
+        )
+        follow = first.model_copy(update={'messages': [
+            ChatMessage(role='system', content='env day-2\nAGENTS.md v2'),
+            ChatMessage(role='user', content=wrapped),
+            ChatMessage(role='assistant', tool_calls=self.calls),
+            ChatMessage(role='tool', tool_call_id='call_owned', content='fixture result'),
+        ]})
+        self.assertEqual(digest(first, first.messages + [
+            ChatMessage(role='assistant', tool_calls=self.calls)]),
+            digest(follow, follow.messages[:-1]))
+        continued, steps = self.cache.prepare(follow)
+        self.assertEqual(continued.conversation_id, 'owned:2')
+        self.assertEqual(steps, 1)
 
     def test_transport_creates_one_chat_for_two_agent_steps(self):
         from deepseek.client import DeepSeekClient

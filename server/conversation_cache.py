@@ -6,6 +6,7 @@ Unknown or already consumed histories fail closed instead of creating chats.
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -16,10 +17,35 @@ from .config import canonical_model
 from .schemas import ChatMessage
 from .openai_format import _text_of
 from .recovery_status import RECOVERY_STOP_TEXT
+from .tool_notice import notice_of
+
+# OpenCode (and similar agents) inject ephemeral <system-reminder> wrappers into
+# user text around tool loops. Those wrappers are not part of the delivered
+# assistant turn and must not break one-use history lookup.
+_SYSTEM_REMINDER_RE = re.compile(
+    r"<system-reminder>\s*The user sent the following message:\s*(.*?)\s*"
+    r"Please address this message and continue with your tasks\.\s*"
+    r"</system-reminder>",
+    re.DOTALL,
+)
+_SYSTEM_REMINDER_ANY_RE = re.compile(r"<system-reminder>.*?</system-reminder>\s*", re.DOTALL)
 
 
 class ConversationStateError(RuntimeError):
     pass
+
+
+def _stable_text(content):
+    text = content or ''
+    if not isinstance(text, str):
+        return text
+    # Unwrap nested queued-follow-up envelopes back to the original user text.
+    previous = None
+    while previous != text:
+        previous = text
+        text = _SYSTEM_REMINDER_RE.sub(r'\1', text).strip()
+    # Drop other ephemeral reminder blocks (plan/build, image notices, …).
+    return _SYSTEM_REMINDER_ANY_RE.sub('', text).strip()
 
 
 def normalized(message):
@@ -27,7 +53,7 @@ def normalized(message):
     content = value.get('content')
     if isinstance(content, list) and all(p.get('type') == 'text' for p in content):
         content = _text_of(content)
-    value['content'] = content or ''
+    value['content'] = _stable_text(content)
     if not value.get('tool_calls'):
         value.pop('tool_calls', None)
     for call in value.get('tool_calls', []):
@@ -40,12 +66,18 @@ def normalized(message):
     return value
 
 
+def _message_role(message):
+    return message.get('role') if isinstance(message, dict) else getattr(message, 'role', None)
+
+
 def digest(req, messages):
     # Owner-prefixed aliases (deepseek/deepseek-expert) must share history with
     # the bare public id used when the link was stored.
+    # Client-owned system prompts (OpenCode env/date/AGENTS.md) change between
+    # turns and are never forwarded on browser continuations — omit them.
     model = canonical_model(req.model) or req.model
-    payload = [model, req.user, req.thinking, req.search, req.tools,
-               [normalized(m) for m in messages]]
+    stable = [normalized(m) for m in messages if _message_role(m) != 'system']
+    payload = [model, req.user, req.thinking, req.search, req.tools, stable]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
                                     separators=(',', ':')).encode()).hexdigest()
 
@@ -93,7 +125,7 @@ class ConversationCache:
             if db is not None:
                 db.close()
 
-    def prepare(self, req, *, scope=None, claim=None):
+    def prepare(self, req, *, scope=None, claim=None, compact_results=False):
         # Explicit protocol clients already own their conversation identity.
         if req.conversation_id:
             return req, 0
@@ -132,8 +164,12 @@ class ConversationCache:
         key = self.key(req, req.messages[:end], scope)
         with self.connection() as db:
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
-            if not row or row[1]:
-                raise ConversationStateError('History is unknown or already consumed; automatic replay and new-chat fallback are disabled.')
+            if not row:
+                raise ConversationStateError(
+                    'History is unknown; automatic replay and new-chat fallback are disabled.')
+            if row[1]:
+                raise ConversationStateError(
+                    'History is already consumed; automatic replay and new-chat fallback are disabled.')
             if row[2] >= self.max_replies:
                 raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.
@@ -143,7 +179,19 @@ class ConversationCache:
             claim.update(key=key, reservation=reservation)
         tail = [m.model_copy(update={'name': calls[m.tool_call_id]['function']['name']})
                 if m.role == 'tool' else m for m in tail]
-        if result_ids:
+        # A bridge notice about a rejected tool reply is a delivered assistant turn
+        # the provider chat never saw; hand its text to the model with the user's
+        # next message so it can correct the call.
+        notice = notice_of(_text_of(req.messages[end - 1].content))
+        if notice and not calls and tail and tail[0].role == 'user':
+            tail = [tail[0].model_copy(update={
+                'content': notice + '\n\n' + _text_of(tail[0].content)}), *tail[1:]]
+        # Browser providers: one result per tool name is unambiguous by name, so
+        # the result is sent bare. Results of the same tool still need the
+        # identifier mapping (and keep their call_id labels).
+        names = [calls[cid]['function']['name'] for cid in result_ids]
+        unambiguous = compact_results and len(set(names)) == len(names)
+        if result_ids and not unambiguous:
             # Bridge-generated IDs were not present in the upstream answer.
             # Supply the exact delivered calls to bind even out-of-order results.
             tail = [ChatMessage(role='assistant',

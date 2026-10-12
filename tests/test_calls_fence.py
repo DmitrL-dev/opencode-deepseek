@@ -34,6 +34,14 @@ class CallsFenceTests(unittest.TestCase):
             except ToolCallError:
                 continue
             self.assertIsNone(calls, text)
-        for kwargs in ({'finish_reason': 'length'}, {'provider': 'qwen'}, {'tool_choice': 'none'}):
+        for kwargs in ({'finish_reason': 'length'}, {'tool_choice': 'none'}):
             with self.assertRaises(ToolCallError):
                 validate_reply(raw, [tool('read')], **kwargs)
+        # The alias belongs to DeepSeek alone: another provider (an HTTP one fails,
+        # a browser one shows it as text) never executes it.
+        try:
+            _, calls = validate_reply(raw, [tool('read')], provider='qwen')
+        except ToolCallError:
+            pass
+        else:
+            self.assertIsNone(calls)

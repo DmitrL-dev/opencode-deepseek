@@ -320,6 +320,49 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertNotIn("Available tools, given as JSON Schema", follow)
         self.assertNotIn('"required": ["path"]', follow)
 
+    def test_medium_reminder_carries_argument_shapes_without_descriptions(self):
+        tools = [{"type": "function", "function": {
+            "name": "ask_user_question", "description": "SECRET-DESCRIPTION",
+            "parameters": {"type": "object", "required": ["questions"], "properties": {
+                "questions": {"type": "array", "items": {
+                    "type": "object", "required": ["question", "options"], "properties": {
+                        "question": {"type": "string"},
+                        "header": {"type": "string", "description": "SECRET-FIELD-DOC"},
+                        "multiple": {"type": "boolean"},
+                        "options": {"type": "array", "items": {
+                            "type": "object", "required": ["label"],
+                            "properties": {"label": {"type": "string"},
+                                           "description": {"type": "string"}}}}}}}}}}}]
+        follow = messages_to_prompt(
+            [ChatMessage(role="user", content="ask me")], tools=tools,
+            tools_continuation=True, tool_instructions="medium")
+        self.assertIn(
+            "- ask_user_question: {questions: [{question: string, header?: string, "
+            "multiple?: boolean, options: [{label: string, description?: string}]}]}", follow)
+        self.assertNotIn("SECRET-DESCRIPTION", follow)
+        self.assertNotIn("SECRET-FIELD-DOC", follow)
+        self.assertNotIn("Available tools, given as JSON Schema", follow)
+        self.assertIn("Tools remain available from earlier in this chat: ask_user_question", follow)
+        # Medium still sends the full block on the first turn.
+        first = messages_to_prompt(
+            [ChatMessage(role="user", content="ask me")], tools=tools,
+            tools_continuation=False, tool_instructions="medium")
+        self.assertIn("Available tools, given as JSON Schema", first)
+        # Light is the original names-only reminder: no argument shapes.
+        light = messages_to_prompt(
+            [ChatMessage(role="user", content="ask me")], tools=tools,
+            tools_continuation=True, tool_instructions="light")
+        self.assertIn("Tools remain available from earlier in this chat: ask_user_question", light)
+        self.assertNotIn("Argument shapes", light)
+        self.assertNotIn("questions:", light)
+
+    def test_tool_instruction_mode_accepts_medium_and_rejects_unknown(self):
+        from server.config import _tool_instructions_mode
+        with patch.dict("os.environ", {"X_MODE": "Medium"}):
+            self.assertEqual(_tool_instructions_mode("X_MODE", "light"), "medium")
+        with patch.dict("os.environ", {"X_MODE": "heavy"}), self.assertRaises(ValueError):
+            _tool_instructions_mode("X_MODE", "light")
+
     def test_none_tool_instructions_omit_block_on_continuation(self):
         tools = [{
             "type": "function", "function": {"name": "write", "parameters": {
@@ -349,6 +392,25 @@ class ToolProtocolTests(unittest.TestCase):
                 tools_continuation=True, provider="deepseek")
         self.assertIn("Tools remain available from earlier in this chat", browser_follow)
         self.assertIn("Available tools, given as JSON Schema", http_follow)
+
+    def test_browser_tool_result_continuation_sends_only_the_result(self):
+        tools = [{"type": "function", "function": {"name": "write", "parameters": {"type": "object"}}}]
+        result = ChatMessage(role="tool", tool_call_id="call_1", name="write", content='{"ok": true}')
+        for mode in ("full", "medium", "light", "none"):
+            with self.subTest(mode=mode):
+                sent = messages_to_prompt([result], tools=tools, tools_continuation=True,
+                                          tool_instructions=mode, tool_results_compact=True)
+                self.assertEqual(sent, 'Tool result (write): {"ok": true}')
+        # The reminder stays for a plain user message, and nothing changes without the flag.
+        user = messages_to_prompt([ChatMessage(role="user", content="again")], tools=tools,
+                                  tools_continuation=True, tool_instructions="light",
+                                  tool_results_compact=True)
+        self.assertIn("Tools remain available from earlier in this chat", user)
+        plain = messages_to_prompt([result], tools=tools, tools_continuation=True,
+                                   tool_instructions="light")
+        self.assertIn("Tool (write, call_id=call_1)", plain)
+        self.assertIn("Tools remain available from earlier in this chat", plain)
+        self.assertTrue(plain.endswith("Assistant:"))
 
     def test_json_diagnostics_report_only_category_and_position(self):
         bodies = [

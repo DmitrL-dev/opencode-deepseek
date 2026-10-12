@@ -23,13 +23,15 @@ def _transport(name, default, allowed):
 
 def _tool_instructions_mode(name, default):
     value = os.getenv(name, default).strip().lower() or default
-    if value not in ("full", "light", "none"):
-        raise ValueError(f"{name} must be full, light, or none")
+    if value not in ("full", "medium", "light", "none"):
+        raise ValueError(f"{name} must be full, medium, light, or none")
     return value
 
 
 # How OpenAI `tools` are flattened into provider prompts.
 # full  — complete schemas + rules on every turn.
+# medium — like light, but the reminder also lists each tool's argument shape
+#         (field names, nesting; no descriptions).
 # light — full block on the first provider-chat turn; short reminder afterward
 #         (recommended for browser tabs).
 # none  — like light on the first turn; no tools block on continuations.

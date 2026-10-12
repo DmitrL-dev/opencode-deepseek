@@ -455,6 +455,9 @@ fully validated response; the bridge never guesses or edits argument values.
 The first batch is not executed. A second invalid reply is terminal. Account or
 quota refusals, cancellation, missing conversation IDs and output-limit responses
 do not trigger correction. This is off by default and does not guarantee autonomy.
+Browser providers use their own rules (README.en.md): only erroneous calls, an unknown
+tool or arguments off-schema, get one correction; abstract samples stay text, and a
+failed correction passes the raw reply plus a one-line notice to the agent.
 
 For private reproduction of invalid tool replies, set `TOOLCALL_DIAGNOSTICS=1`.
 The last failed reply and advertised tool schemas are saved atomically to

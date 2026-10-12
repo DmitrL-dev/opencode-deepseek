@@ -69,13 +69,16 @@ from .config import (
     is_known_model,
     resolve_model_type,
     model_provider,
+    provider_uses_browser,
     qwen_uses_browser,
 )
+from .tool_notice import tool_failure_message
 from .openai_format import (
     completion_response,
     looks_truncated,
     messages_to_prompt,
     sse_frames,
+    tool_catalog,
     stream_chunks,
     ToolCallError,
     validate_tool_choice,
@@ -325,6 +328,50 @@ _FORMAT_REPAIR_PROMPT = (
     "without a tool_calls block. Do not claim an unexecuted action succeeded."
 )
 
+_BROWSER_REPAIR_TAIL = (
+    "Send a call as a fenced tool_calls block: a JSON array of "
+    "{\"name\": ..., \"arguments\": {...}} entries with exact tool names; all input "
+    "fields belong inside arguments. If no action is needed, answer in plain text. "
+    "Do not claim an unexecuted action succeeded."
+)
+
+
+def _browser_repair_prompt(exc: ToolCallError, tools) -> str:
+    """One pointed correction for a browser provider (no per-turn schema dump)."""
+    if exc.kind == "unknown_tool":
+        shown = f"`{exc.tool}` is not an available tool" if exc.tool else "it named no available tool"
+        return (f"No tools were executed from your previous reply: {shown}. "
+                "Available tools and their argument shapes (`?` = optional; use exactly these "
+                "field names and nesting):\n" + tool_catalog(tools) + "\n" + _BROWSER_REPAIR_TAIL)
+    if exc.kind in ("schema", "format") and exc.guidance:
+        return exc.guidance + "\n" + _BROWSER_REPAIR_TAIL
+    return ("No tools were executed from your previous reply: it was empty or its tool call "
+            "was invalid.\n" + _BROWSER_REPAIR_TAIL)
+
+
+def _executed_calls(messages) -> list:
+    """Canonical (name, arguments) of the calls whose results this request carries."""
+    last = max((i for i, m in enumerate(messages) if m.role == "assistant"), default=None)
+    if last is None or not messages[last].tool_calls:
+        return []
+    if not any(m.role == "tool" for m in messages[last + 1:]):
+        return []
+    executed = []
+    for call in messages[last].tool_calls:
+        function = (call or {}).get("function") or {}
+        executed.append(_canonical_call(function.get("name"), function.get("arguments")))
+    return executed
+
+
+def _canonical_call(name, arguments):
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            pass
+    return name, json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+
+
 # Sent to make the model finish an answer its output limit cut off.
 _CONTINUE_PROMPT = (
     "Your previous message was cut off by the output limit before it finished. "
@@ -402,16 +449,19 @@ def _conversation_tool_chat(prompt, req, model_type):
         else:
             scope = _conversation_scope(provider)
             conversation_token = _bound_conversation.set(binding)
-        req, steps = conversation_cache.prepare(req, scope=scope, claim=claim)
+        browser = provider != "deepseek" and provider_uses_browser(provider)
+        req, steps = conversation_cache.prepare(
+            req, scope=scope, claim=claim, compact_results=browser)
         if req is not original:
             # Continuation of a saved provider chat: browser light mode may shorten tools.
             prompt = messages_to_prompt(
                 req.messages, req.tools, req.tool_choice,
-                tools_continuation=True, provider=provider)
+                tools_continuation=True, provider=provider, tool_results_compact=browser)
             model_type = None
         try:
-            result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
-                      _plain_conversation_reply(prompt, req, model_type))
+            result = (_tool_chat_or_notice(prompt, req, model_type, provider,
+                                           _executed_calls(original.messages) if browser else [])
+                      if req.tools else _plain_conversation_reply(prompt, req, model_type))
         except ProviderRejected as exc:
             # One opt-in migration, never a transport retry or a format repair.
             # Existing pauses cannot enter here: only this request's first,
@@ -461,12 +511,49 @@ def _conversation_tool_chat(prompt, req, model_type):
             conversation_cache.release(claim)
 
 
+def _tool_chat_or_notice(prompt: str, req: ChatCompletionRequest, model_type, provider: str,
+                         executed=()):
+    """Browser providers: a normally finished but invalid tool reply becomes a notice.
+
+    With TOOLCALL_FORMAT_REPAIR=1 one pointed correction is requested first (see
+    _tool_chat_with_retry); only if that also fails, or repair is off, the agent
+    gets an ordinary assistant message (no failed turn). The provider link stays
+    consistent so the user can keep writing, and the model receives the notice
+    with the next user message. Nothing invalid is executed. Forced/required tool
+    choice, unfinished replies, DeepSeek and replies without a conversation id
+    still raise as before. The message is the model's raw reply plus a one-line
+    notice. A call that repeats, with the same arguments, a call whose result this
+    request carries is not executed again either: it is delivered the same way.
+    """
+    auto = req.tool_choice in (None, "auto")
+    try:
+        result = _tool_chat_with_retry(prompt, req, model_type)
+    except ToolCallError as exc:
+        failed = exc.reply
+        if (provider == "deepseek" or not provider_uses_browser(provider)
+                or not auto or failed is None
+                or failed.finish_reason != "stop" or not failed.conversation_id):
+            raise
+        print('[toolcalls] invalid reply returned as a bridge notice', flush=True)
+        return failed, tool_failure_message(failed.text, exc), None
+    reply, _content, calls = result
+    if calls and executed and auto and reply.conversation_id:
+        repeated = [_canonical_call(c["function"]["name"], c["function"]["arguments"]) for c in calls]
+        if any(call in executed for call in repeated):
+            print('[toolcalls] repeated call not executed; returned as a bridge notice', flush=True)
+            return reply, tool_failure_message(
+                reply.text, ToolCallError("Repeated tool call", kind="repeat")), None
+    return result
+
+
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     reply = _chat_with_retry(prompt, req, model_type)
     try:
         return _validate_tool_reply(reply, req)
     except ToolCallError as initial_error:
-        if not (_FORMAT_REPAIR and model_provider(req.model) == "deepseek"
+        provider = model_provider(req.model)
+        browser = provider != "deepseek" and provider_uses_browser(provider)
+        if not (_FORMAT_REPAIR and (provider == "deepseek" or browser)
                 and req.tool_choice != "none" and reply.finish_reason == "stop"
                 and reply.conversation_id):
             print('[toolcalls] format_correction=not_eligible', flush=True)
@@ -474,9 +561,14 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         _check_cancelled()
         correction = req.model_copy(update={"conversation_id": reply.conversation_id})
         print('[toolcalls] format_correction=requested', flush=True)
-        correction_prompt = _FORMAT_REPAIR_PROMPT
-        if initial_error.repair_hint:
-            correction_prompt += "\n" + initial_error.repair_hint
+        if browser:
+            # Pointed reminder instead of resending the schemas every turn: the
+            # tool list for an unknown tool, else the offending tool's shape.
+            correction_prompt = _browser_repair_prompt(initial_error, req.tools)
+        else:
+            correction_prompt = _FORMAT_REPAIR_PROMPT
+            if initial_error.repair_hint:
+                correction_prompt += "\n" + initial_error.repair_hint
         corrected = _chat_with_retry(correction_prompt, correction, None)
         if corrected.finish_reason != "stop":
             print('[toolcalls] format_correction=incomplete', flush=True)
@@ -488,10 +580,14 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
             result = _validate_tool_reply(corrected, req)
         except ToolCallError as exc:
             print('[toolcalls] format_correction=invalid', flush=True)
-            raise ToolCallError(
+            failure = ToolCallError(
                 'The single format correction also failed; no further correction was requested. '
-                + str(exc)
-            ) from exc
+                + str(exc), repair_hint=exc.repair_hint, guidance=exc.guidance,
+                kind=exc.kind, tool=exc.tool)
+            # Browser providers then fall back to a bridge notice (see
+            # _tool_chat_or_notice), built from the corrected reply's chat.
+            failure.reply = exc.reply
+            raise failure from exc
         print('[toolcalls] format_correction=validated', flush=True)
         return result
 
@@ -517,7 +613,8 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest, *, allow_cont
                     finish_reason=reply.finish_reason,
                     provider=model_provider(req.model),
                 )
-            except ToolCallError:
+            except ToolCallError as exc:
+                exc.reply = reply
                 save_tool_failure(reply, req)
                 if _toolcall_debug():
                     print(f"[toolcalls] invalid explicit reply:\n{reply.text}\n", flush=True)

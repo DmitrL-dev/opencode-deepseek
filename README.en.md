@@ -185,7 +185,57 @@ its context. It is not a local budget or expired session; resetting counters or
 signing in again will not fix it. The bridge preserves history and stops, without
 creating a new chat. Migrating the goal requires a separate manual decision.
 
-Disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
+New mode `TOOL_INSTRUCTIONS_BROWSER=medium` (the default stays `light`, unchanged:
+tool names only). On chat continuations the reminder also includes each tool's
+argument shape (field names, nesting, `?` = optional; no descriptions) so the model
+does not guess arguments from memory; the first turn still gets the full block, as
+in `light`. Continuation prompts are longer. A reply like `{"question": ..., "options": [...]}` instead of `{"questions": [...]}`
+is rejected with "Tool arguments do not satisfy the advertised schema". No extra
+generation.
+
+Tool calls from browser providers (every provider except DeepSeek, whose behavior is
+unchanged) are handled like in any agent. Only a top-level fenced `tool_calls` block is
+a call, wherever it stands in the message. Prose, text after the block, several
+blocks, arrays without that fence (also inside a ```` ```json ```` block) and quoted
+blocks are plain text. A block is text, not an error, when its JSON is syntactically
+broken (a missing comma, an ellipsis `...`) or names no tool: an abstract sample.
+Otherwise it must be valid: an unknown tool name (even in a well-formed demo) or
+arguments that do not fit that tool's schema stop the whole message and nothing runs.
+When every block is valid, all calls run in order: the agent receives them as
+`tool_calls` and the rest of the message, with the call blocks cut out, as ordinary
+content. `tool_choice: none` never turns text into an error. Verified offline.
+
+With `TOOLCALL_FORMAT_REPAIR=1` (off by default) an erroneous call gets one correction
+in the same chat, as one extra generation on the provider account: for an unknown tool
+the full list of tools with their argument shapes (field names, nesting, `?` =
+optional; not shortened), for wrong arguments that tool's argument shape (no values).
+No second correction is requested. If the corrected reply is valid the agent sees only
+the final call, with no notice. If it is erroneous again, or with
+`TOOLCALL_FORMAT_REPAIR=0` at once (log line `format_correction=not_eligible`), the
+agent receives the message below. Verified offline.
+
+That message is an ordinary assistant message, not an error: the model's raw reply
+followed by one line `Bridge notice: the tool call in the message above was NOT
+executed: …` that names at most the offending tool (no tool list, no argument shapes,
+no values). Nothing runs and no extra generation happens. The provider link is kept, so
+you can keep writing (otherwise: "History is already consumed…"): your next message
+goes to the same chat together with that line. Still errors, as before: DeepSeek,
+`tool_choice` required/specific tool, a reply without a conversation id and an
+unfinished reply. Verified offline.
+
+A call that repeats, with identical arguments, the call whose result the request
+carries (the model answers a tool result with the same call again) is not executed a
+second time: the agent gets the same kind of message (raw reply plus a line saying the
+call repeats the one just executed), not an error. A different call, or a call after a
+new user message, runs normally. Verified offline.
+
+The tool result the agent returns (for example the option you picked) goes to the
+provider as just `Tool result (name): <result JSON>`. It carries no tools reminder
+(`TOOL_INSTRUCTIONS_BROWSER` still applies to ordinary user messages), no repeated
+question or call and no bridge call id; results of several calls to the same tool keep
+the identifier mapping. DeepSeek and HTTP providers are unchanged. Verified offline.
+
+For DeepSeek, disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
 it does not disable tool-markup validation. Malformed tool blocks stop the step
 instead of being returned as successful plain text.
 After a normal DeepSeek stop, commentary may precede one explicit terminal
@@ -199,9 +249,10 @@ fences and quotations do not become calls. Prose quotations may precede a separa
 top-level `tool_calls` block with a blank line before its opening fence. Quoted,
 nested and ambiguous code blocks are not executed; `>` markers are never stripped
 from code. An explicit `tool_calls` block is an
-action protocol: do not use it for explanatory examples. Remote schemas are never
-fetched; local `$ref` references work. On update, install `requirements.txt`
-(the new dependency is `jsonschema`) and restart the bridge.
+action protocol: do not use it for explanatory examples. Browser providers follow the
+rules above instead. Remote schemas are never fetched; local `$ref` references work.
+On update, install `requirements.txt` (the new dependency is `jsonschema`) and
+restart the bridge.
 
 A normal stop with a closed fence also permits swapping the final `]}` to `}]`
 only when a string-aware scan confirms that arguments are complete and only the
@@ -374,6 +425,8 @@ Use the same bridge and account setup above. Put the example
 [`opencode.json`](examples/opencode.json) in your project. For existing configs,
 merge settings while preserving your `provider`, `model` and `small_model`.
 Set `small_model` explicitly: title generation can also consume messages.
+Do not point title/`small_model` at a browser model — that opens a second tab
+chat (Harness disables `session-title-llm` in its profile).
 
 ```bash
 cd /path/to/your-project
@@ -416,7 +469,9 @@ and reset time have not been established.
 **Harness or OpenCode runs tools on your computer.** Prompts and tool-read data
 are sent to the selected provider. The bridge validates responses and
 `tool_calls`, saves conversation state and sends new tool results to the existing
-chat. Unknown history stops instead of silently creating a new chat.
+chat. Continuation matching ignores client `system` prompts and OpenCode
+`<system-reminder>` wrappers (they change between turns). Unknown or already
+consumed history stops instead of silently creating a new chat.
 
 Refusal pauses survive restart. Client setup, ordinary sign-in and local budget
 reset do not clear them. The explicit Safari transfer can clear an authentication

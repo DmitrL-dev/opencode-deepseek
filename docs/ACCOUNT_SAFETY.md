@@ -144,12 +144,14 @@ model generation. The following changes are qualified using offline transports
 and an isolated Harness CLI, not by further requests to the restricted account.
 
 Stateless OpenAI clients continue a saved provider conversation when their
-history exactly matches a delivered reply. This applies to DeepSeek and to
+non-system history matches a delivered reply. This applies to DeepSeek and to
 opt-in web providers (including Qwen browser tab bridge): only new tool
 results/user messages and current tool instructions are sent, so the browser
 tab resumes `/c/<id>` instead of opening another chat with the full system
-prompt. A private SQLite file in `session/` stores history hashes and provider
-conversation IDs, never message bodies.
+prompt. Client `system` messages and ephemeral OpenCode `<system-reminder>`
+wrappers are omitted from the history hash (they change between agent turns and
+are not forwarded on continuation). A private SQLite file in `session/` stores
+history hashes and provider conversation IDs, never message bodies.
 Links are reserved atomically before dispatch. A reservation is released only
 when the current request fails with a proven absence of HTTP dispatch. Once any
 HTTP request was dispatched, or after a process crash, the link stays consumed. Unknown, edited, compacted,
