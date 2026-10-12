@@ -1,9 +1,10 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export const name = 'bridge-shell-safety';
-export const contractVersion = 'harness-contract-v2';
+export const contractVersion = 'harness-contract-v3';
 export const inject = ['shell', 'tools', 'commands', 'goals'];
 
 // This is execution policy, not a rewrite of the model's shell source. Bash
@@ -17,7 +18,16 @@ export function hardenSpec(spec, cacheRoot) {
     + '  if [ "$status" -eq 1 ]; then return 0; fi\n'
     + '  return "$status"\n'
     + '}\n';
-  return {...spec, command: 'set -e -o pipefail\n' + optionalGrep + spec.command,
+  const helper = fileURLToPath(new URL('./harness_gh_checks.py', import.meta.url));
+  const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  const ghChecks = 'gh() {\n'
+    + '  if [ "${1-}" = pr ] && [ "${2-}" = checks ]; then\n'
+    + '    local gh_binary; gh_binary=$(type -P gh) || return $?\n'
+    + '    shift 2\n'
+    + '    command python3 ' + quote(helper) + ' "$gh_binary" "$@"\n'
+    + '  else command gh "$@"; fi\n'
+    + '}\n';
+  return {...spec, command: 'set -e -o pipefail\n' + optionalGrep + ghChecks + spec.command,
     env: {...spec.env, XDG_CACHE_HOME: cacheRoot}};
 }
 
@@ -59,7 +69,7 @@ export function apply(ctx) {
       const active = spec.command.startsWith('set -e -o pipefail\n') && spec.env.XDG_CACHE_HOME === cacheRoot
         && typeof ctx.goals.disarm === 'function';
       return {kind: active ? 'success' : 'error', text: active
-        ? `Shell safety active (${contractVersion}): errexit + pipefail; goal disarm before native stop on tool failure; private temporary gh cache. No command or provider request was sent.`
+        ? `Shell safety active (${contractVersion}): errexit + pipefail; goal disarm before native stop on tool failure; validated gh pr checks status; private temporary gh cache. No command or provider request was sent.`
         : 'Shell safety is not active in the current executor. Do not resume until the profile is reloaded.'};
     }});
 }

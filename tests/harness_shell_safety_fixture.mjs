@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, statSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, statSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hardenSpec, failedResult, apply } from '../integrations/harness_shell_safety.mjs';
@@ -15,6 +15,23 @@ try {
     return spawnSync('bash', ['-c', spec.command], {cwd: spec.workdir,
       env: {...process.env, ...spec.env}, encoding: 'utf8'});
   }
+  const fakeGh = join(root, 'gh');
+  const payload = JSON.stringify([{name: 'CI', bucket: 'fail', state: 'FAILURE', link: '', workflow: ''}]);
+  writeFileSync(fakeGh, '#!/bin/bash\nprintf \'%s\\n\' \'' + payload + '\'\nexit 1\n', {mode: 0o700});
+  const oldPath = process.env.PATH;
+  process.env.PATH = root + ':' + oldPath;
+  let check = run('gh pr checks 69 2>&1 | sed -n \'1,40p\'; printf CONTINUED');
+  assert.equal(check.status, 0, check.stderr);
+  assert.match(check.stdout, /"bucket": "fail"/);
+  assert.match(check.stdout, /CONTINUED/);
+  assert.equal(run('gh pr checks 69 | (exit 17); printf UNREACHABLE').status, 17);
+  writeFileSync(fakeGh, '#!/bin/bash\nprintf "auth failed\\n" >&2\nexit 1\n');
+  check = run('gh pr checks 69 2>&1 | sed -n \'1,40p\'; printf UNREACHABLE');
+  assert.equal(check.status, 1);
+  assert.match(check.stdout, /auth failed/);
+  assert.doesNotMatch(check.stdout, /UNREACHABLE/);
+  assert.equal(run('gh pr list; printf UNREACHABLE').status, 1);
+  process.env.PATH = oldPath;
   let result = run('printf before; (exit 17) | tail -60; printf UNREACHABLE');
   assert.equal(result.status, 17);
   assert.equal(result.stdout, 'before');
@@ -66,7 +83,7 @@ try {
     cancel() { stopped = true; }}}, {isError: true}), /disarm failed/);
   assert.equal(stopped, true);
   assert.equal((await commands[0].handler()).kind, 'success');
-  assert.match((await commands[0].handler()).text, /harness-contract-v2/);
+  assert.match((await commands[0].handler()).text, /harness-contract-v3/);
   disposers.forEach(fn => fn());
   assert.equal(ctx.shell.resolve, resolve);
   rmSync(hardened.env.XDG_CACHE_HOME, {recursive: true});
