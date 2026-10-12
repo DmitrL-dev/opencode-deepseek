@@ -5,9 +5,9 @@ import os
 
 
 def completion_timeout():
-    value = float(os.getenv("WEB_PROVIDER_TIMEOUT", "180"))
-    if not math.isfinite(value) or not 1 <= value <= 1800:
-        raise ValueError("WEB_PROVIDER_TIMEOUT must be between 1 and 1800 seconds")
+    value = float(os.getenv("PROVIDER_RESPONSE_TIMEOUT", "600"))
+    if not math.isfinite(value) or not 1 <= value <= 18000:
+        raise ValueError("PROVIDER_RESPONSE_TIMEOUT must be between 1 and 18000 seconds")
     return value
 
 class ProviderUnavailable(RuntimeError):

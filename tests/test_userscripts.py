@@ -42,8 +42,8 @@ class ObserverBoundaryFixtureTests(unittest.TestCase):
             window.fetch = async () => new Response('owned response', {headers:{'Content-Type':'text/event-stream'}});
         }""", """async () => {
             startOwnedJob('current-job');
-            for (const [messageId,text] of [['neighbor','prefix owned prompt'],['owned-user','owned prompt']]) {
-                await fetch('/api/reply', {method:'POST',body:JSON.stringify({chatId:'owned-chat',messageId,
+            for (const [chatId,messageId,text] of [['other','neighbor','owned prompt'],['owned-chat','owned-user','owned prompt']]) {
+                await fetch('/api/reply', {method:'POST',body:JSON.stringify({chatId,messageId,
                     messageInput:[{type:'text',text}],credentials:'must never be exported'})});
             }
         }""", "receipts.some(r => r.body)")

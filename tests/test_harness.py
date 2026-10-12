@@ -69,7 +69,7 @@ class HarnessSetupTests(unittest.TestCase):
 
     def test_without_browser_filters_all_providers_and_preserves_advertised_order(self):
         rows = [{"id": provider + "-test", "owned_by": provider}
-                for provider in ("glm", "deepseek", "kimi", "qwen", "grok", "gemini", "mistral")]
+                for provider in ("glm", "deepseek", "kimi", "qwen", "grok", "gemini", "mistral", "chatgpt", "claude")]
         catalog = {"data": rows}
         self.assertEqual([model["id"] for model in harness.catalog_models(catalog)],
                          [row["id"] for row in rows])
@@ -114,6 +114,15 @@ class HarnessSetupTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             harness.catalog_models({"data": [{"id": "evil/qwen3.8-omni-flash", "owned_by": "qwen"}]})
+
+    def test_without_browser_excludes_web_aliases_too(self):
+        rows = [{"id": "deepseek/deepseek-chat", "owned_by": "deepseek"}]
+        for model in harness.BRIDGE_ONLY_MODELS:
+            owner = model.removesuffix("-web")
+            rows.extend({"id": value, "owned_by": owner}
+                        for value in (model, owner + "/" + model))
+        models = harness.catalog_models({"data": rows}, without_browser=True)
+        self.assertEqual([row["id"] for row in models], ["deepseek/deepseek-chat"])
 
     def run_cli_catalog(self, catalog, *args):
         requests = []

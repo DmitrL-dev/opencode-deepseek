@@ -1,6 +1,7 @@
 import json
 import re
 import unittest
+from unittest.mock import patch
 
 from server.openai_format import (
     ToolCallError, enforce_tool_choice, looks_truncated, messages_to_prompt,
@@ -286,6 +287,52 @@ class ToolProtocolTests(unittest.TestCase):
                                         tools=[{"name": "write", "parameters": {}}], tool_choice=choice)
             self.assertTrue(forced.rsplit('Assistant:', 1)[0].rstrip().endswith(
                 'Reply with ONLY the fenced tool_calls block.'))
+
+    def test_light_tool_instructions_use_reminder_only_on_continuation(self):
+        tools = [{
+            "type": "function", "function": {"name": "write", "parameters": {
+                "type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}}]
+        first = messages_to_prompt(
+            [ChatMessage(role="user", content="edit")], tools=tools,
+            tools_continuation=False, tool_instructions="light")
+        follow = messages_to_prompt(
+            [ChatMessage(role="user", content="again")], tools=tools,
+            tools_continuation=True, tool_instructions="light")
+        self.assertIn("Available tools, given as JSON Schema", first)
+        self.assertIn('"name": "write"', first)
+        self.assertIn("Tools remain available from earlier in this chat: write", follow)
+        self.assertNotIn("Available tools, given as JSON Schema", follow)
+        self.assertNotIn('"required": ["path"]', follow)
+
+    def test_none_tool_instructions_omit_block_on_continuation(self):
+        tools = [{
+            "type": "function", "function": {"name": "write", "parameters": {
+                "type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}}]
+        first = messages_to_prompt(
+            [ChatMessage(role="user", content="edit")], tools=tools,
+            tools_continuation=False, tool_instructions="none")
+        follow = messages_to_prompt(
+            [ChatMessage(role="user", content="again")], tools=tools,
+            tools_continuation=True, tool_instructions="none")
+        self.assertIn("Available tools, given as JSON Schema", first)
+        self.assertIn('"name": "write"', first)
+        self.assertNotIn("Available tools, given as JSON Schema", follow)
+        self.assertNotIn("Tools remain available from earlier in this chat", follow)
+        self.assertNotIn('"required": ["path"]', follow)
+
+    def test_browser_provider_defaults_to_light_http_to_full(self):
+        tools = [{"type": "function", "function": {"name": "write", "parameters": {"type": "object"}}}]
+        with patch("server.config.TOOL_INSTRUCTIONS_BROWSER", "light"), \
+             patch("server.config.TOOL_INSTRUCTIONS_HTTP", "full"), \
+             patch("server.config.provider_uses_browser", side_effect=lambda p: p == "grok"):
+            browser_follow = messages_to_prompt(
+                [ChatMessage(role="user", content="again")], tools=tools,
+                tools_continuation=True, provider="grok")
+            http_follow = messages_to_prompt(
+                [ChatMessage(role="user", content="again")], tools=tools,
+                tools_continuation=True, provider="deepseek")
+        self.assertIn("Tools remain available from earlier in this chat", browser_follow)
+        self.assertIn("Available tools, given as JSON Schema", http_follow)
 
     def test_json_diagnostics_report_only_category_and_position(self):
         bodies = [

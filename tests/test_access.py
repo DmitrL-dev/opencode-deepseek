@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import httpx
 from fastapi.testclient import TestClient
-from openai import OpenAI, PermissionDeniedError, APIError
+from openai import OpenAI, PermissionDeniedError, BadRequestError, APIError
 
 from deepseek.auth import get_session, LoginRequired, Session
 from deepseek.client import DeepSeekClient, _biz, _parse_sse
@@ -39,7 +39,8 @@ class AccessTests(unittest.TestCase):
 
     def test_pause_survives_restart_and_resume_in_separate_process_view(self):
         guard = AccessGuard(self.path, interval=0)
-        guard.reject("deepseek", ProviderRejected("account_restricted"))
+        with self.assertLogs("providers.access", level="WARNING"):
+            guard.reject("deepseek", ProviderRejected("account_restricted"))
         restarted = AccessGuard(self.path, interval=0)
         with self.assertRaises(ProviderRejected) as failure:
             restarted.check("deepseek")
@@ -48,6 +49,100 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
         restarted.resume("deepseek")
         guard.check("deepseek")
+
+    def test_new_pause_logs_sanitized_http_shape_not_payload_text(self):
+        request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
+        response = httpx.Response(
+            403,
+            headers={"content-type": "application/json; charset=utf-8",
+                     "set-cookie": "secret=private"},
+            json={"success": False, "data": {"code": "403", "message": "secret=private token=leak"}},
+            request=request,
+        )
+        failure = httpx.HTTPStatusError("denied", request=request, response=response)
+        guard = AccessGuard(self.path, interval=0)
+        with self.assertLogs("providers.access", level="WARNING") as logs:
+            error = guard.reject("qwen", failure)
+        self.assertEqual(error.code, "access_denied")
+        rendered = " ".join(logs.output)
+        self.assertIn("Provider pause set:", rendered)
+        self.assertIn("provider=qwen", rendered)
+        self.assertIn("code=access_denied", rendered)
+        self.assertIn("reason=http_status", rendered)
+        self.assertIn("exc_type=HTTPStatusError", rendered)
+        self.assertIn("http_status=403", rendered)
+        self.assertIn("content_type=application/json", rendered)
+        self.assertIn("business_code=403", rendered)
+        self.assertIn("success_true=False", rendered)
+        self.assertIn("response_type=object", rendered)
+        self.assertNotIn("secret", rendered)
+        self.assertNotIn("private", rendered)
+        self.assertNotIn("token=leak", rendered)
+        self.assertNotIn("set-cookie", rendered)
+        with self.assertRaises(AssertionError):
+            with self.assertLogs("providers.access", level="WARNING"):
+                guard.reject("qwen", failure)
+
+    def test_new_pause_logs_html_gateway_shape_without_markup(self):
+        request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
+        response = httpx.Response(
+            403,
+            headers={"content-type": "text/html"},
+            content=b"<html><title>secret-challenge</title></html>",
+            request=request,
+        )
+        failure = httpx.HTTPStatusError("denied", request=request, response=response)
+        guard = AccessGuard(self.path, interval=0)
+        with self.assertLogs("providers.access", level="WARNING") as logs:
+            self.assertEqual(guard.reject("qwen", failure).code, "access_denied")
+        rendered = " ".join(logs.output)
+        self.assertIn("response_type=html", rendered)
+        self.assertIn("http_status=403", rendered)
+        self.assertNotIn("secret-challenge", rendered)
+        self.assertNotIn("<html>", rendered)
+
+    def test_new_pause_logs_protocol_token_for_qwen_stream_errors(self):
+        from qwen.client import QwenStreamError
+        failure = QwenStreamError("Qwen stream ended before a terminal marker")
+        guard = AccessGuard(self.path, interval=0)
+        with self.assertLogs("providers.access", level="WARNING") as logs:
+            error = guard.reject("qwen", failure)
+        self.assertEqual(error.code, "upstream_failure")
+        rendered = " ".join(logs.output)
+        self.assertIn("exc_type=QwenStreamError", rendered)
+        self.assertIn("protocol=stream_no_terminal", rendered)
+        self.assertIn("reason=invalid_protocol", rendered)
+        self.assertNotIn("terminal marker", rendered)
+
+    def test_new_pause_logs_attached_business_diagnostics(self):
+        failure = ProviderRejected("upstream_failure")
+        failure.phase = "sse_error"
+        failure.protocol = "business_error"
+        failure.business_code = "muted"
+        failure.response_type = "object"
+        failure.success_true = False
+        guard = AccessGuard(self.path, interval=0)
+        with self.assertLogs("providers.access", level="WARNING") as logs:
+            self.assertEqual(guard.reject("qwen", failure).code, "upstream_failure")
+        rendered = " ".join(logs.output)
+        self.assertIn("phase=sse_error", rendered)
+        self.assertIn("protocol=business_error", rendered)
+        self.assertIn("business_code=muted", rendered)
+        self.assertIn("success_true=False", rendered)
+
+    def test_new_pause_logs_raw_code_from_exception(self):
+        failure = ProviderRejected("upstream_failure")
+        failure.phase = "completion_non_sse"
+        failure.protocol = "business_error"
+        failure.content_type = "application/json"
+        failure.raw_code = "RateLimited_V2"
+        failure.response_type = "object"
+        guard = AccessGuard(self.path, interval=0)
+        with self.assertLogs("providers.access", level="WARNING") as logs:
+            guard.reject("qwen", failure)
+        rendered = " ".join(logs.output)
+        self.assertIn("raw_code=RateLimited_V2", rendered)
+        self.assertIn("content_type=application/json", rendered)
 
     def test_malformed_state_and_failed_write_stop_requests(self):
         for text in ('{', '[]', '{"qwen": []}', '{"qwen": "invented"}'):
@@ -95,7 +190,7 @@ class AccessTests(unittest.TestCase):
             login.assert_not_called()
 
     def test_clean_install_has_no_implicitly_enabled_provider(self):
-        env = {**os.environ, "DEEPSEEK_ENABLED": "0", "QWEN_ENABLED": "0", **{name + "_ENABLED": "0" for name in ("GROK", "MISTRAL", "KIMI", "GLM", "GEMINI")}}
+        env = {**os.environ, "DEEPSEEK_ENABLED": "0", "QWEN_ENABLED": "0", **{name + "_ENABLED": "0" for name in ("GROK", "MISTRAL", "KIMI", "GLM", "GEMINI", "CHATGPT")}}
         result = subprocess.run([sys.executable, "-c", "from server.config import MODEL_MAP; print(MODEL_MAP)"], env=env, capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), "{}")
 
@@ -238,7 +333,12 @@ class SafetySdkTests(unittest.TestCase):
         cache_patch.start()
         self.addCleanup(cache_patch.stop)
         self.guard = AccessGuard(Path(self.directory.name) / "pauses.json", interval=0)
-        for patcher in (patch.object(api, "guard", self.guard), patch.dict(api.MODEL_MAP, {**DEEPSEEK_MODEL_MAP, **QWEN_MODEL_MAP}, clear=True)):
+        for patcher in (
+            patch.object(api, "guard", self.guard),
+            patch.dict(api.MODEL_MAP, {**DEEPSEEK_MODEL_MAP, **QWEN_MODEL_MAP}, clear=True),
+            # Keep direct HTTP Qwen path regardless of the developer's .env transport.
+            patch.object(api, "qwen_uses_browser", return_value=False),
+        ):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.transport = TestClient(api.app, client=(self.id(), 123))
@@ -277,8 +377,10 @@ class SafetySdkTests(unittest.TestCase):
                     self.assertEqual(failure.exception.body["code"], "session_expired")
                     self.assertFalse(failure.exception.body["retryable"])
                     restarted = AccessGuard(case_guard.path, interval=0)
-                    with patch.object(api, "guard", restarted), self.assertRaises(PermissionDeniedError):
+                    with patch.object(api, "guard", restarted), self.assertRaises(BadRequestError) as resumed:
                         self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
+                    self.assertEqual(resumed.exception.body["code"], "session_expired")
+                    self.assertFalse(resumed.exception.body["retryable"])
                     self.assertEqual(calls.count(path), 1)
                     self.assertEqual(factory.call_count, 1)
 
@@ -288,11 +390,21 @@ class SafetySdkTests(unittest.TestCase):
             client, calls = self.deepseek_fixture(path)
             with self.subTest(path=path), patch.object(api, "get_client", return_value=client) as factory, \
                     self.assertLogs('deepseek.client', level='WARNING') as diagnostics:
-                for _ in range(2):
-                    with self.assertRaises(PermissionDeniedError) as failure:
+                for attempt in range(2):
+                    # First refusal is upstream (403); later hits are local pause (400).
+                    expected = PermissionDeniedError if attempt == 0 else BadRequestError
+                    with self.assertRaises(expected) as failure:
                         self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
                     self.assertFalse(failure.exception.body["retryable"])
                     self.assertEqual(failure.exception.body["code"], "account_restricted")
+                    message = failure.exception.body["message"]
+                    self.assertIn("providers.access resume deepseek", message)
+                    if attempt == 0:
+                        self.assertIn("Upstream provider `deepseek` refused", message)
+                        self.assertIn("enabled a durable providers.access pause", message)
+                    else:
+                        self.assertIn("Manual providers.access pause is blocking", message)
+                        self.assertIn("No request was sent", message)
                 self.assertEqual(calls.count(path), 1)
                 self.assertEqual(factory.call_count, 1)
             expected_phase = {'/api/v0/chat_session/create': 'create_chat',
@@ -322,8 +434,9 @@ class SafetySdkTests(unittest.TestCase):
                 with self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages, tools=tools, stream=True) as stream:
                     with self.assertRaises(APIError):
                         list(stream)
-                with self.assertRaises(PermissionDeniedError):
+                with self.assertRaises(BadRequestError) as blocked:
                     self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages, tools=tools, stream=True)
+                self.assertIn("providers.access resume deepseek", blocked.exception.body["message"])
                 self.assertEqual(calls.count("/api/v0/chat/completion"), 1)
                 self.assertEqual(factory.call_count, 1)
 
@@ -338,14 +451,16 @@ class SafetySdkTests(unittest.TestCase):
         self.assertEqual(client.chat.call_count, 2)
 
     def test_browser_or_cli_denial_is_terminal_and_provider_scoped(self):
-        for provider in ("grok", "mistral", "kimi", "glm", "gemini"):
+        for provider in ("grok", "mistral", "kimi", "glm", "gemini", "chatgpt", "claude"):
             name = provider + "-fixture"
             fake = Mock()
             fake.chat.side_effect = ProviderUnavailable("quota or regional restriction")
             with patch.dict(api.MODEL_MAP, {name: "fixture"}), patch.dict(api.model_provider.__globals__["OPTIONAL_MODEL_PROVIDERS"], {name: provider}), patch.object(api, "build_provider_client", return_value=fake) as factory:
-                for _ in range(2):
-                    with self.assertRaises(PermissionDeniedError):
-                        self.sdk.chat.completions.create(model=name, messages=self.messages)
+                with self.assertRaises(PermissionDeniedError):
+                    self.sdk.chat.completions.create(model=name, messages=self.messages)
+                with self.assertRaises(BadRequestError) as blocked:
+                    self.sdk.chat.completions.create(model=name, messages=self.messages)
+                self.assertIn("providers.access resume " + provider, blocked.exception.body["message"])
                 self.assertEqual(factory.call_count, 1)
                 self.assertEqual(fake.chat.call_count, 1)
         self.guard.check("qwen")
@@ -367,8 +482,9 @@ class SafetySdkTests(unittest.TestCase):
         def factory():
             self.guard.reject("deepseek", ProviderRejected("account_restricted"))
             return client
-        with patch.object(api, "get_client", side_effect=factory), self.assertRaises(PermissionDeniedError):
+        with patch.object(api, "get_client", side_effect=factory), self.assertRaises(BadRequestError) as blocked:
             self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
+        self.assertIn("providers.access resume deepseek", blocked.exception.body["message"])
         self.assertEqual(calls, [])
 
     def test_signin_and_resume_replace_rejected_clients_without_server_restart(self):

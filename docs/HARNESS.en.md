@@ -219,7 +219,7 @@ DEEPSEEK_MAX_CHATS_PER_HOUR=6
 DEEPSEEK_MAX_CHATS_PER_DAY=24
 DEEPSEEK_MAX_HTTP_PER_HOUR=200
 DEEPSEEK_MAX_HTTP_PER_DAY=1000
-DEEPSEEK_MAX_CONVERSATION_REPLIES=200
+CONVERSATION_MAX_REPLIES=200
 ```
 
 This is an expanded local budget example, not DeepSeek's allowance. Defaults
@@ -245,7 +245,7 @@ SSE `finish` fix has regression coverage. Generic JSON correction passed three
 format variants using the real Harness CLI and a local mocked provider. A new
 large live Expert task has not been qualified after these changes.
 
-`DEEPSEEK_MAX_CONVERSATION_REPLIES` separately controls the conversation cap (default 20, range 1–1000). It counts accepted replies, not all upstream generations: format correction also consumes the rolling budget. After raising it and restarting, exact saved history can continue in the same conversation. Counters and one-use protection are preserved; unknown or edited histories remain rejected.
+`CONVERSATION_MAX_REPLIES` separately controls the conversation cap (default 20, range 1–1000). It counts accepted replies, not all upstream generations: format correction also consumes the rolling budget. After raising it and restarting, exact saved history can continue in the same conversation. Counters and one-use protection are preserved; unknown or edited histories remain rejected.
 
 An empty or whitespace-only tool-mode reply is rejected instead of reported as success. With `TOOLCALL_FORMAT_REPAIR=1`, normal completion permits one correction in the same conversation; a second empty reply returns an explicit error. Output limits, refusals and `tool_choice=none` never trigger correction.
 

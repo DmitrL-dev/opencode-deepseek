@@ -129,7 +129,7 @@ class ConversationTests(unittest.TestCase):
         req = self.req.model_copy(update={'messages': self.history()})
         with self.assertRaises(ConversationStateError):
             self.cache.prepare(req)
-        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '100'}):
+        with patch.dict('os.environ', {'CONVERSATION_MAX_REPLIES': '100'}):
             restarted = ConversationCache(self.cache.path)
             continuation, steps = restarted.prepare(req)
             self.assertEqual(continuation.conversation_id, 'owned:2')
@@ -138,7 +138,7 @@ class ConversationTests(unittest.TestCase):
                 restarted.prepare(req)
 
     def test_configured_cap_stops_before_claiming_history(self):
-        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '100'}):
+        with patch.dict('os.environ', {'CONVERSATION_MAX_REPLIES': '100'}):
             cache = ConversationCache(self.cache.path)
             cache.remember(self.req, self.reply, '', self.calls, 99)
             with self.assertRaisesRegex(ConversationStateError, '100 accepted replies'):
@@ -148,12 +148,12 @@ class ConversationTests(unittest.TestCase):
 
     def test_raise_100_to_200_preserves_history_and_stops_at_200(self):
         req = self.req.model_copy(update={'messages': self.history()})
-        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '100'}):
+        with patch.dict('os.environ', {'CONVERSATION_MAX_REPLIES': '100'}):
             old = ConversationCache(self.cache.path)
             old.remember(self.req, self.reply, '', self.calls, 99)
             with self.assertRaises(ConversationStateError):
                 old.prepare(req)
-        with patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': '200'}):
+        with patch.dict('os.environ', {'CONVERSATION_MAX_REPLIES': '200'}):
             restarted = ConversationCache(self.cache.path)
             continuation, steps = restarted.prepare(req)
             self.assertEqual((continuation.conversation_id, steps), ('owned:2', 100))
@@ -169,7 +169,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_invalid_conversation_cap_fails_startup(self):
         for raw in ('0', '-1', '1001', 'nan', '1.5', '', '２０'):
-            with self.subTest(raw=raw), patch.dict('os.environ', {'DEEPSEEK_MAX_CONVERSATION_REPLIES': raw}):
+            with self.subTest(raw=raw), patch.dict('os.environ', {'CONVERSATION_MAX_REPLIES': raw}):
                 with self.assertRaises(ValueError):
                     ConversationCache(self.cache.path)
 
@@ -317,6 +317,62 @@ class ConversationTests(unittest.TestCase):
         with patch.object(api, 'get_client') as factory, self.assertRaises(ProviderRejected):
             api._chat_with_retry('x' * 131073, self.req, 'default')
         factory.assert_not_called()
+
+    def test_qwen_browser_stateless_continuation_reuses_chat_path(self):
+        from providers.conversations import encode
+        chat = '00000000-0000-4000-8000-000000000099'
+        cid = encode('qwen', 'default', '/c/' + chat)
+        fake = Mock()
+        fake.chat.side_effect = [Reply('привет!', cid), Reply('второй ответ', cid)]
+        req = ChatCompletionRequest(
+            model='qwen-web',
+            messages=[
+                ChatMessage(role='system', content='You are helpful.'),
+                ChatMessage(role='user', content='привет'),
+            ],
+        )
+        with patch.object(api, 'model_provider', return_value='qwen'), \
+             patch.object(api, 'qwen_uses_browser', return_value=True), \
+             patch.object(api, '_request_client', return_value=fake):
+            first = api._conversation_tool_chat('unused full history', req, 'default')
+            follow = req.model_copy(update={'messages': [
+                *req.messages,
+                ChatMessage(role='assistant', content=first[1]),
+                ChatMessage(role='user', content='ещё вопрос'),
+            ]})
+            second = api._conversation_tool_chat('must not resend this history', follow, 'default')
+        self.assertEqual(second[1], 'второй ответ')
+        self.assertEqual(fake.chat.call_count, 2)
+        prompt, conversation_id, model_type = fake.chat.call_args_list[1].args[:3]
+        self.assertEqual(conversation_id, cid)
+        self.assertIsNone(model_type)
+        self.assertEqual(prompt, 'ещё вопрос')
+        self.assertNotIn('You are helpful', prompt)
+        self.assertNotIn('привет', prompt)
+
+    def test_qwen_browser_edited_history_does_not_open_another_chat(self):
+        from providers.conversations import encode
+        chat = '00000000-0000-4000-8000-000000000098'
+        cid = encode('qwen', 'default', '/c/' + chat)
+        fake = Mock()
+        fake.chat.return_value = Reply('ok', cid)
+        req = ChatCompletionRequest(
+            model='qwen-web',
+            messages=[ChatMessage(role='user', content='first')],
+        )
+        with patch.object(api, 'model_provider', return_value='qwen'), \
+             patch.object(api, 'qwen_uses_browser', return_value=True), \
+             patch.object(api, '_request_client', return_value=fake):
+            first = api._conversation_tool_chat('first', req, 'default')
+            edited = req.model_copy(update={'messages': [
+                ChatMessage(role='user', content='edited first'),
+                ChatMessage(role='assistant', content=first[1]),
+                ChatMessage(role='user', content='next'),
+            ]})
+            before = fake.chat.call_count
+            with self.assertRaises(api.ToolCallError):
+                api._conversation_tool_chat('must not dispatch', edited, 'default')
+            self.assertEqual(fake.chat.call_count, before)
 
 
 

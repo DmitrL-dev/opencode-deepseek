@@ -45,11 +45,13 @@ class ProviderTests(unittest.TestCase):
 
     def test_conversation_tokens_are_scoped_and_paths_cannot_escape(self):
         for provider, reference in (("gemini", UUID), ("grok", "/c/" + UUID),
-                                    ("glm", "/c/" + UUID), ("mistral", "/chat/" + UUID),
+                                    ("glm", "/c/" + UUID), ("chatgpt", "/c/" + UUID),
+                                    ("claude", "/chat/" + UUID),
+                                    ("mistral", "/chat/" + UUID),
                                     ("kimi", "/chat/" + UUID), ("mistral", "/work/" + UUID)):
             token = encode(provider, "default", reference)
             self.assertEqual(decode(token, provider), ("default", reference))
-            for other in {"gemini", "grok", "glm", "mistral", "kimi"} - {provider}:
+            for other in {"gemini", "grok", "glm", "chatgpt", "claude", "mistral", "kimi"} - {provider}:
                 with self.assertRaises(ValueError):
                     decode(token, other)
         for path in ("https://evil.test/", "//evil.test/", "/c/../auth", "/c/a?redirect=evil", "/c/a%2fb"):
@@ -249,8 +251,8 @@ class ProviderTests(unittest.TestCase):
                 mistral_answer(bootstrap+root+chunks+message([patch])+success+b'8:null\n','owned prompt','owned-chat')
 
     def test_nonfinite_or_unbounded_timeout_is_rejected(self):
-        for value in ("nan", "inf", "0", "-1", "1801"):
-            with patch.dict(os.environ, {"WEB_PROVIDER_TIMEOUT": value}), self.assertRaises(ValueError):
+        for value in ("nan", "inf", "0", "-1", "18001"):
+            with patch.dict(os.environ, {"PROVIDER_RESPONSE_TIMEOUT": value}), self.assertRaises(ValueError):
                 completion_timeout()
 
     def test_cli_only_accepts_explicit_success_with_valid_conversation(self):
@@ -363,7 +365,7 @@ class ProviderTests(unittest.TestCase):
                     if mode == 'cancel' and pidfile.exists():
                         raise asyncio.CancelledError()
                 try:
-                    with patch.dict(os.environ, {'ANTIGRAVITY_BIN':str(script),'WEB_PROVIDER_TIMEOUT':'10'}):
+                    with patch.dict(os.environ, {'ANTIGRAVITY_BIN':str(script),'PROVIDER_RESPONSE_TIMEOUT':'10'}):
                         if mode == 'success':
                             self.assertEqual(AntigravityClient(cancelled).chat('marker',model='flash').text,'answer')
                         else:

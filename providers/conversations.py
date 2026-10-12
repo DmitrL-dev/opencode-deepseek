@@ -6,13 +6,18 @@ import re
 from uuid import UUID
 from .kimi_models import MODELS as KIMI_MODELS
 
-PROVIDERS = frozenset(("gemini", "grok", "mistral", "kimi", "glm"))
+PROVIDERS = frozenset(("gemini", "grok", "mistral", "kimi", "glm", "qwen", "chatgpt", "claude"))
 _MODEL = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\Z")
 _PATHS = {
     "grok": re.compile(r"/c/[a-zA-Z0-9_-]{1,128}\Z"),
-    "mistral": re.compile(r"/(?:chat|work)/[a-zA-Z0-9_-]{1,128}\Z"),
+    "mistral": re.compile(r"/(?:chat|work|code)/[a-zA-Z0-9_-]{1,128}\Z"),
     "kimi": re.compile(r"/chat/[a-zA-Z0-9_-]{1,128}\Z"),
     "glm": re.compile(r"/c/[a-zA-Z0-9_-]{1,128}\Z"),
+    "qwen": re.compile(r"/c/[a-zA-Z0-9_-]{1,128}\Z"),
+    "chatgpt": re.compile(r"/c/[a-zA-Z0-9_-]{1,128}\Z"),
+    "claude": re.compile(r"/chat/[a-zA-Z0-9_-]{1,128}\Z"),
+    # Browser Gemini conversations; CLI Antigravity still uses bare UUIDs.
+    "gemini": re.compile(r"/app/[a-zA-Z0-9_-]{1,128}\Z"),
 }
 
 
@@ -28,6 +33,8 @@ def validate_reference(provider, model, reference):
     if not isinstance(reference, str):
         raise ValueError("Invalid provider conversation reference")
     if provider == "gemini":
+        if _PATHS["gemini"].fullmatch(reference):
+            return
         try:
             if str(UUID(reference)) != reference:
                 raise ValueError()

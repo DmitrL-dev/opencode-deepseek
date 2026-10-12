@@ -294,7 +294,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             output = io.StringIO()
             with patch.object(api, '_FORMAT_REPAIR', True), \
                     patch.object(api, 'get_client', return_value=fake), \
-                    patch.object(api, '_debug_toolcalls', return_value=False), \
+                    patch.object(api, '_toolcall_debug', return_value=False), \
                     patch.object(api, 'save_tool_failure'), contextlib.redirect_stdout(output):
                 response = await self.post(tools=TOOLS, stream=stream)
             self.assertEqual(fake.chat.call_count, 2)
@@ -443,7 +443,7 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(api, "get_client", return_value=fake), \
                         patch.object(api, "_continue_reply") as continuation, \
                         patch.object(api, "save_tool_failure") as diagnostic, \
-                        patch.object(api, "_debug_toolcalls", return_value=False), \
+                        patch.object(api, "_toolcall_debug", return_value=False), \
                         contextlib.redirect_stdout(io.StringIO()) as log:
                     response = await self.post(tools=TOOLS, stream=stream)
                 error = sse_objects(response.text)[0]["error"] if stream else response.json()["error"]

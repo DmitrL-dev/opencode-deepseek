@@ -4,9 +4,11 @@ import contextlib
 from contextvars import ContextVar
 import json
 import hashlib
+import logging
 import math
 import os
 from pathlib import Path
+import re
 import tempfile
 import threading
 import time
@@ -22,7 +24,7 @@ else:
 
 MAX_BUDGET = 2000
 
-PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini'))
+PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini', 'chatgpt', 'claude'))
 MESSAGES = {
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
@@ -35,11 +37,190 @@ MESSAGES = {
     'safety_state_unavailable': 'Cannot persist or read provider safety state. Requests are stopped until it is repaired.',
 }
 _active = ContextVar('provider_attempt', default=None)
+_log = logging.getLogger(__name__)
+# Peek at initiating HTTP bodies for shape only; never log message text or secrets.
+_MAX_DIAGNOSTIC_BODY = 64 * 1024
+_KNOWN_BUSINESS_CODES = frozenset({
+    '401', '403', '429', 'muted', 'invalid_token', 'unauthorized', 'forbidden',
+    'access_prohibited', 'account_pending', 'data_inspection_failed', 'bad_request',
+})
+
+
+# Fixed QwenStreamError messages only; never log free-form upstream text.
+_PROTOCOL_TOKENS = {
+    'Qwen stream ended before a terminal marker': 'stream_no_terminal',
+    'Qwen did not return an SSE response': 'non_sse_response',
+    'Qwen completion returned no response_id': 'missing_response_id',
+    'Qwen returned an invalid response_id': 'invalid_response_id',
+    'Qwen emitted an error event': 'sse_error_event',
+    'Invalid JSON in Qwen SSE': 'sse_invalid_json',
+    'Invalid Qwen SSE event shape': 'sse_invalid_shape',
+    'Invalid Qwen response_id': 'invalid_response_id',
+    'Invalid Qwen choices': 'invalid_choices',
+    'Invalid Qwen choice': 'invalid_choice',
+    'Invalid Qwen delta': 'invalid_delta',
+    'Invalid Qwen response.created event': 'invalid_created',
+    'Qwen response.created has no response_id': 'created_no_id',
+    'Conflicting Qwen response_id values': 'conflicting_response_id',
+    'Qwen returned a different chat_id': 'chat_id_mismatch',
+    'Invalid Qwen response.stopped event': 'invalid_stopped',
+    'Qwen response was stopped before completion': 'stopped_early',
+    'Ambiguous Qwen response without response_id': 'ambiguous_response_id',
+    'Qwen content is not text': 'non_text_content',
+    'Qwen chat creation returned no id': 'chat_create_no_id',
+    'Qwen returned an invalid chat id': 'chat_create_invalid_id',
+}
+
+
+def _protocol_token(exc):
+    name = type(exc).__name__
+    if name == 'CancelledError':
+        return 'cancelled'
+    attached = getattr(exc, 'protocol', None)
+    # Only accept short tokens we attach ourselves; never free-form upstream text.
+    if isinstance(attached, str) and 0 < len(attached) <= 40 and attached.replace('_', '').isalnum():
+        return attached
+    if name != 'QwenStreamError':
+        return None
+    message = str(exc)
+    if message in _PROTOCOL_TOKENS:
+        return _PROTOCOL_TOKENS[message]
+    if message.startswith('Unsupported Qwen finish_reason:'):
+        return 'unsupported_finish_reason'
+    return 'qwen_protocol_error'
+
+
+def _failure_kind(exc):
+    # Never log exception text, upstream bodies, headers, or account values.
+    if isinstance(exc, ProviderRejected):
+        return exc.code
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 'http_status'
+    if isinstance(exc, httpx.TimeoutException):
+        return 'transport_timeout'
+    if isinstance(exc, httpx.RequestError):
+        return 'transport_error'
+    if type(exc).__name__ == 'CancelledError':
+        return 'cancelled'
+    if type(exc).__name__ == 'ProviderUnavailable':
+        return 'provider_unavailable'
+    if type(exc).__name__ == 'QwenStreamError' or isinstance(exc, (ValueError, KeyError, TypeError, json.JSONDecodeError)):
+        return 'invalid_protocol'
+    return 'unexpected_failure'
+
+
+def _json_type(item):
+    return {dict: 'object', list: 'array', str: 'string', bool: 'boolean',
+            int: 'number', float: 'number', type(None): 'null'}.get(type(item), 'other')
+
+
+def _business_code(value):
+    """Allowlisted public codes only; never free-form message text."""
+    if type(value) is int and value in (401, 403, 429):
+        return value
+    if isinstance(value, str):
+        if value in ('401', '403', '429'):
+            return int(value)
+        key = value.lower()
+        if key in _KNOWN_BUSINESS_CODES:
+            return key
+    return None
+
+
+# Short public identifiers only (API enums / numeric codes). Never messages or URLs.
+_SAFE_CODE = re.compile(r'^[A-Za-z0-9_.-]{1,40}$')
+
+
+def _public_code_token(value):
+    """Return a loggable code token, or None when the value may contain secrets/text."""
+    known = _business_code(value)
+    if known is not None:
+        return known
+    if type(value) is int and not isinstance(value, bool) and abs(value) < 10 ** 9:
+        return value
+    if isinstance(value, str) and _SAFE_CODE.fullmatch(value):
+        return value
+    return None
+
+
+def _response_body(response):
+    try:
+        if hasattr(response, 'is_stream_consumed') and not response.is_stream_consumed:
+            response.read()
+        return response.content
+    except Exception:
+        try:
+            return response.read()
+        except Exception:
+            return b''
+
+
+def _response_diagnostics(response):
+    """Fixed schema for pause logs: shape and allowlisted codes, never payload text."""
+    content_type = (response.headers.get('content-type') or '').split(';', 1)[0].strip().lower() or None
+    raw = _response_body(response)
+    length = len(raw)
+    truncated = length > _MAX_DIAGNOSTIC_BODY
+    sample = raw[:_MAX_DIAGNOSTIC_BODY]
+    response_type = 'empty'
+    business_code = None
+    success_true = None
+    if not sample:
+        return content_type, length, truncated, response_type, business_code, success_true
+    looks_json = (content_type and 'json' in content_type) or sample[:1] in (b'{', b'[')
+    if looks_json:
+        try:
+            value = json.loads(sample.decode('utf-8'))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return content_type, length, truncated, 'invalid_json', None, None
+        response_type = _json_type(value)
+        if isinstance(value, dict):
+            if 'success' in value:
+                success_true = value.get('success') is True
+            detail = value.get('data') if isinstance(value.get('data'), dict) else None
+            if detail is None and isinstance(value.get('error'), dict):
+                detail = value['error']
+            if isinstance(detail, dict):
+                business_code = _business_code(detail.get('code'))
+            if business_code is None:
+                business_code = _business_code(value.get('code'))
+        return content_type, length, truncated, response_type, business_code, success_true
+    if (content_type and 'html' in content_type) or sample.lstrip()[:1] == b'<':
+        return content_type, length, truncated, 'html', None, None
+    return content_type, length, truncated, 'other', None, None
+
+
+def _log_new_pause(provider, code, exc):
+    # Never log exception text, upstream bodies, credentials, prompts or free-form messages.
+    http_status = getattr(exc, 'http_status', None)
+    content_type = getattr(exc, 'content_type', None)
+    body_length = body_truncated = None
+    response_type = getattr(exc, 'response_type', None)
+    business_code = getattr(exc, 'business_code', None)
+    raw_code = getattr(exc, 'raw_code', None)
+    success_true = getattr(exc, 'success_true', None)
+    phase = getattr(exc, 'phase', None)
+    if isinstance(exc, httpx.HTTPStatusError):
+        http_status = exc.response.status_code
+        (content_type, body_length, body_truncated, response_type,
+         business_code, success_true) = _response_diagnostics(exc.response)
+        phase = phase or 'http_error'
+    _log.warning(
+        'Provider pause set: provider=%s code=%s reason=%s exc_type=%s phase=%s protocol=%s '
+        'http_status=%s content_type=%s body_length=%s body_truncated=%s response_type=%s '
+        'business_code=%s raw_code=%s success_true=%s',
+        provider, code, _failure_kind(exc), type(exc).__name__, phase, _protocol_token(exc),
+        http_status, content_type, body_length, body_truncated, response_type,
+        business_code, raw_code, success_true,
+    )
 
 
 class ProviderRejected(RuntimeError):
-    def __init__(self, code='upstream_failure'):
+    """Allowlisted refusal. source=local_pause means providers.access already blocks dispatch."""
+
+    def __init__(self, code='upstream_failure', *, source='upstream'):
         self.code = code if code in MESSAGES else 'upstream_failure'
+        self.source = source if source in ('upstream', 'local_pause') else 'upstream'
         super().__init__(MESSAGES[self.code])
 
 
@@ -193,7 +374,7 @@ class AccessGuard:
         with self._state() as state:
             record = state.get(provider, {})
             if record.get('pause'):
-                raise ProviderRejected(record['pause'])
+                raise ProviderRejected(record['pause'], source='local_pause')
             if owner is not None and record.get('pending') != owner:
                 raise ProviderRejected('upstream_failure')
             if (record.get('pending') and record['pending'] != owner
@@ -206,7 +387,10 @@ class AccessGuard:
         with self._state() as state:
             record = state.setdefault(provider, {})
             if record.get("pause") or record.get("pending"):
-                raise ProviderRejected(record.get("pause") or "upstream_failure")
+                raise ProviderRejected(
+                    record.get("pause") or "upstream_failure",
+                    source='local_pause' if record.get("pause") else 'upstream',
+                )
             record.update(pending=attempt.id, dispatched=False)
             try:
                 self._save(state)  # Write-ahead: failure here prohibits all dispatch.
@@ -235,17 +419,26 @@ class AccessGuard:
     def reject(self, provider, exc, owner=None):
         error = exc if isinstance(exc, ProviderRejected) else rejection(
             exc, status=exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None)
+        newly_paused = False
         try:
             with self._state() as state:
                 if owner is not None and state.get(provider, {}).get('pending') != owner:
                     return ProviderRejected('upstream_failure')
                 record = state.setdefault(provider, {})
+                previous = record.get('pause')
                 record.setdefault('pause', error.code)
                 self._save(state)
-                error = ProviderRejected(record['pause'])
+                # First latch is upstream-driven; later hits are the durable local pause.
+                error = ProviderRejected(
+                    record['pause'],
+                    source='local_pause' if previous else 'upstream',
+                )
+                newly_paused = previous is None
         except (OSError, ProviderRejected):
             self._failed.add(provider)
             return ProviderRejected('safety_state_unavailable')
+        if newly_paused:
+            _log_new_pause(provider, error.code, exc)
         return error
 
     def resume(self, provider):
@@ -359,7 +552,10 @@ class Attempt:
             with self.guard._state() as state:
                 record = state[self.provider]
                 if record.get('pending') != self.id or record.get('pause'):
-                    raise ProviderRejected(record.get('pause') or 'upstream_failure')
+                    raise ProviderRejected(
+                        record.get('pause') or 'upstream_failure',
+                        source='local_pause' if record.get('pause') else 'upstream',
+                    )
                 delay = 0 if self.dispatched else record.get('next_at', 0) - time.time()
                 if self.provider == 'deepseek':
                     delay = max(delay, record.get('next_http_at', 0) - time.time())

@@ -514,12 +514,12 @@ opencode читает конфиг один раз при старте. **Пол
 умолчанию выключен; последний файл остаётся до замены или ручного удаления.
 Не публикуйте его. Ошибка сохранения не подменяет исходную ошибку инструмента.
 
-Старая диагностика: запустите сервер с `DEBUG_TOOLCALLS=1` — при нераспознанном вызове
+Старая диагностика: запустите сервер с `TOOLCALL_DEBUG=1` — при нераспознанном вызове
 в лог (`logs/server.log` или stdout) попадёт сырой ответ модели.
 Он может содержать файлы и секреты; при обычной работе оставляйте режим выключенным.
 
 ```bash
-DEBUG_TOOLCALLS=1 python app.py
+TOOLCALL_DEBUG=1 python app.py
 ```
 
 Проверить мост напрямую (без opencode):
@@ -693,9 +693,10 @@ opencode run --model local-qwen/qwen3.8-max "Объясни этот проек�
 | `DEEPSEEK_ENABLED` | `0` | Explicit DeepSeek opt-in; account restriction risk |
 | `PROVIDER_MIN_INTERVAL` | `30` | Seconds between provider attempts/continuations; not a quota guarantee |
 | `QWEN_ENABLED` | `0` | Включить модели Qwen Chat на том же `/v1` |
+| `QWEN_MODELS` | `qwen3.8-omni-flash`, `qwen3.8-max`, `qwen3.7-plus` | JSON: публичный id → wire-модель сайта (HTTP-транспорт) |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Отдельный постоянный профиль Qwen Chat |
 | `TOOLCALL_MAX_CONTINUATIONS` | `0` | Явно включаемый лимит продолжений при подтверждённом провайдером обрыве по длине; штатное завершение не вызывает продолжений |
-| `DEBUG_TOOLCALLS` | — | `1` — писать в лог сырой ответ модели, если вызов не распознан |
+| `TOOLCALL_DEBUG` | — | `1` — писать в лог сырой ответ модели, если вызов не распознан |
 
 Пример:
 
@@ -791,7 +792,7 @@ PORT=8080 python app.py
    [Интеграция с opencode](#интеграция-с-opencode)): должен вернуться
    `"finish_reason": "tool_calls"` и непустой `message.tool_calls`.
 3. Поставьте плагин `deepseek-tool-discipline.js` (глобально или в проект).
-4. Запустите сервер с `DEBUG_TOOLCALLS=1` и изучите сырой ответ модели в логе.
+4. Запустите сервер с `TOOLCALL_DEBUG=1` и изучите сырой ответ модели в логе.
 5. Увеличьте `steps` у агента и используйте `deepseek-expert`.
 
 **Правки кода не применились после редактирования (launchd)**

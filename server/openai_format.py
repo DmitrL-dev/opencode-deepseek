@@ -113,6 +113,18 @@ def _forced_tool_name(tool_choice) -> Optional[str]:
     return None
 
 
+def _tool_choice_suffix(tool_choice) -> str:
+    if _forced_tool_name(tool_choice) is not None:
+        return (f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
+                " Reply with ONLY the fenced tool_calls block.")
+    if tool_choice == "required":
+        return ("\n\nYou MUST call one of the tools now."
+                " Reply with ONLY the fenced tool_calls block.")
+    if tool_choice == "none":
+        return "\n\nDo NOT call any tools; answer in plain text."
+    return ""
+
+
 def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
     specs = _tool_specs(tools)
     if not specs:
@@ -246,13 +258,7 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
             'another mutation tool. If instructed to stop on errors, stop and '
             'report the rejection instead of reading and retrying automatically.'
         )
-    if _forced_tool_name(tool_choice) is not None:
-        instructions += f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
-        instructions += " Reply with ONLY the fenced tool_calls block."
-    elif tool_choice == "required":
-        instructions += "\n\nYou MUST call one of the tools now. Reply with ONLY the fenced tool_calls block."
-    elif tool_choice == "none":
-        instructions += "\n\nDo NOT call any tools; answer in plain text."
+    instructions += _tool_choice_suffix(tool_choice)
     # Keep the protocol reminder next to the model's turn.
     if tool_choice is None or tool_choice == "auto":
         instructions += (
@@ -261,6 +267,28 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
             "remains. Never combine commentary with a tool_calls block."
         )
     return instructions
+
+
+def _tool_reminder(tools: List[dict], tool_choice=None) -> str:
+    """Short follow-up block when tool-instructions mode is light."""
+    specs = _tool_specs(tools)
+    if not specs:
+        return ""
+    names = ", ".join(spec["name"] for spec in specs)
+    example = json.dumps([{"name": "<advertised_tool_name>",
+                           "arguments": {"<argument_name>": "<argument_value>"}}])
+    text = (
+        "Tools remain available from earlier in this chat: "
+        f"{names}.\n"
+        "Next reply: either a single fenced tool_calls block as the WHOLE reply "
+        "(exact tool names; arguments matching those schemas):\n\n"
+        "```tool_calls\n"
+        f"{example}\n"
+        "```\n\n"
+        "or plain text when no action remains. Never combine commentary with a "
+        "tool_calls block. Prefer the latest tool results over older plans."
+    )
+    return text + _tool_choice_suffix(tool_choice)
 
 
 def _render_message(m: ChatMessage, call_names: dict) -> str:
@@ -291,7 +319,9 @@ def _render_message(m: ChatMessage, call_names: dict) -> str:
 
 
 def messages_to_prompt(
-    messages: List[ChatMessage], tools: List[dict] = None, tool_choice=None
+    messages: List[ChatMessage], tools: List[dict] = None, tool_choice=None,
+    *, tools_continuation: bool = False, provider: str = None,
+    tool_instructions: str = None,
 ) -> str:
     """Flatten a chat history into a single prompt DeepSeek can answer.
 
@@ -300,7 +330,22 @@ def messages_to_prompt(
     When `tools` are given, their spec and the required reply format are injected
     as the LAST block, immediately before the 'Assistant:' cue: DeepSeek's web
     chat follows the instruction closest to its own turn far more reliably.
+
+    `tools_continuation=True` means this turn resumes an existing provider chat.
+    Mode comes from `tool_instructions`, else TOOL_INSTRUCTIONS_BROWSER/HTTP via
+    `provider` (defaults to full when neither is set). full → complete schemas
+    every turn; light → short reminder on continuations; none → no tools block
+    on continuations (first turn still gets the full block).
     """
+    from .config import tool_instructions_for_provider
+
+    if tool_instructions in ("full", "light", "none"):
+        mode = tool_instructions
+    elif provider:
+        mode = tool_instructions_for_provider(provider)
+    else:
+        mode = "full"
+
     system_parts: List[str] = []
     convo: List[ChatMessage] = []
     for m in messages:
@@ -309,7 +354,14 @@ def messages_to_prompt(
         else:
             convo.append(m)
 
-    tool_instr = _tool_instructions(tools, tool_choice) if tools else ""
+    tool_instr = ""
+    if tools:
+        if mode == "none" and tools_continuation:
+            tool_instr = ""
+        elif mode == "light" and tools_continuation:
+            tool_instr = _tool_reminder(tools, tool_choice)
+        else:
+            tool_instr = _tool_instructions(tools, tool_choice)
 
     if not system_parts and not tool_instr and len(convo) == 1 and convo[0].role == "user":
         return _text_of(convo[0].content)

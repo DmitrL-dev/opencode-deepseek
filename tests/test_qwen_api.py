@@ -184,7 +184,9 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(api.guard.status()['qwen'], 'quota_exceeded')
                         # A later goal turn must stop before session lookup/renewal.
                         again = await self.http.post('/v1/chat/completions', json=self.body)
-                        self.assertEqual(again.status_code, 403)
+                        self.assertEqual(again.status_code, 400)
+                        self.assertEqual(again.json()["error"]["code"], "quota_exceeded")
+                        self.assertFalse(again.json()["error"]["retryable"])
                         self.assertEqual(get_client.call_count, 1)
                         renew.assert_not_called()
                 finally:
@@ -233,7 +235,8 @@ class QwenClientCacheTests(unittest.TestCase):
             with self.subTest(enabled=enabled):
                 result = subprocess.run(
                     [sys.executable, "-c", "import json; from server.config import MODEL_MAP; print(json.dumps(list(MODEL_MAP)))"],
-                    env=dict(os.environ, QWEN_ENABLED=enabled, DEEPSEEK_ENABLED="0"), check=True, capture_output=True, text=True,
+                    env=dict(os.environ, QWEN_ENABLED=enabled, DEEPSEEK_ENABLED="0",
+                             QWEN_TRANSPORT="http"), check=True, capture_output=True, text=True,
                 )
                 models = json.loads(result.stdout)
                 self.assertNotIn("deepseek-chat", models)

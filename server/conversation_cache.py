@@ -52,9 +52,9 @@ def digest(req, messages):
 
 class ConversationCache:
     def __init__(self, path, account_file=None):
-        raw = os.getenv('DEEPSEEK_MAX_CONVERSATION_REPLIES', '20')
+        raw = os.getenv('CONVERSATION_MAX_REPLIES', '20')
         if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= 1000:
-            raise ValueError('DEEPSEEK_MAX_CONVERSATION_REPLIES must be an integer between 1 and 1000')
+            raise ValueError('CONVERSATION_MAX_REPLIES must be an integer between 1 and 1000')
         self.max_replies = int(raw)
         self.path = Path(path)
         self.account_file = Path(account_file) if account_file is not None else None
