@@ -25,6 +25,13 @@ try {
   assert.match(check.stdout, /"bucket": "fail"/);
   assert.match(check.stdout, /CONTINUED/);
   assert.equal(run('gh pr checks 69 | (exit 17); printf UNREACHABLE').status, 17);
+  const pending = JSON.stringify([{name: 'CI', bucket: 'pending', state: 'IN_PROGRESS', link: '', workflow: ''}]);
+  writeFileSync(fakeGh, '#!/bin/bash\nprintf \'%s\\n\' \'' + pending + '\'\nexit 0\n');
+  check = run('gh pr checks 80 2>&1 | sed -n \'1,40p\'; printf CONTINUED');
+  assert.equal(check.status, 0, check.stderr);
+  assert.match(check.stdout, /"bucket": "pending"/);
+  assert.match(check.stdout, /CONTINUED/);
+  assert.equal(run('gh pr checks 80 | (exit 17); printf UNREACHABLE').status, 17);
   writeFileSync(fakeGh, '#!/bin/bash\nprintf "auth failed\\n" >&2\nexit 1\n');
   check = run('gh pr checks 69 2>&1 | sed -n \'1,40p\'; printf UNREACHABLE');
   assert.equal(check.status, 1);

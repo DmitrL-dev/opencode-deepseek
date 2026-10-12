@@ -62,7 +62,10 @@ def main(argv=None):
         # A status code alone is ambiguous. Require a complete matching payload
         # and no stderr before interpreting a nonzero exit as check-status data.
         expected = 1 if 'fail' in buckets else 8 if 'pending' in buckets else 0
-        valid = result.returncode == expected and not result.stderr.strip()
+        # JSON export can succeed (0) while the checks themselves are pending
+        # or failing. Their validated buckets remain visible to the caller.
+        # Only nonzero status codes must match the check-state exit convention.
+        valid = result.returncode in (0, expected) and not result.stderr.strip()
     except (ValueError, TypeError):
         valid = False
     if not valid:
