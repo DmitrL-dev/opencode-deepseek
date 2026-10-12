@@ -50,6 +50,7 @@ from providers.conversations import decode as decode_provider_cid, PROVIDERS
 from providers.registry import build_client as build_provider_client
 from providers.access import guard, ProviderRejected, rejection
 from .tool_protocol import validate_reply
+from .tool_history import validate_tool_history
 from .diagnostics import save_tool_failure
 from .conversation_cache import conversation_cache, ConversationStateError
 
@@ -692,6 +693,11 @@ async def chat_completions(req: ChatCompletionRequest, request: Request = None):
 async def _chat_completions(req: ChatCompletionRequest):
     if not req.messages:
         return _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
+
+    try:
+        validate_tool_history(req.messages)
+    except ValueError as exc:
+        return _error(str(exc), status=400, err_type="invalid_request_error")
 
     if not is_known_model(req.model):
         return _error(

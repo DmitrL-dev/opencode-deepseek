@@ -105,6 +105,7 @@ catalog, then connect **your client** below.
 
 ```bash
 python -m integrations.harness --install desktop --without-browser --default-model qwen3.8-omni-flash
+python -m integrations.harness_shell_safety --profile desktop
 ```
 
 3. Select your **project folder**, create a **new session**, and choose
@@ -265,8 +266,74 @@ a new turn or "final verification" is not a reason to repeat tests. Repeats must
 not be hidden in commands with `git diff` or `git status`; a justified repeat
 states its reason in the command description. Reused results must be identified
 as previous evidence, and skipped tests are not passes. This contract is checked
-offline. It is model guidance, not a semantic shell blocker; compliance in a new
-live turn after this change has not yet been verified.
+offline and in one live turn: the model reused prior results, ran no tests and
+read existing CI results instead. This is guidance, not a semantic blocker for
+duplicate test runs. To stop on shell errors, install the local Harness plugin:
+
+```bash
+python -m integrations.harness_shell_safety --profile desktop
+```
+
+Restart Harness after installation. `/bridge-shell-status` checks the active executor locally, without generation. The plugin adds `set -e -o pipefail` to Bash
+commands: a successful `tail` no longer hides an earlier pipeline failure.
+A nonzero foreground result, timeout or tool error stops the current turn using
+native Stop, without asking the model to retry or diagnose it. History, completed
+actions and counters are preserved. `if`, `!`, `&&` and `||` retain normal Bash
+semantics: an explicitly handled nonzero status need not fail the whole command.
+For an optional search, use the `bridge_grep_optional` shell function: it
+normalizes only grep's own no-match status `1`. Invalid patterns, unreadable
+files (status `2`) and upstream failures remain failures. Plain `grep` is not
+overridden; assertions requiring a match still stop. Never append `|| true` to
+the entire pipeline. Prefer `sed -n '1,40p'` to `head` for bounded output while
+draining the stream. Offline checks cover empty/matching searches, invalid
+patterns, missing files, producer statuses `1`/`17`, and native Harness
+continuation versus stopping.
+
+The plugin does not classify output text or promise to catch background-process
+failures. It sets `XDG_CACHE_HOME` for `gh` to a private temporary directory
+(`0700`), without changing authentication or sandbox permissions. The old cache
+is retained; the new cache remains until OS temporary-file cleanup. Offline tests
+in the installed Harness verified that pipeline failure cancels the remaining
+command and the next call in its batch, with no second model request; cache
+writes succeed.
+
+A subsequent live check successfully read the CI log using `gh run view --log-failed`.
+The next `gh api | grep | head` pipeline exited with code `1`; Harness automatically
+showed Stopped and sent no third generation. The unfiltered stream was not retained,
+so the tool result does not establish the cause of that status. `grep` also returns
+`1` for no matches: handle an expected case explicitly in the command instead of
+disabling protection globally. Prior history and usage records were preserved;
+only two generations and two HTTP requests were added.
+
+After the optional-search fix, the next live turn completed without new errors:
+five tool calls inspected the saved CI log and local source, without downloading
+the log again or rerunning tests. The original grep pattern matched the saved log;
+this does not establish the cause of the earlier `gh api` pipeline status. The CI
+report identifies a new failure relative to its baseline but lacks the assertion
+traceback. Fixing search handling does not mean that the CI failure is fixed.
+
+For the separate PowerShell failure in the test project, the pytest artifact
+confirmed a subprocess `TimeoutExpired` after 10 seconds, not an assertion failure.
+With PowerShell 7.6.6 installed, its test fixture now bounds startup separately
+(30 s) from projection execution (10 s), without retries or baseline changes.
+Focused local checks passed, including an injected startup delay; this does not
+establish a green CI rerun or native Windows acceptance.
+
+A later turn exposed a separate protocol limitation: the model returned a
+`calls` fence as text. Harness displayed Completed but executed no tool. A complete top-level `calls` fence now aliases `tool_calls` only for normally
+finished DeepSeek replies, with full advertised-schema validation. No arguments
+are inferred; malformed JSON, multiple blocks, quoted or nested code cannot execute.
+Invalid framing no longer becomes a successful text response. Offline checks cover
+parser boundaries and real Harness execution with a fixture provider. One-use
+recovery of previously delivered text preserves its reply ID, history and usage:
+it sends no generation, does not increase the conversation reply count, and stops
+locally after the tool result.
+
+Live recovery of this case was verified: one saved `bash` call executed
+successfully, followed by a local stop. No new DeepSeek generation was sent;
+the budget-state file was unchanged, prior history links were retained, and
+the recovered link kept the same reply ID and conversation reply count.
+
 The model also receives a reminder to wait for a write result before its verifier.
 This is guidance, not a guarantee: missing `file_path` or another required field
 still rejects the batch. The bridge never infers a path from content or another
@@ -387,6 +454,27 @@ The prefix must match the provider and does not enable disabled models.
 DeepSeek aliases share the same history binding and continuation accounting:
 changing the spelling neither creates a new chat nor resets replay protection.
 Verified offline; this does not verify model access for a live account.
+
+### Harness contract: history and stopping
+
+Before contacting any provider, the bridge validates tool-call history: every
+call needs exactly one result with the same ID. Missing, duplicate and unrelated
+results are rejected locally. Parallel batch results may arrive out of order.
+This also applies to explicit `conversation_id` requests; arguments are not
+invented and completed actions are not replayed.
+
+Harness shell safety disarms automatic goal continuation **before** cancelling
+a turn on a tool error. The durable goal phase and revision remain unchanged;
+resuming requires a separate user action. Install with
+`python -m integrations.harness_shell_safety --profile desktop`, then restart
+Harness. `/bridge-shell-status` checks shell settings without sending a request;
+the current version reports `harness-contract-v2` and `goal disarm before native stop`.
+Model reconfiguration preserves the safety plugin.
+
+Verified offline against Harness 0.2.0-rc.2 contract fixtures: SSE, exact call IDs,
+existing-conversation continuation and duplicate-step rejection without counter
+changes. This is not a live account check or a guarantee that arbitrary goals
+will complete.
 
 **MIT · unofficial project.** Based on
 [Tsuev/opencode-deepseek](https://github.com/Tsuev/opencode-deepseek) and
