@@ -607,7 +607,8 @@ class ExportedScriptsUsePort(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = Path(tab_bridge.ROOT)
-            for name in ('settings.py', 'integrations'):
+            # Include the real transitive model catalog imported by harness.py.
+            for name in ('settings.py', 'integrations', 'providers'):
                 target = root / name
                 if (source / name).is_dir():
                     import shutil
@@ -620,10 +621,11 @@ class ExportedScriptsUsePort(unittest.TestCase):
                     "sys.argv = ['x', '--token-file', 't']\n"
                     "b.main()\n")
             env = {key: value for key, value in os.environ.items() if key != 'PORT'}
-            env['PYTHONPATH'] = os.pathsep.join([str(root), env.get('PYTHONPATH', '')])
+            env['PYTHONPATH'] = str(root)
             result = subprocess.run([sys.executable, '-c', code], cwd=root, env=env,
                                     capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.stdout.splitlines()[0], 'http://127.0.0.1:9876', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ['http://127.0.0.1:9876', 'None'], result.stderr)
 
     def test_budget_cli_explicit_base_url_wins_over_broken_port(self):
         """N6: a broken PORT must not block a valid explicit --base-url or --help."""

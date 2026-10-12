@@ -580,3 +580,9 @@ Browser adapters (userscripts, tab protocol, ChatGPT / Claude / Gemini / Qwen /
 Kimi / GLM / Mistral / Grok providers and related checks) are reworked in the
 [SimolSem/opencode-deepseek](https://github.com/SimolSem/opencode-deepseek) fork
 and contributed here via pull requests.
+
+Old upstream branches do not imply missing features: `feat/browser-providers`
+was reconciled with `main`, with no missing functional patches found.
+[Commit mapping and documentation differences](docs/BRANCH_RECONCILIATION_20261012.md).
+The offline budget installer test checks the real model-catalog import in an
+isolated copy and reports the original child-process failure.

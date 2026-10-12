@@ -583,3 +583,9 @@ Harness. `/bridge-shell-status` проверяет shell-настройки бе
 Gemini / Qwen / Kimi / GLM / Mistral / Grok и связанные проверки) переработаны в
 форке [SimolSem/opencode-deepseek](https://github.com/SimolSem/opencode-deepseek)
 и оттуда приходят сюда pull request'ами.
+
+Старые ветки для апстрима не означают недостающие функции: изменения
+`feat/browser-providers` сверены с `main`; функциональных потерь не найдено.
+[Таблица соответствия и отличия документации](docs/BRANCH_RECONCILIATION_20261012.md).
+Офлайн-тест установщика бюджета проверяет реальный импорт каталога моделей
+в изолированной копии и показывает исходную ошибку дочернего процесса.
