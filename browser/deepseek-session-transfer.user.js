@@ -18,6 +18,11 @@
   'use strict';
   if (window.top !== window || location.origin !== 'https://chat.deepseek.com') return;
   const key = 'deepseek-session-transfer-v1';
+  // Replaced on export with the bridge PORT; an unexported copy uses 8000.
+  const PORT_TEMPLATE = '__BRIDGE_PORT__';
+  const validPort = value => /^[1-9][0-9]{0,4}$/.test(value) && Number(value) <= 65535;
+  if (PORT_TEMPLATE !== '__BRIDGE_' + 'PORT__' && !validPort(PORT_TEMPLATE)) return;
+  const PORT = validPort(PORT_TEMPLATE) ? PORT_TEMPLATE : '8000';
   let busy = false, stopped = false;
   const host = document.createElement('div');
   host.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:2147483647';
@@ -68,7 +73,7 @@
       ticket.seen = digest;
       await GM.setValue(key, ticket);
       const send = async sameAccount => {
-        const r = await GM.xmlHttpRequest({url:'http://127.0.0.1:8000/session/deepseek/capture',
+        const r = await GM.xmlHttpRequest({url:'http://127.0.0.1:' + PORT + '/session/deepseek/capture',
           method:'POST', timeout:10000, headers:{Authorization:'Bearer '+ticket.nonce, 'Content-Type':'application/json'},
           data:JSON.stringify({token,account_id:String(account),user_agent:navigator.userAgent,cookie:document.cookie,same_account:sameAccount})});
         if (r.status !== 200) throw new Error('capture refused');

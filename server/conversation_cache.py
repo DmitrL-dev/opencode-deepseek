@@ -93,7 +93,7 @@ class ConversationCache:
             if db is not None:
                 db.close()
 
-    def prepare(self, req, *, scope=None, claim=None):
+    def prepare(self, req, *, scope=None, claim=None, legacy_scopes=()):
         # Explicit protocol clients already own their conversation identity.
         if req.conversation_id:
             return req, 0
@@ -132,6 +132,14 @@ class ConversationCache:
         key = self.key(req, req.messages[:end], scope)
         with self.connection() as db:
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
+            # A namespace upgrade must not orphan histories stored before it.
+            # The legacy link is claimed exactly like a current one.
+            for legacy in () if row else legacy_scopes:
+                legacy_key = self.key(req, req.messages[:end], legacy)
+                row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (legacy_key,)).fetchone()
+                if row:
+                    key = legacy_key
+                    break
             if not row or row[1]:
                 raise ConversationStateError('History is unknown or already consumed; automatic replay and new-chat fallback are disabled.')
             if row[2] >= self.max_replies:

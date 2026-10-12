@@ -28,7 +28,30 @@ class ShellSafetyTests(unittest.TestCase):
             self.assertEqual(yaml_codec().load(first)[0], original[0])
             install(home, 'desktop')
             self.assertEqual(path.read_bytes(), first)
-            self.assertEqual(len(list(profile.glob('*.shell-backup-*'))), 1)
+            backups = list(profile.glob('*.bridge-backup-*'))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+            # P3-6: the profile references a stable copy inside the Harness home.
+            entry = Path(yaml_codec().load(first)[1]['insert'][0]['name'])
+            self.assertTrue(entry.is_relative_to(home / 'plugins'))
+            self.assertTrue(entry.is_file() and entry.with_name('harness_gh_checks.py').is_file())
+
+    def test_installer_refuses_symlinked_profile_and_uses_dsh_home(self):
+        import os
+        from unittest.mock import patch
+        from integrations.harness import default_home
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            profile = home / 'profiles/desktop'
+            profile.mkdir(parents=True)
+            real = home / 'dotfiles.yml'
+            real.write_bytes(render([]))
+            (profile / 'cordis.patch.yml').symlink_to(real)
+            with self.assertRaises(ValueError):
+                install(home, 'desktop')
+            self.assertEqual(real.read_bytes(), render([]))
+            with patch.dict(os.environ, {'DSH_HOME': str(home)}):
+                self.assertEqual(default_home(), home)
 
     def test_shared_insert_is_not_overwritten(self):
         with self.assertRaises(ValueError):

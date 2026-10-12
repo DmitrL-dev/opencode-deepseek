@@ -1,3 +1,4 @@
+from tests import TEST_API_TOKEN
 import asyncio
 import json
 import os
@@ -345,7 +346,7 @@ class SafetySdkTests(unittest.TestCase):
         self.transport.__enter__()
         self.addCleanup(self.transport.__exit__, None, None, None)
         # Keep the SDK's actual default retry policy enabled.
-        self.sdk = OpenAI(api_key="offline", base_url="http://testserver/v1", http_client=self.transport)
+        self.sdk = OpenAI(api_key=TEST_API_TOKEN, base_url="http://testserver/v1", http_client=self.transport)
         self.addCleanup(self.sdk.close)
         self.messages = [{"role": "user", "content": "offline fixture"}]
 

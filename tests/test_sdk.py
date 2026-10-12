@@ -1,3 +1,4 @@
+from tests import TEST_API_TOKEN
 import json
 import unittest
 from unittest.mock import Mock, patch
@@ -21,7 +22,7 @@ class OpenAISdkTests(unittest.TestCase):
         self.transport = TestClient(api.app, client=(self.id(), 123))
         self.transport.__enter__()
         self.addCleanup(self.transport.__exit__, None, None, None)
-        self.sdk = OpenAI(api_key="offline", base_url="http://testserver/v1",
+        self.sdk = OpenAI(api_key=TEST_API_TOKEN, base_url="http://testserver/v1",
                           http_client=self.transport, max_retries=0)
         self.addCleanup(self.sdk.close)
         self.messages = [{"role": "user", "content": "audit"}]

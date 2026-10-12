@@ -1,3 +1,4 @@
+from tests import TEST_API_TOKEN
 """Offline regressions for the October10 independent review; no real accounts."""
 import asyncio
 import base64
@@ -149,7 +150,8 @@ class ApiFixes(unittest.IsolatedAsyncioTestCase):
             return Reply('synthetic','fake:2'),'synthetic',[]
         scope={'type':'http','asgi':{'version':'3.0','spec_version':'2.4'},'http_version':'1.1','method':'POST',
                'scheme':'http','path':'/v1/chat/completions','raw_path':b'/v1/chat/completions','query_string':b'',
-               'headers':[(b'content-type',b'application/json'),(b'content-length',str(len(body)).encode())],
+               'headers':[(b'host',b'localhost'),(b'authorization',('Bearer '+TEST_API_TOKEN).encode()),
+                          (b'content-type',b'application/json'),(b'content-length',str(len(body)).encode())],
                'client':('disconnect-fixture',123),'server':('localhost',80),'root_path':''}
         with patch.object(api,'guard',AccessGuard(path=None,interval=0)),patch.dict(api.MODEL_MAP,{'deepseek-chat':'default'},clear=True),patch.object(api,'_run_tool_chat',queued):
             await asyncio.wait_for(api.app(scope,receive,send),2)

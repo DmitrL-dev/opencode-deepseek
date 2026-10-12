@@ -8,7 +8,7 @@
       "name": "DeepSeek · local bridge",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "deepseek-chat": {
@@ -36,7 +36,7 @@
       "name": "Qwen Chat · local bridge",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "qwen3.8-omni-flash": {
@@ -64,7 +64,7 @@
       "name": "GLM · Safari bridge",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "glm-web": {
@@ -83,7 +83,7 @@
       "name": "Kimi · Safari bridge",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "kimi-web": {

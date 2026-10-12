@@ -145,8 +145,9 @@ idle.
   Images, Responses API, and Harness controls for thinking/search are unsupported.
 - The 32768 context / 4096 output values are conservative client budgets, not
   website guarantees. The bridge does not forward token caps or sampling options.
-- `Authorization: Bearer unused` is a public placeholder for the keyless loopback
-  API, not an account token or API access control. Keep the bridge port local.
+- `Authorization: Bearer <bridge API token>` from `session/api-token`: the /v1
+  access control, not a provider account token. Rerun the installer after
+  upgrading from the old `Bearer unused` profile. Keep the bridge port local.
 
 Setup never enables providers, clears pauses, or sends an account verification
 prompt. An expired restriction date does not prove restored access. Resume only

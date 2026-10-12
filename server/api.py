@@ -44,7 +44,7 @@ from starlette.concurrency import run_in_threadpool
 from deepseek.auth import SESSION_MAX_AGE, LoginRequired, get_session
 from chat_protocol import Reply
 from deepseek.client import DeepSeekClient, _decode_cid as decode_deepseek_cid
-from qwen.auth import get_session as get_qwen_session
+from qwen.auth import get_session as get_qwen_session, LoginRequired as QwenLoginRequired
 from qwen.renewal import renew_session as renew_qwen_session
 from qwen.client import QwenClient, _decode_cid as decode_qwen_cid
 from providers.conversations import decode as decode_provider_cid, PROVIDERS
@@ -174,8 +174,12 @@ def reset_client() -> None:
         _client = None
 
 
-def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
-    """Load local Qwen credentials, with separately opted-in pre-dispatch renewal."""
+def get_qwen_client(force_refresh=False, rejected_client=None, allow_renewal=True,
+                    expected_account=None) -> QwenClient:
+    """Load local Qwen credentials, with separately opted-in pre-dispatch renewal.
+
+    Renewal is an account request: it runs only inside the request's durable
+    attempt. Callers outside an attempt pass allow_renewal=False."""
     global _qwen_client
     with _qwen_client_lock:
         # A visible auth window can save a rotated token before the previous
@@ -186,9 +190,10 @@ def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
                                        channel=REFRESH_BROWSER_CHANNEL,
                                        fallback_channel=REFRESH_BROWSER_CHANNEL_FALLBACK)
         except LoginRequired:
-            if not QWEN_RENEW_SESSION:
+            if not QWEN_RENEW_SESSION or not allow_renewal:
                 raise
-            session = renew_qwen_session()
+            session = (renew_qwen_session() if expected_account is None
+                       else renew_qwen_session(expected_account=expected_account))
         if (_qwen_client is None or _qwen_client.session != session
                 or (force_refresh and (rejected_client is None or _qwen_client is rejected_client))):
             # Existing requests retain their own client; do not close it here.
@@ -196,13 +201,15 @@ def get_qwen_client(force_refresh=False, rejected_client=None) -> QwenClient:
         return _qwen_client
 
 
-def _request_client(req, force_refresh=False, rejected_client=None):
+def _request_client(req, force_refresh=False, rejected_client=None, expected_account=None):
     provider = model_provider(req.model)
     guard.check(provider)
     # Direct Qwen HTTP keeps its own client; browser transport shares TabClient.
     if provider == "qwen" and not qwen_uses_browser():
         if force_refresh:
             return get_qwen_client(True, rejected_client=rejected_client)
+        if expected_account is not None:
+            return get_qwen_client(expected_account=expected_account)
         return get_qwen_client()
     if provider in PROVIDERS:
         # Browser routes run in another worker context. Bind the originating
@@ -281,7 +288,7 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     """One durable attempt; cancellation cannot erase an uncertain dispatch."""
     provider = model_provider(req.model)
     if provider == 'deepseek' and len(prompt.encode('utf-8')) > 131072:
-        raise ProviderRejected('local_budget_exceeded')
+        raise ProviderRejected('local_prompt_too_large', source='local_limit')
     client = None
     attempt = None
     try:
@@ -290,7 +297,18 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
                        else _bound_conversation.get())
             if binding is not None:
                 binding['attempts'].append(attempt)
-            client = binding['client'] if binding is not None and 'client' in binding else _request_client(req)
+            if binding is not None and 'client' in binding:
+                client = binding['client']
+            elif binding is not None and 'account' in binding:
+                # Renewal compares this account on its own snapshot before dispatch.
+                client = _request_client(req, expected_account=binding['account'])
+            else:
+                client = _request_client(req)
+            if binding is not None and 'account' in binding and (
+                    provider != 'qwen' or _qwen_account(client.session) != binding['account']):
+                # The history scope belongs to another account; refuse before dispatch.
+                raise QwenLoginRequired('The Qwen session belongs to a different account than this history; '
+                                        'no request was sent.')
             attempt.check()  # Recheck a pause that happened while building a client.
             return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
     except LoginRequired:
@@ -365,9 +383,28 @@ def _conversation_scope(provider, client=None):
             client.session.continuation_scope or _session_identity(client.session)
         )
     if provider == "qwen" and not qwen_uses_browser():
-        return "qwen-v1:" + _session_identity(client.session)
+        # Token rotation must not orphan a goal: bind to the JWT account.
+        account = _qwen_account(client.session)
+        return "qwen-v2:" + account if account else "qwen-v1:" + _session_identity(client.session)
     # Browser tab bridge: one local machine / provider, not DeepSeek session.json.
     return "web:" + provider
+
+
+def _qwen_account(session):
+    """Stable account key from the Qwen JWT id/type, or None if unreadable."""
+    from qwen.renewal import account_key
+    try:
+        return account_key(session.token)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _legacy_scopes(provider, client=None):
+    """Pre-upgrade link namespaces that may still hold unconsumed histories."""
+    if (provider == "qwen" and not qwen_uses_browser() and client is not None
+            and conversation_cache.account_file is not None and _qwen_account(client.session)):
+        return ("qwen-v1:" + _session_identity(client.session),)
+    return ()
 
 
 def _conversation_tool_chat(prompt, req, model_type):
@@ -384,6 +421,7 @@ def _conversation_tool_chat(prompt, req, model_type):
     deepseek_token = None
     conversation_token = None
     succeeded = False
+    legacy = ()
     try:
         guard.check(provider)
         _check_cancelled()
@@ -395,14 +433,30 @@ def _conversation_tool_chat(prompt, req, model_type):
             binding["client"] = client
             deepseek_token = _bound_deepseek.set(binding)
         elif provider == "qwen" and not qwen_uses_browser():
-            client = get_qwen_client()
-            scope = _conversation_scope(provider, client)
-            binding["client"] = client
+            try:
+                # Never renew here: renewal is an account request and must be
+                # owned by the durable attempt opened in _chat_with_retry.
+                client = get_qwen_client(allow_renewal=False)
+                binding["client"] = client
+                scope_client = client
+                legacy = _legacy_scopes(provider, client)
+            except LoginRequired:
+                from qwen.auth import Session as QwenSession, DEFAULT_SESSION_FILE as QWEN_SESSION_FILE
+                cached = QwenSession.load(QWEN_SESSION_FILE) if QWEN_RENEW_SESSION else None
+                if cached is None or _qwen_account(cached) is None:
+                    raise
+                scope_client = type("ScopeSnapshot", (), {"session": cached})()
+                legacy = _legacy_scopes(provider, scope_client)
+            scope = _conversation_scope(provider, scope_client)
+            expected_account = _qwen_account(scope_client.session)
+            if expected_account:
+                binding["account"] = expected_account
             conversation_token = _bound_conversation.set(binding)
         else:
             scope = _conversation_scope(provider)
             conversation_token = _bound_conversation.set(binding)
-        req, steps = conversation_cache.prepare(req, scope=scope, claim=claim)
+        req, steps = conversation_cache.prepare(req, scope=scope, claim=claim,
+                                                legacy_scopes=legacy)
         if req is not original:
             # Continuation of a saved provider chat: browser light mode may shorten tools.
             prompt = messages_to_prompt(
@@ -561,6 +615,13 @@ def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
     """Client-facing pause text. Never includes upstream bodies or secrets."""
     provider = model_provider(model)
     resume = f"python -m providers.access resume {provider}"
+    if getattr(exc, "source", "upstream") == "local_limit":
+        if getattr(exc, "paused", False):
+            return (f"Local limit stopped `{provider}` after earlier requests of this step "
+                    f"(code={exc.code}): {exc} The outcome of the step is uncertain, so a durable "
+                    f"providers.access pause was set. Inspect the website, then: `{resume}`")
+        return (f"Local limit refused this `{provider}` request (code={exc.code}): {exc} "
+                f"No request was sent to the provider and no pause was set.")
     if getattr(exc, "source", "upstream") == "local_pause":
         # Durable local pause — no upstream call; agents must clear it manually.
         return (
@@ -581,7 +642,11 @@ def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
 def _provider_rejected_response(exc: ProviderRejected, model: str):
     # Local pause uses 400 so agents show our message instead of a generic
     # "invalid API key" wrapper that many clients attach to HTTP 403.
-    status = 400 if getattr(exc, "source", "upstream") == "local_pause" else 403
+    source = getattr(exc, "source", "upstream")
+    if source == "local_limit" and not getattr(exc, "paused", False):
+        status = 413 if exc.code == "local_prompt_too_large" else 429
+    else:
+        status = 400 if source in ("local_pause", "local_limit") else 403
     return _error(_provider_pause_message(exc, model), status=status, err_type=exc.code)
 
 
@@ -748,6 +813,9 @@ app.include_router(budget_router)
 from server.session_transfer import router as session_transfer_router
 app.include_router(session_transfer_router)
 install_rate_limit(app, RateLimiter(limit=RATE_LIMIT_PER_MINUTE, window=60.0))
+# Added last, so it runs first: unauthenticated callers cannot spend the rate limit.
+from server.api_auth import install as install_api_auth
+install_api_auth(app)
 
 
 def _error(message: str, status: int = 500, err_type: str = "server_error"):

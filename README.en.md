@@ -21,6 +21,12 @@ adapters do not require a separate provider API key.
 **Harness works independently: you do not need OpenCode to use it.**
 Everything documented here is on this fork's `main` branch.
 
+**Security update, October 12, 2026:** the local `/v1` API now requires a bridge
+token. After updating, reconfigure your client using
+[API access token](#api-access-token). Account binding, replay protection,
+shell handling and CLI cleanup fixes were verified offline; this update was
+not tested against live accounts in Harness, OpenCode or a browser.
+
 [![Main checks](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/DmitrL-dev/opencode-deepseek/actions/workflows/tests.yml)
 
 > This is not an unlimited API. Account quotas and local budgets apply.
@@ -67,13 +73,16 @@ QWEN_ENABLED=1
 
 Initial sign-in needs a browser; requests do not need open tabs afterward.
 Tokens are short-lived. Optionally set `QWEN_RENEW_SESSION=1` to renew before a
-new request. Once the sign-in cookie expires, manual sign-in is required again.
+new request; renewal runs inside that request's durable attempt and must return
+the same account. Conversation links are bound to the Qwen account, so token
+rotation keeps Harness goals resumable. Once the sign-in cookie expires, manual
+sign-in is required again.
 [Renewal details](docs/HARNESS.en.md#qwen-session).
 
 **Using DeepSeek instead?** Run `python -m deepseek.auth`, sign in, and set
 `DEEPSEEK_ENABLED=1`. Replace `qwen3.8-omni-flash` in the Harness command below
 with `deepseek-chat` or `deepseek-expert`. DeepSeek has no automatic renewal;
-saved sessions have no local age cutoff. Token rejection (`40002`/`40003`) stops requests without retry and requires manual sign-in. Stop if the
+saved sessions have no local age cutoff. Token rejection (`40002`/`40003`) stops requests without retry and requires manual sign-in. A new `python -m deepseek.auth` capture keeps saved Harness histories only for the same verified account; another account is refused (use `--replace-account` deliberately), and an unverified previous session needs `--same-account`. Stop if the
 normal website shows an account restriction.
 
 For Kimi, follow [HTTP session setup](docs/KIMI.md); for GLM, use the
@@ -90,11 +99,40 @@ start another instance. In a separate terminal:
 
 ```bash
 curl http://127.0.0.1:8000/healthz
-curl http://127.0.0.1:8000/v1/models
+curl -H "Authorization: Bearer $(cat "$(python -m server.api_auth path)")" http://127.0.0.1:8000/v1/models
 ```
 
-These local checks send no model requests. Confirm your model appears in the
+These local checks send no model requests. Every `/v1` request needs the
+bridge API token (see [API access token](#api-access-token)). Confirm your model appears in the
 catalog, then connect **your client** below.
+
+## API access token
+
+The `/v1` API drives your signed-in provider accounts, so it requires
+`Authorization: Bearer <token>` and a local `Host`. The server creates the
+private token file `session/api-token` (`0600`) on first use;
+`python -m server.api_auth path` prints its path, never the token. Requests
+without the token, from a browser page (cross-site or DNS rebinding) or for
+another Host are refused before any provider or rate-limit access.
+
+Migration from the keyless API:
+
+1. Update the bridge and restart it.
+2. Harness: rerun `python -m integrations.harness --install <profile> ...` with
+   your previous options. It replaces the `Bearer unused` header with the token
+   in the private profile file. Restart Harness.
+3. OpenCode: set `"apiKey": "{file:/absolute/path/session/api-token}"` for each
+   local provider ([example](examples/opencode.json)). Other OpenAI SDK clients
+   pass the token as `api_key`.
+4. Only while migrating, `API_AUTH=legacy-loopback` admits tokenless requests
+   from a loopback peer with a loopback Host and no browser headers. Remove it
+   once clients send the token.
+
+`HOST` other than loopback is refused unless `API_ALLOW_PUBLIC_BIND=1` is set
+(token mode only). Then also list the served names in `API_ALLOWED_HOSTS` and
+restrict the port with a firewall. This bind check lives only in `python app.py`:
+launching `uvicorn server.api:app --host …` directly bypasses it, while Host and
+token checks (except the transitional `legacy-loopback`) still apply to every `/v1`.
 
 ## Connect Harness
 
@@ -156,7 +194,13 @@ One-time setup: update the local budget plugin, install
 [DeepSeek session transfer](browser/deepseek-session-transfer.user.js) in the
 Userscripts app's Save Location, and allow access to `chat.deepseek.com` and
 `127.0.0.1`. Restart the updated bridge and Harness after active work finishes.
-This flow requires macOS and `http://127.0.0.1:8000`.
+This flow requires macOS and the bridge on `127.0.0.1`. For a `PORT` other than
+8000, run `python -m providers.tab_bridge` and install the exported copy from
+`session/browser-bridge/userscripts`, and reinstall the budget plugin with
+`python -m integrations.harness_budget --base-url http://127.0.0.1:<PORT> ...` (it
+defaults to `PORT` from the environment or `.env`, then 8000).
+An explicit `--base-url` takes precedence even when `PORT` is invalid; only
+a loopback HTTP origin without credentials, a path, query or fragment is allowed.
 [Setup and recovery rules](docs/HARNESS.en.md#update-the-session-through-safari).
 
 History, counters and request intervals are preserved; goals never resume
@@ -274,7 +318,7 @@ duplicate test runs. To stop on shell errors, install the local Harness plugin:
 python -m integrations.harness_shell_safety --profile desktop
 ```
 
-Restart Harness after installation. `/bridge-shell-status` checks the active executor locally, without generation. The plugin adds `set -e -o pipefail` to Bash
+Restart Harness after installation. `/bridge-shell-status` checks the active executor locally, without generation. There is no mandatory runtime gate: if the installed plugin copy in `<DSH_HOME>/plugins/opencode-local-bridge/` is deleted or corrupted, Harness only logs the error and keeps running without the protection. Check `/bridge-shell-status` after every Harness start before resuming a goal. The plugin adds `set -e -o pipefail` to Bash
 commands: a successful `tail` no longer hides an earlier pipeline failure.
 A nonzero foreground result, timeout or tool error stops the current turn using
 native Stop, without asking the model to retry or diagnose it. History, completed
@@ -286,7 +330,12 @@ When checking whether a branch contains a fix or locating optional markers/secti
 
 For an optional search, use the `bridge_grep_optional` shell function: it
 normalizes only grep's own no-match status `1`. Invalid patterns, unreadable
-files (status `2`) and upstream failures remain failures. Plain `grep` is not
+files (status `2`) and upstream failures remain failures. Quiet mode
+(`-q`/`--quiet`/`--silent`) is refused with status `2`: on a match grep would
+exit `0` even if another input failed. Use `-c` or `-n` output instead. Early
+exit options (`-m`, `-l`) after a large producer make the producer exit `141`
+(SIGPIPE); that is a reported failure, never normalized. The function requires
+Bash (both Harness executors run `bash -c`); another shell stops with status `2`. Plain `grep` is not
 overridden; assertions requiring a match still stop. Never append `|| true` to
 the entire pipeline. Prefer `sed -n '1,40p'` to `head` for bounded output while
 draining the stream. Offline checks cover empty/matching searches, invalid
@@ -382,7 +431,8 @@ opencode --agent plan --model local-qwen/qwen3.8-omni-flash
 
 For DeepSeek, select `local-deepseek/deepseek-chat` or
 `local-deepseek/deepseek-expert`. API URL: `http://127.0.0.1:8000/v1`.
-`apiKey: "unused"` is an SDK placeholder, not an account key or API access control.
+`apiKey` must be the bridge API token, e.g. `"{file:/absolute/path/session/api-token}"`
+([API access token](#api-access-token)). It is not a provider account key.
 [Agents and tool plugin](docs/SETUP.en.md#opencode-integration).
 
 ## Provider status
@@ -425,11 +475,19 @@ not clear account restrictions or quotas. Inspect pauses with
 `python -m providers.access status`.
 [Resume rules](docs/ACCOUNT_SAFETY.md).
 
-The API binds to `127.0.0.1` by default (local only). Set `HOST=0.0.0.0` for
-network or Docker access. `session/` and `.env` are excluded from Git.
+The API binds to `127.0.0.1` by default (local only) and requires the bridge
+API token. Non-loopback `HOST` needs `API_ALLOW_PUBLIC_BIND=1`,
+`API_ALLOWED_HOSTS` and a firewall; never expose it without them. `session/` and `.env` are excluded from Git.
 Do not publish them, personalized Userscripts or budget credentials.
 Supported: text and emulated tool calls. Images, audio and video are not uploaded,
 even for models named Omni.
+
+Known limits: the browser observer runs in the provider page, so scripts already
+running in that origin can forge its response events; the bridge binds a job to
+the tab, not to an authenticated answer source. DeepSeek/Qwen streams stop after
+300 seconds total or 15 seconds without bytes; such a stop pauses the provider
+and is not replayed. A first request (no assistant message yet) has no history
+link, so resending it can open a second chat; continuations are one-use.
 
 ## OpenCode demonstrations
 

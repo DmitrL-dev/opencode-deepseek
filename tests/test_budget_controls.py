@@ -75,12 +75,12 @@ class BudgetControls(unittest.IsolatedAsyncioTestCase):
         root = Path(self.temp.name)
         folder = root/'profiles/desktop';folder.mkdir(parents=True)
         target = folder/'cordis.patch.yml';target.write_text('- id: other\n  config: {value: before}\n')
-        original_copy = harness_budget.shutil.copy2
+        original_copy = harness_budget.install_plugin_copy
         changed = '- id: other\n  config: {value: user-change}\n'
-        def edit(src, dst):
-            target.write_text(changed)
-            return original_copy(src, dst)
-        with patch.object(harness_budget.shutil, 'copy2', side_effect=edit):
+        def edit(*args):
+            target.write_text(changed)  # edit lands between read and atomic replace
+            return original_copy(*args)
+        with patch.object(harness_budget, 'install_plugin_copy', side_effect=edit):
             with self.assertRaisesRegex(ValueError, 'changed'):
                 harness_budget.install(root, 'desktop', root/'token')
         self.assertEqual(target.read_text(), changed)

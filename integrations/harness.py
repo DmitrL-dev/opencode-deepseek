@@ -61,10 +61,17 @@ def local_url(value: str) -> str:
     return value.rstrip("/")
 
 
+def api_token() -> str:
+    """The bridge's private /v1 bearer token (created on first use, never printed)."""
+    from server.api_auth import ensure_token
+    return ensure_token()
+
+
 def discover(base_url: str, without_browser=False) -> list:
     """Read the bridge catalog only; this does not probe account availability."""
     with httpx.Client(trust_env=False, follow_redirects=False, timeout=5) as client:
-        response = client.get(local_url(base_url) + "/models")
+        response = client.get(local_url(base_url) + "/models",
+                              headers={"Authorization": "Bearer " + api_token()})
         response.raise_for_status()
         if len(response.content) > 128 * 1024:
             raise ValueError("Bridge model catalog is too large")
@@ -107,13 +114,13 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
     return models
 
 
-def provider_config(base_url: str, models: list) -> dict:
+def provider_config(base_url: str, models: list, token: str | None = None) -> dict:
     return {
         "displayName": "Local account bridge",
         "api": "openai-completions", "baseURL": local_url(base_url),
-        # A non-secret placeholder satisfies pi-ai for this keyless loopback API.
-        # Account credentials stay exclusively in the existing bridge.
-        "headers": {"Authorization": "Bearer unused"},
+        # The bridge /v1 token, not a provider credential. The profile file is
+        # written 0600; account credentials stay exclusively in the bridge.
+        "headers": {"Authorization": "Bearer " + (api_token() if token is None else token)},
         "retryPolicy": {"mode": "normal", "maxRetries": 0},
         "timeoutMs": 600000, "streamIdleTimeoutMs": 600000,
         "compat": {"supportsStore": False, "supportsDeveloperRole": False,
@@ -271,6 +278,44 @@ def write_private(path: Path, data: bytes, before=None) -> Path | None:
     return backup
 
 
+def default_home() -> Path:
+    """Harness home: DSH_HOME when set, else ~/.dsh (shared by every installer)."""
+    return Path(os.getenv("DSH_HOME", "").strip() or "~/.dsh").expanduser()
+
+
+def install_plugin_copy(home, name, sources) -> Path:
+    """Copy plugin files into the Harness home and return the entry path.
+
+    The profile then references a stable private copy, so moving or deleting
+    this repository cannot silently unload a protection plugin.
+    """
+    directory = Path(home) / "plugins" / "opencode-local-bridge" / name
+    if any(part.is_symlink() for part in (directory, *directory.parents) if part.exists()
+           and Path(home) in (part, *part.parents)):
+        raise ValueError("Refusing a symlinked plugin directory")
+    directory.mkdir(parents=True, mode=0o700, exist_ok=True)
+    directory.chmod(0o700)
+    for source in sources:
+        source = Path(source)
+        target = directory / source.name
+        if target.is_symlink():
+            raise ValueError("Refusing a symlinked plugin file")
+        data = source.read_bytes()
+        if target.exists() and target.read_bytes() == data:
+            continue
+        descriptor, temporary = tempfile.mkstemp(prefix=".plugin-", dir=str(directory))
+        try:
+            with os.fdopen(descriptor, "wb") as out:
+                out.write(data)
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    return directory / Path(sources[0]).name
+
+
 @contextmanager
 def profile_lock(home, profile):
     from providers.access import _file_lock
@@ -316,7 +361,7 @@ def main(argv=None):
     parser.add_argument("--default-model", help="Explicitly select the default for new Harness sessions")
     parser.add_argument("--without-browser", action="store_true",
                         help="Select only advertised DeepSeek, Qwen and Gemini adapters")
-    parser.add_argument("--home", type=Path, default=Path(os.getenv("DSH_HOME", "").strip() or "~/.dsh").expanduser())
+    parser.add_argument("--home", type=Path, default=default_home())
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--install", choices=("desktop", "web", "headless"), metavar="PROFILE")
     mode.add_argument("--output", type=Path, help="Export a standalone YAML patch to a new file")

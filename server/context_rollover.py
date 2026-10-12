@@ -33,6 +33,8 @@ def checkpoint(req, previous_cid, root):
             function = calls[message['tool_call_id']]
             content = json.dumps(message.get('content'), ensure_ascii=False)
             arguments = function['arguments']
+            if not isinstance(arguments, str):  # Historical calls may carry an object.
+                arguments = json.dumps(arguments, ensure_ascii=False, sort_keys=True)
             completed.append({'id': message['tool_call_id'], 'name': function['name'],
                               'arguments_excerpt': arguments[:300],
                               'result_excerpt': content[:300],

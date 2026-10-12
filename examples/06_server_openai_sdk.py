@@ -18,8 +18,8 @@ Then run this from the project root:
 
 from openai import OpenAI
 
-# Point base_url at the server. api_key is required by the SDK but ignored here.
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+# Point base_url at the server. api_key is the bridge token from session/api-token.
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 
 completion = client.chat.completions.create(
     # model picks WHICH model answers: deepseek-chat (fast) or deepseek-expert

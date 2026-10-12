@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 from datetime import datetime
 import json
 import logging
@@ -136,7 +137,21 @@ def _response_data(response, check):
     return data
 
 
-def renew_session(session_file: Path = DEFAULT_SESSION_FILE, transport=None) -> Session:
+def account_key(token):
+    """Stable account identity from JWT id/type (metadata only, not auth proof)."""
+    identity, kind, _ = _jwt_metadata(token)
+    return hashlib.sha256(json.dumps([identity, kind]).encode()).hexdigest()
+
+
+def _account_or_none(session):
+    try:
+        return account_key(session.token)
+    except (ValueError, TypeError):
+        return None
+
+
+def renew_session(session_file: Path = DEFAULT_SESSION_FILE, transport=None,
+                  expected_account=None) -> Session:
     """Reload local state, then make at most one fixed-origin guarded request.
 
     The caller owns explicit opt-in and the attempt's completion/abort lifecycle.
@@ -148,11 +163,16 @@ def renew_session(session_file: Path = DEFAULT_SESSION_FILE, transport=None) -> 
     attempt.check()
     cached = Session.load(session_file)
     if cached is not None and cached.usable:
+        if expected_account is not None and _account_or_none(cached) != expected_account:
+            raise LoginRequired()
         return cached
     try:
         if cached is None:
             raise ValueError("Missing session")
         old_id, old_type, old_exp = _jwt_metadata(cached.token)
+        if expected_account is not None and account_key(cached.token) != expected_account:
+            # The history belongs to another account: refuse before dispatch.
+            raise ValueError("Session belongs to another account")
         local_exp = _number(cached.expires_at)
         now = time.time()
         jar = cached.cookie_jar()

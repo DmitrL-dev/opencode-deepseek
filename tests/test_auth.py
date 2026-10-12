@@ -52,7 +52,7 @@ class SessionTests(unittest.TestCase):
     def test_only_scoped_deepseek_cookies_are_captured_and_sent(self):
         page = Mock()
         page.url = auth.CHAT_URL
-        page.evaluate.side_effect = ["fake-token","audit-agent"]
+        page.evaluate.side_effect = ["fake-token","audit-agent","4242"]
         context = Mock()
         context.cookies.return_value = [
             {"name":"ds","value":"fake-ds","domain":".deepseek.com","path":"/","secure":True},
@@ -61,6 +61,7 @@ class SessionTests(unittest.TestCase):
             {"name":"expired","value":"fake-old","domain":"chat.deepseek.com","path":"/","expires":1},
         ]
         captured = auth._capture_from_context(context, page)
+        self.assertEqual(captured.account_id, "4242")
         context.cookies.assert_called_once_with([auth.CHAT_URL])
         with httpx.Client(cookies=captured.cookie_jar()) as client:
             headers = client.build_request("POST","https://chat.deepseek.com/api/v0/chat/completion").headers
@@ -342,10 +343,10 @@ class ManualInspectionTests(unittest.TestCase):
         with patch.object(auth, 'login', return_value=session()) as login, \
                 patch.object(auth, 'keep_open') as inspect, contextlib.redirect_stdout(io.StringIO()):
             auth.main([])
-            login.assert_called_once_with(channel='chrome')
+            login.assert_called_once_with(channel='chrome', same_account=False, replace_account=False)
             inspect.assert_not_called()
             auth.main(['--keep-open', '--channel', 'chromium'])
-            inspect.assert_called_once_with(channel=None)
+            inspect.assert_called_once_with(channel=None, same_account=False, replace_account=False)
         output = io.StringIO()
         with patch.object(auth, 'keep_open', side_effect=RuntimeError('private-failure-detail')), \
                 contextlib.redirect_stdout(output), self.assertRaises(SystemExit) as failure:

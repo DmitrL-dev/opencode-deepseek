@@ -50,6 +50,26 @@ try {
   assert.equal(run('bridge_grep_optional x missing-file; printf UNREACHABLE').status, 2);
   assert.equal(run('printf "match\\nother\\n" | bridge_grep_optional -n match').stdout, '1:match\n');
   assert.equal(run('seq 1 20000 | bridge_grep_optional . | sed -n \'1,2p\'').status, 0);
+  // N1: quiet mode returns 0 on a match even when another input failed.
+  writeFileSync(join(root, 'f1'), 'x\n');
+  for (const flags of ['-q', '-qn', '-nq', '--quiet', '--silent', '--qui', '-c -q']) {
+    const quiet = run(`bridge_grep_optional ${flags} x f1 missing-file; printf UNREACHABLE`);
+    assert.equal(quiet.status, 2, flags);
+    assert.match(quiet.stderr, /quiet mode can hide read errors/);
+    assert.doesNotMatch(quiet.stdout, /UNREACHABLE/);
+  }
+  assert.equal(run('bridge_grep_optional -c x f1 missing-file; printf UNREACHABLE').status, 2);
+  assert.equal(run('bridge_grep_optional -s x missing-file; printf UNREACHABLE').status, 2);
+  assert.equal(run("printf -- '-q\\n' | bridge_grep_optional -e -q; printf NEXT").stdout, '-q\nNEXT');
+  assert.equal(run("printf -- '-q\\n' | bridge_grep_optional -- -q; printf NEXT").stdout, '-q\nNEXT');
+  assert.equal(run("printf 'aq\\n' | bridge_grep_optional -eq; printf NEXT").stdout, 'aq\nNEXT');
+  assert.equal(run('printf a | bridge_grep_optional --regexp -q; printf NEXT').stdout, 'NEXT');
+  // P2-4: a non-bash interpreter is refused instead of exiting 0 silently.
+  const zsh = spawnSync('/bin/zsh', ['-c', hardenSpec({command: 'printf RAN', env: {}}, root).command], {encoding: 'utf8'});
+  if (zsh.error?.code !== 'ENOENT') {
+    assert.equal(zsh.status, 2);
+    assert.doesNotMatch(zsh.stdout, /RAN/);
+  }
   assert.equal(run('if false; then printf BAD; fi; false || printf handled').stdout, 'handled');
   result = run('printf "%s" "$ORIGINAL" > "$XDG_CACHE_HOME/owned"');
   assert.equal(result.status, 0, result.stderr);
@@ -91,6 +111,30 @@ try {
   assert.match((await commands[0].handler()).text, /harness-contract-v3/);
   disposers.forEach(fn => fn());
   assert.equal(ctx.shell.resolve, resolve);
+  // P3-11: cordis returns a fresh proxy for every method read. Teardown must
+  // still restore, must not clobber a later wrapper, and reload must not stack.
+  {
+    const service = new (class { resolve(request) { return {...request, env: {}}; } })();
+    const proxied = new Proxy(service, {get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? new Proxy(value, {}) : value;
+    }});
+    const cleanups = [];
+    const pctx = {...ctx, shell: proxied, effect: fn => cleanups.push(fn())};
+    apply(pctx);
+    assert.ok(proxied.resolve({command: 'true'}).command.startsWith('set -e -o pipefail'));
+    cleanups.pop()();
+    assert.equal(proxied.resolve({command: 'true'}).command, 'true');
+    assert.equal(Object.hasOwn(service, 'resolve'), false);
+    apply(pctx); apply(pctx);
+    assert.equal(proxied.resolve({command: 'X'}).command.split('set -e -o pipefail').length - 1, 2);
+    const later = proxied.resolve;
+    function outer(request) { return {...later.call(this, request), outer: true}; }
+    proxied.resolve = outer;
+    cleanups.pop()();
+    assert.equal(proxied.resolve({command: 'X'}).outer, true);
+    assert.equal(proxied.resolve({command: 'X'}).command.split('set -e -o pipefail').length - 1, 1);
+  }
   rmSync(hardened.env.XDG_CACHE_HOME, {recursive: true});
   console.log('shell safety: pipeline, early exit, expected failure, cache, structured stop, teardown passed');
 } finally { rmSync(root, {recursive: true, force: true}); }

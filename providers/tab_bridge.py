@@ -22,7 +22,7 @@ from settings import ROOT
 from .browser_protocol import (
     chatgpt_answer, chatgpt_conversation_path, claude_answer, claude_conversation_path,
     gemini_answer, gemini_conversation_path, gemini_paths_compatible,
-    glm_answer, grok_answer, mistral_answer, qwen_answer, qwen_conversation_path,
+    glm_answer, grok_answer, mistral_answer, qwen_reply, qwen_conversation_path,
 )
 from .kimi_protocol import kimi_answer
 from .common import BufferedStream, ProviderUnavailable, completion_timeout
@@ -321,12 +321,14 @@ def parse_browser_result(provider, result, path=None, prompt=None):
         elif turn["endpoint"] not in ("/api/chat/completions", "/api/v2/chat/completions"):
             raise ProviderUnavailable("Unexpected GLM request endpoint")
     token = encode(provider, "default", reference)
+    finish_reason = "stop"
     if provider == "glm":
         text = glm_answer(body)
     elif provider == "grok":
         text = grok_answer(body, reference.rsplit("/", 1)[-1])
     elif provider == "qwen":
-        text = qwen_answer(body)
+        # Keep finish_reason: an output-limit stop must not authorize tool calls.
+        text, finish_reason = qwen_reply(body, reference.rsplit("/", 1)[-1])
     elif provider == "gemini":
         text = gemini_answer(body, prompt)
     elif provider == "chatgpt":
@@ -347,7 +349,7 @@ def parse_browser_result(provider, result, path=None, prompt=None):
         # DOM scrapes can echo the pasted OpenCode prompt before a real answer.
         label = "Gemini" if provider == "gemini" else "Claude"
         raise ProviderUnavailable(f"{label} browser returned the request prompt instead of an answer")
-    return Reply(text, token)
+    return Reply(text, token, finish_reason)
 
 
 def _browser_text_echoes_prompt(text, prompt):
@@ -459,10 +461,15 @@ def export_scripts():
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     destination.chmod(0o700)
     token = bridge_token()
-    for name in ("opencode-observer.user.js", "opencode-controller.user.js"):
+    port = os.getenv("PORT", "8000").strip()
+    if not (1 <= len(port) <= 5 and port.isdecimal() and 1 <= int(port) <= 65535):
+        raise ValueError("PORT must be a TCP port number")
+    for name in ("opencode-observer.user.js", "opencode-controller.user.js",
+                 "deepseek-session-transfer.user.js"):
         source = ROOT / "browser" / name
         target = destination / name
-        value = source.read_text(encoding="utf-8").replace("__BRIDGE_TOKEN__", token, 1)
+        value = (source.read_text(encoding="utf-8").replace("__BRIDGE_TOKEN__", token, 1)
+                 .replace("__BRIDGE_PORT__", str(int(port)), 1))
         target.write_text(value, encoding="utf-8")
         target.chmod(0o600)
     return destination
