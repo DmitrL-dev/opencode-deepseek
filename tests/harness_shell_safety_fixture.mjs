@@ -1,0 +1,74 @@
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, statSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { hardenSpec, failedResult, apply } from '../integrations/harness_shell_safety.mjs';
+
+const root = mkdtempSync(join(tmpdir(), 'shell-safety-test-'));
+try {
+  function run(command) {
+    const original = {command, workdir: root, env: {ORIGINAL: 'preserved'}, sandboxPolicy: {mode: 'workspace-write'}};
+    const spec = hardenSpec(original, root);
+    assert.equal(original.command, command);
+    assert.equal(spec.sandboxPolicy, original.sandboxPolicy);
+    return spawnSync('bash', ['-c', spec.command], {cwd: spec.workdir,
+      env: {...process.env, ...spec.env}, encoding: 'utf8'});
+  }
+  let result = run('printf before; (exit 17) | tail -60; printf UNREACHABLE');
+  assert.equal(result.status, 17);
+  assert.equal(result.stdout, 'before');
+  assert.equal(run('printf ok | tail -1').stdout, 'ok');
+  assert.equal(run('false; printf UNREACHABLE').status, 1);
+  assert.equal(run('printf plain | bridge_grep_optional missing | sed -n \'1,40p\'; printf CONTINUED').stdout, 'CONTINUED');
+  assert.equal(run('printf plain | grep missing; printf UNREACHABLE').status, 1);
+  assert.equal(run('(exit 17) | bridge_grep_optional missing | cat; printf UNREACHABLE').status, 17);
+  assert.equal(run('(exit 1) | bridge_grep_optional missing | cat; printf UNREACHABLE').status, 1);
+  assert.equal(run('printf plain | bridge_grep_optional "["; printf UNREACHABLE').status, 2);
+  assert.equal(run('bridge_grep_optional x missing-file; printf UNREACHABLE').status, 2);
+  assert.equal(run('printf "match\\nother\\n" | bridge_grep_optional -n match').stdout, '1:match\n');
+  assert.equal(run('seq 1 20000 | bridge_grep_optional . | sed -n \'1,2p\'').status, 0);
+  assert.equal(run('if false; then printf BAD; fi; false || printf handled').stdout, 'handled');
+  result = run('printf "%s" "$ORIGINAL" > "$XDG_CACHE_HOME/owned"');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(root, 'owned'), 'utf8'), 'preserved');
+  const exec = {name: 'bash'};
+  assert.equal(failedResult(exec, {value: {kind: 'foreground', exitCode: 0, signal: null}}), false);
+  assert.equal(failedResult(exec, {value: {kind: 'foreground', exitCode: 17}}), true);
+  assert.equal(failedResult(exec, {value: {kind: 'foreground', exitCode: 0, sandbox: {denied: true}}}), true);
+  assert.equal(failedResult({name: 'read'}, {isError: true}), true);
+  assert.equal(failedResult(exec, {value: {kind: 'background'}}), false);
+  const cancelled = [], disposers = [], handlers = {}, events = [];
+  const goals = {disarm: agent => { agent.activation = 'disarmed'; events.push('disarm'); }};
+  const resolve = request => request;
+  const commands = [];
+  const ctx = {goals, shell: {resolve}, commands: {register: command => commands.push(command)},
+    effect: fn => disposers.push(fn()), on: (event, fn) => {handlers[event] = fn;}};
+  apply(ctx);
+  const hardened = ctx.shell.resolve({command: 'true'});
+  assert.equal(statSync(hardened.env.XDG_CACHE_HOME).mode & 0o777, 0o700);
+  handlers['tools/result']({name: 'bash', agent: {status: 'running', cancel: (...args) => { events.push('cancel'); cancelled.push(args); }}},
+    {value: {kind: 'foreground', exitCode: 3}});
+  assert.deepEqual(cancelled, [[{kind: 'user'}, {keepInbox: true}]]);
+  assert.deepEqual(events, ['disarm', 'cancel']);
+  // A manual turn may have an armed goal without a driver-owned attempt.
+  // The idle callback must observe disarmed before considering a followup.
+  let continuations = 0;
+  const agent = {status: 'running', activation: 'armed', phase: 'active', revision: 9,
+    cancel() { this.status = 'idle'; if (this.activation === 'armed') continuations++; }};
+  handlers['tools/result']({name: 'read', agent}, Object.freeze({isError: true}));
+  assert.equal(continuations, 0);
+  assert.equal(agent.phase, 'active');
+  assert.equal(agent.revision, 9);
+  let stopped = false;
+  goals.disarm = () => { throw new Error('disarm failed'); };
+  assert.throws(() => handlers['tools/result']({name: 'read', agent: {status: 'running',
+    cancel() { stopped = true; }}}, {isError: true}), /disarm failed/);
+  assert.equal(stopped, true);
+  assert.equal((await commands[0].handler()).kind, 'success');
+  assert.match((await commands[0].handler()).text, /harness-contract-v2/);
+  disposers.forEach(fn => fn());
+  assert.equal(ctx.shell.resolve, resolve);
+  rmSync(hardened.env.XDG_CACHE_HOME, {recursive: true});
+  console.log('shell safety: pipeline, early exit, expected failure, cache, structured stop, teardown passed');
+} finally { rmSync(root, {recursive: true, force: true}); }

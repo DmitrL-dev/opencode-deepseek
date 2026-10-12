@@ -153,7 +153,8 @@ def patch_document(document: list, base_url: str, models: list, default_model=No
         # attempt to evaluate !!js or infer a custom composition here.
         if (set(row) == {"insert"} and isinstance(row["insert"], list)
                 and len(row["insert"]) == 1 and isinstance(row["insert"][0], dict)
-                and row["insert"][0].get("id") == "local-bridge-budget"):
+                and row["insert"][0].get("id") in
+                {"local-bridge-budget", "local-bridge-shell-safety"}):
             continue
         if "id" not in row:
             raise ValueError("Install supports id-targeted patches only; use --output for custom profiles")

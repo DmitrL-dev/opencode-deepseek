@@ -27,7 +27,7 @@ _TOOL_BLOCK_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n(.*?)\r?\n```[ \t]*\Z", 
 _TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
 _TOOL_MARKUP_RE = re.compile(
-    r"(?m)^[ \t]*```tool_calls[ \t]*\r?$"
+    r"(?m)^[ \t]*```(?:tool_calls|calls)[ \t]*\r?$"
     r"|^[ \t]*<｜｜DSML｜｜ calls>(?=\s*<｜｜DSML｜｜ invoke\b)"
 )
 # Observed web-model terminators after an otherwise complete JSON array. Only
@@ -212,6 +212,20 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         'results are not successful evidence; resolve their status without '
         'automatically repeating actions. Stop-on-error and no-retry instructions '
         'take precedence over any reason to test again.'
+        '\n\nShell search contract:\n'
+        '- A search with no matches is not evidence that its input producer succeeded. '
+        'Keep errexit and pipefail enabled. Never use || true or normalize exit code 1 '
+        'on an entire pipeline: that can hide a failed gh, curl, or other producer.\n'
+        '- When no matches is expected, handle only grep status 1 inside its own '
+        'pipeline stage: { status=0; grep PATTERN FILE || status=$?; '
+        'if [ "$status" -eq 1 ]; then status=0; fi; (exit "$status"); }. '
+        'Preserve grep status 2 and every other failure. The Harness shell-safety '
+        'plugin also supplies bridge_grep_optional with precisely this behavior; '
+        'use it only when that plugin is known to be active. Plain grep keeps its '
+        'normal status for assertions that require a match.\n'
+        '- For bounded display of a stream, prefer sed -n \'1,40p\' over head: '
+        'it drains the input and avoids an artificial producer SIGPIPE. '
+        'Inspect already saved logs locally instead of downloading them again.'
     )
     file_tools = {spec['name'] for spec in specs
                   if isinstance(spec['parameters'], dict)
@@ -383,14 +397,15 @@ def _tool_json(payload):
     return json.loads(payload, object_pairs_hook=_unique_json_object)
 
 
-def _tool_block_after_preamble(text):
+def _tool_block_after_preamble(text, *, allow_calls_fence=False):
     """Accept one explicit terminal protocol block after plain commentary.
 
     This option defines tool_calls as an action protocol, not a documentation
     fence. Generic JSON, quoted blocks and blocks inside other fences stay text.
     The entire suffix still goes through the strict batch parser below.
     """
-    starts = list(re.finditer(r"(?m)^```tool_calls[ \t]*\r?$", text))
+    label = r'(?:tool_calls|calls)' if allow_calls_fence else 'tool_calls'
+    starts = list(re.finditer(r"(?m)^```" + label + r"[ \t]*\r?$", text))
     if len(starts) != 1:
         return text
     prefix = text[:starts[0].start()]
@@ -502,6 +517,7 @@ def parse_tool_calls(
     allow_tool_preamble: bool = False,
     allow_outer_closer_transposition: bool = False,
     allow_missing_call_closer: bool = False,
+    allow_calls_fence: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, with explicit narrow tolerances.
 
@@ -519,7 +535,13 @@ def parse_tool_calls(
     """
     stripped = (text or "").strip()
     if allow_tool_preamble and flat_argument_tools is not None:
-        stripped = _tool_block_after_preamble(stripped)
+        stripped = _tool_block_after_preamble(stripped, allow_calls_fence=allow_calls_fence)
+    if allow_calls_fence and flat_argument_tools is not None and re.match(r'\A```calls[ \t]*\r?\n', stripped):
+        # Observed label alias only. No JSON/closing repair is permitted here;
+        # every argument must still satisfy the advertised schema below.
+        stripped = '```tool_calls' + stripped[len('```calls'):]
+        allow_unclosed_fence = allow_closing_artifacts = allow_missing_array_closer = False
+        allow_outer_closer_transposition = allow_missing_call_closer = False
     if not stripped.startswith("```tool_calls"):
         return text, None
     match = _TOOL_BLOCK_RE.fullmatch(stripped)
