@@ -37,6 +37,11 @@ try {
   assert.equal(result.stdout, 'before');
   assert.equal(run('printf ok | tail -1').stdout, 'ok');
   assert.equal(run('false; printf UNREACHABLE').status, 1);
+  // Regression: probing a branch for an optional platform fix must reach the
+  // next inspection when markers are absent, while mandatory assertions fail.
+  assert.equal(run("printf 'unrelated source\\n' | bridge_grep_optional -n -E 'requires_bytes_plan|pytestmark|CAPABILITY_UNAVAILABLE' | sed -n '1,20p'; printf NEXT_FILE").stdout, 'NEXT_FILE');
+  assert.equal(run("printf 'pytestmark = fixture\\n' | bridge_grep_optional -n -E 'requires_bytes_plan|pytestmark|CAPABILITY_UNAVAILABLE' | sed -n '1,20p'").stdout, '1:pytestmark = fixture\n');
+  assert.equal(run("(exit 128) | bridge_grep_optional -n -E 'requires_bytes_plan|pytestmark|CAPABILITY_UNAVAILABLE' | sed -n '1,20p'; printf UNREACHABLE").status, 128);
   assert.equal(run('printf plain | bridge_grep_optional missing | sed -n \'1,40p\'; printf CONTINUED').stdout, 'CONTINUED');
   assert.equal(run('printf plain | grep missing; printf UNREACHABLE').status, 1);
   assert.equal(run('(exit 17) | bridge_grep_optional missing | cat; printf UNREACHABLE').status, 17);

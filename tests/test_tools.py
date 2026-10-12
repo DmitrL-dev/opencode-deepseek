@@ -24,6 +24,22 @@ FLAT_TOOLS = [{"type": "function", "function": {"name": name, "parameters": {
 
 
 class ToolProtocolTests(unittest.TestCase):
+    def test_discovery_search_contract_on_resumed_harness_history(self):
+        messages = [ChatMessage(role='user', content='Check whether PR69 already has platform fixes'),
+                    ChatMessage(role='tool', name='bash', tool_call_id='prior',
+                                content='[exit code: 1] No marker matched')]
+        for continuation in (False, True):
+            prompt = messages_to_prompt(messages, FLAT_TOOLS, tools_continuation=continuation)
+            rule = prompt.split('Shell search contract:', 1)[1]
+            self.assertIn('Discovery searches', rule)
+            self.assertIn('even when you do not know beforehand', rule)
+            self.assertIn('Do not use plain grep for such discovery', rule)
+            self.assertIn('explicit assertion', rule)
+            self.assertIn('bridge_grep_optional -n -E', rule)
+            self.assertIn('failed git show must stop', rule)
+            self.assertIn('Preserve grep status 2', rule)
+            self.assertLess(prompt.index('[exit code: 1] No marker matched'), prompt.index('Shell search contract:'))
+
     def test_verification_reuse_contract_follows_actual_results(self):
         messages = [
             ChatMessage(role='user', content='Update README wording only'),

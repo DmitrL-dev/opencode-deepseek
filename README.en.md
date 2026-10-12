@@ -282,6 +282,8 @@ actions and counters are preserved. `if`, `!`, `&&` and `||` retain normal Bash
 semantics: an explicitly handled nonzero status need not fail the whole command.
 Plain `gh pr checks` (including `--required`/`--repo`) fetches status once and returns JSON: validated failing or pending checks do not stop the goal. Exit codes `1`/`8` are normalized only with a valid schema, matching status and empty stderr. Network/authentication errors, malformed responses and other pipeline failures still stop the turn. `--watch`, `--web` and custom formatting retain native gh behavior. Requires `python3` on PATH; `/bridge-shell-status` must report `harness-contract-v3`. Verified offline with mocked responses, without re-querying CI. The running Harness reported `harness-contract-v3`, and the existing turn continued to completion using saved CI results without errors. A failing live CI status was not re-queried to test the adapter.
 
+When checking whether a branch contains a fix or locating optional markers/sections, no match is a discovery result even when presence is unknown beforehand. The model contract requires `bridge_grep_optional` for this case; plain `grep` remains for mandatory assertions. Use `-E 'marker_a|marker_b'` for alternatives. Producer errors (`git show`, etc.) still stop the pipeline. This is a prompt selection rule, not a guarantee of model behavior; shell safety does not override plain `grep`.
+
 For an optional search, use the `bridge_grep_optional` shell function: it
 normalizes only grep's own no-match status `1`. Invalid patterns, unreadable
 files (status `2`) and upstream failures remain failures. Plain `grep` is not
