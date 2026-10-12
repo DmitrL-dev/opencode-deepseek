@@ -93,7 +93,7 @@ class ConversationCache:
             if db is not None:
                 db.close()
 
-    def prepare(self, req, *, scope=None, claim=None, legacy_scopes=()):
+    def prepare(self, req, *, scope=None, claim=None, legacy_scopes=(), allow_local_rollover=False):
         # Explicit protocol clients already own their conversation identity.
         if req.conversation_id:
             return req, 0
@@ -142,7 +142,7 @@ class ConversationCache:
                     break
             if not row or row[1]:
                 raise ConversationStateError('History is unknown or already consumed; automatic replay and new-chat fallback are disabled.')
-            if row[2] >= self.max_replies:
+            if row[2] >= self.max_replies and not (allow_local_rollover and claim is not None):
                 raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.
             reservation = uuid.uuid4().hex

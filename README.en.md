@@ -586,3 +586,15 @@ was reconciled with `main`, with no missing functional patches found.
 [Commit mapping and documentation differences](docs/BRANCH_RECONCILIATION_20261012.md).
 The offline budget installer test checks the real model-catalog import in an
 isolated copy and reports the original child-process failure.
+
+With `DEEPSEEK_CONTEXT_ROLLOVER=1`, rollover also handles the local
+`CONVERSATION_MAX_REPLIES` cap (200 replies in the working configuration). Before
+sending the next step, the bridge archives the full history privately and hands
+off instructions, completed-action results and recent notes to a new conversation.
+It does not send another request to the capped conversation. Only the new
+conversation starts at one accepted reply; global budgets, old history and the
+Harness goal binding are preserved. Completed actions are observations, not
+commands to execute again. Incomplete/oversized context, archive failure or a new
+refusal stops migration without automatic regeneration. Disabled mode retains the
+manual stop. Verified offline without account requests; migration happens on the
+next Harness request, not on a timer.

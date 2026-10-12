@@ -456,7 +456,32 @@ def _conversation_tool_chat(prompt, req, model_type):
             scope = _conversation_scope(provider)
             conversation_token = _bound_conversation.set(binding)
         req, steps = conversation_cache.prepare(req, scope=scope, claim=claim,
-                                                legacy_scopes=legacy)
+                                                legacy_scopes=legacy,
+                                                allow_local_rollover=(provider == 'deepseek' and
+                                                    os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') == '1'))
+        if claim and steps >= conversation_cache.max_replies:
+            # Migrate before dispatch: the capped conversation receives no request.
+            # A failure in the new conversation cannot enter the refusal-retry path.
+            from .context_rollover import checkpoint
+            _check_cancelled()
+            handoff, archive = checkpoint(original, req.conversation_id,
+                conversation_cache.path.parent / 'context-checkpoints', local_limit=True)
+            migrated = original.model_copy(update={'conversation_id': None,
+                'messages': [ChatMessage(role='user', content=handoff)]})
+            migration_prompt = messages_to_prompt(migrated.messages, migrated.tools,
+                migrated.tool_choice, tools_continuation=False, provider=provider)
+            if len(migration_prompt.encode('utf-8')) > 131072:
+                raise ConversationStateError('Migration prompt exceeds local limit; no new chat.')
+            conversation_cache.claim_rollover(claim, req.conversation_id, archive)
+            _check_cancelled()
+            reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
+            result = (_validate_tool_reply(reply, migrated, allow_continuation=False) if migrated.tools else
+                      (reply, reply.text, None))
+            # Only the new conversation starts at one reply. Old rows and all
+            # provider usage journals remain intact.
+            conversation_cache.remember(original, *result, 0, scope=scope)
+            succeeded = True
+            return result
         if req is not original:
             # Continuation of a saved provider chat: browser light mode may shorten tools.
             prompt = messages_to_prompt(

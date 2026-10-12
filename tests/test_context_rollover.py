@@ -49,6 +49,103 @@ class ContextRolloverTests(unittest.TestCase):
         with patch.object(api, 'get_client', return_value=self.client):
             return api._conversation_tool_chat('unused full prompt', self.req, 'default')
 
+    def capped(self):
+        api.conversation_cache.max_replies = 200
+        with api.conversation_cache.connection() as db:
+            db.execute('UPDATE links SET steps=200')
+
+    def test_local_cap_migrates_once_without_sending_to_old_chat(self):
+        self.capped()
+        prior = api.guard.begin('deepseek')
+        prior.dispatch(kind='generation')
+        prior.complete()
+        before = copy.deepcopy(api.guard._memory['deepseek']['usage'])
+        def answer(prompt, cid, *args):
+            self.assertIsNone(cid)
+            self.assertIn('next step has NOT been sent', prompt)
+            self.assertIn('done_1', prompt)
+            self.assertIn('observed result', prompt)
+            self.assertIn('Do not repeat completed actions', prompt)
+            current_attempt('deepseek').dispatch(kind='generation')
+            return Reply('Next unperformed step.', 'new:2')
+        self.client.chat.side_effect = answer
+        result = self.run_request()
+        self.assertEqual(self.client.chat.call_count, 1)
+        self.assertEqual(api.guard._memory['deepseek']['usage'][:-1], before)
+        with api.conversation_cache.connection() as db:
+            self.assertEqual(db.execute('SELECT used, steps FROM links WHERE cid=?', ('old:2',)).fetchone(), (1, 200))
+            self.assertEqual(db.execute('SELECT used, steps FROM links WHERE cid=?', ('new:2',)).fetchone(), (0, 1))
+        archive = next((api.conversation_cache.path.parent / 'context-checkpoints').glob('*.json'))
+        self.assertEqual(json.loads(archive.read_text())['request'], self.req.model_dump(exclude_none=True))
+        with self.assertRaises(api.ToolCallError):
+            self.run_request()
+        self.assertEqual(self.client.chat.call_count, 1)
+        following = self.req.model_copy(update={'messages': [*self.req.messages,
+            ChatMessage(role='assistant', content=result[1]), ChatMessage(role='user', content='Continue')]})
+        prepared, steps = api.conversation_cache.prepare(following)
+        self.assertEqual((prepared.conversation_id, steps), ('new:2', 1))
+
+    def test_local_cap_disabled_does_not_dispatch_or_consume(self):
+        self.capped()
+        with patch.dict(os.environ, {'DEEPSEEK_CONTEXT_ROLLOVER': '0'}):
+            with self.assertRaises(api.ToolCallError):
+                self.run_request()
+        self.client.chat.assert_not_called()
+        with api.conversation_cache.connection() as db:
+            self.assertEqual(db.execute('SELECT used, steps FROM links').fetchone(), (0, 200))
+
+    def test_local_cap_new_refusal_does_not_trigger_another_rollover(self):
+        self.capped()
+        def refuse(*args):
+            attempt = current_attempt('deepseek')
+            attempt.dispatch(kind='generation')
+            attempt.empty_context_refusal = True
+            raise ProviderRejected('conversation_context_exceeded')
+        self.client.chat.side_effect = refuse
+        with self.assertRaises(ProviderRejected):
+            self.run_request()
+        with self.assertRaises(ProviderRejected):
+            self.run_request()
+        self.assertEqual(self.client.chat.call_count, 1)
+
+    def test_below_local_cap_continues_existing_chat(self):
+        self.capped()
+        with api.conversation_cache.connection() as db:
+            db.execute('UPDATE links SET steps=199')
+        def answer(prompt, cid, *args):
+            self.assertEqual(cid, 'old:2')
+            current_attempt('deepseek').dispatch(kind='generation')
+            return Reply('Next step.', 'old:4')
+        self.client.chat.side_effect = answer
+        self.run_request()
+        self.assertEqual(self.client.chat.call_count, 1)
+        self.assertFalse((api.conversation_cache.path.parent / 'context-checkpoints').exists())
+
+    def test_local_cap_truncated_tools_never_trigger_repair(self):
+        from tests.test_tools import FLAT_TOOLS
+        self.req = self.req.model_copy(update={'tools': FLAT_TOOLS})
+        base = self.base.model_copy(update={'tools': FLAT_TOOLS})
+        api.conversation_cache.remember(base, Reply('', 'old:2'), '', [self.call], 199)
+        self.capped()
+        def answer(prompt, cid, *args):
+            self.assertIsNone(cid)
+            current_attempt('deepseek').dispatch(kind='generation')
+            return Reply('```tool_calls\n[{"name":"read","arguments":', 'new:2', finish_reason='length')
+        self.client.chat.side_effect = answer
+        with patch.object(api, '_MAX_CONTINUATIONS', 3), patch.object(api, '_FORMAT_REPAIR', True):
+            with self.assertRaises(api.ToolCallError):
+                self.run_request()
+        self.assertEqual(self.client.chat.call_count, 1)
+
+    def test_local_cap_checkpoint_failure_releases_without_dispatch(self):
+        self.capped()
+        with patch('server.context_rollover.checkpoint', side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):
+                self.run_request()
+        self.client.chat.assert_not_called()
+        with api.conversation_cache.connection() as db:
+            self.assertEqual(db.execute('SELECT used, steps FROM links').fetchone(), (0, 200))
+
     def test_one_migration_preserves_history_steps_and_usage(self):
         self.client.chat.side_effect = self.response
         result = self.run_request()
