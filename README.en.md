@@ -461,6 +461,9 @@ to apply the browser changes (controller 0.3.34).
 
 Mistral accepts only a request-bound stream with a terminal trailer.
 Harness `--without-browser` excludes browser models and their aliases.
+The browser controller waits for text insertion, preserves user edits and resumes
+only explicitly bound conversations. These cases passed 28 isolated browser
+fixtures without accounts.
 
 ### Model identifiers
 

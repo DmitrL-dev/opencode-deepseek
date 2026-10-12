@@ -458,6 +458,9 @@
       input.dispatchEvent(new InputEvent("input", {
         bubbles: true, cancelable: true, inputType: "insertText", data: prompt,
       }));
+      await new Promise(resolve => setTimeout(resolve, 0));
+      if (!retainsPrompt(input, prompt)) throw new BridgeFailure("The editor changed after insertion");
+      return input;
     }
     if (!retainsPrompt(input, prompt)) {
       placeCaret(input, false);
@@ -523,8 +526,9 @@
       input.setSelectionRange(0, input.value.length);
     }
     document.execCommand("selectAll", false);
-    if (document.execCommand("insertText", false, prompt) && samePrompt(draft(input), prompt)) {
+    if (document.execCommand("insertText", false, prompt)) {
       await new Promise(resolve => setTimeout(resolve, 80));
+      if (!samePrompt(draft(input), prompt)) throw new BridgeFailure("The editor changed after insertion");
       // Composers that arm Send from keystrokes (Qwen) keep going when the
       // button is still disabled; submitComposer waits for it.
       if (!site.send?.wait || sendArmed(site.send.button())) return input;
@@ -627,10 +631,9 @@
     // prompt; clear it. Any other draft is the user's — do not overwrite.
     // looseEmpty: empty ProseMirror ZWSP must not count as an unsent draft.
     await clearLeftoverDraft(input, job.prompt);
-    // New jobs (path=null) used to always navigate to site.home (/work), which
-    // forces a fresh Vibe chat every turn. Stay on the visible conversation.
+    // Only an explicit bound path may resume a conversation. The server's
+    // continuation cache supplies that path; a new job must not borrow a tab.
     let target = job.path || site.home;
-    if (!job.path && site.path.test(location.pathname)) target = location.pathname;
     if (target !== site.home && !site.path.test(target)) throw new BridgeFailure("Invalid conversation route");
     if (!sameRoute(location.pathname, target)) {
       // Keep only a tab id and execution flag across navigation. No prompts,
@@ -827,7 +830,7 @@
           const detail = bridgeFailureReason(error)
             || [error?.name, error?.message].filter(Boolean).join(": ")
             || reason;
-          label("ERROR: " + String(detail).slice(0, 90));
+          label("OpenCode: остановлено · подключить");
           button.title = detail;
         }
       }
