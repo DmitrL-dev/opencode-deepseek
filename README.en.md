@@ -331,7 +331,7 @@ Provider documentation retains detailed qualification results.
 | Mistral · `mistral-web` | Connected tab required | Browser adapter verified — see `browser/README.md` |
 | Grok · `grok-web` | Connected tab required | Browser adapter verified — see `browser/README.md` |
 | ChatGPT · `chatgpt-web` | Connected tab required | Browser adapter verified — see `browser/README.md` |
-| Claude · `claude-web` | Connected tab required | Browser adapter verified (ProseMirror + `/api/*` / DOM fallback) — see `browser/README.md` |
+| Claude · `claude-web` | Connected tab required | Browser adapter verified (ProseMirror + `/api/*`) — see `browser/README.md` |
 | Gemini · `gemini-web` / Antigravity CLI | `gemini-web`: connected tab; CLI: `agy` | Browser adapter verified. CLI was rejected by region in our test |
 
 All connections start disabled. Website versions, quotas and availability may
@@ -382,6 +382,15 @@ These are **not Harness screenshots** or proof of current account availability.
 CI covers Python 3.9/3.12, PoW WASM, shell/JavaScript and isolated browser fixtures.
 Locally: `python -m unittest discover -s tests -t . -v`.
 [Real Harness CLI fixtures with mocked providers](docs/HARNESS.en.md#offline-verification).
+
+### Browser exchange safety
+
+DOM fallback is disabled: an old visible answer cannot complete a new request.
+Claude requires a network terminal marker; partial or malformed answers are
+not reported as complete. Uncertain dispatched outcomes retain pending state
+and a safety pause across restart. There is no automatic retry.
+Verified offline without live accounts. Re-export and update the userscripts
+to apply the browser changes (controller 0.3.34).
 
 **MIT · unofficial project.** Based on
 [Tsuev/opencode-deepseek](https://github.com/Tsuev/opencode-deepseek) and

@@ -36,7 +36,7 @@ content context and keeps its local pairing key out of page JavaScript.
    until both script names appear. The extension must rescan externally edited
    files before the next page load, as described in its linked README.
    After upgrading the bridge, export and replace the scripts again. The current
-   controller is 0.3.33 and observer is 0.3.17 (Claude thinking streamDone).
+   controller is 0.3.34 and observer is 0.3.17 (Claude thinking streamDone).
    On a failed job the badge shows `ERROR: …` with the reason (hover for full text).
    Older loaded scripts do not include all lease checks.
 3. Keep the API bound to `127.0.0.1:8000`. Set `BROWSER_BRIDGE_ENABLED=1` and enable
@@ -56,9 +56,9 @@ content context and keeps its local pairing key out of page JavaScript.
    version; select the desired model in the site's UI. Stateless clients
    (OpenCode) that resend full `messages[]` resume the same browser chat via the
    local conversation cache; only the new user/tool turn is typed into the tab
-   after the first reply. Tab-visible failures (captcha, observe/send issues) do
-   not durable-pause the provider — fix the site UI and retry. Quota/access HTTP
-   status still pauses until `python -m providers.access resume <provider>`.
+   after the first reply. An uncertain send/capture outcome retains a durable
+   pause and pending attempt. Inspect the site before explicitly resolving it;
+   visibility in a browser is not proof that a generation never started.
 
 Requests to the local job endpoints require the private pairing key and a
 loopback client address. There is no CORS grant. A claimed job is tied to one
@@ -143,8 +143,8 @@ the site UI. The controller fills the ProseMirror composer
 (`[data-testid="chat-input"]`) and clicks Send. The observer captures only
 `/api/organizations/.../chat_conversations/<id>/completion` SSE for the active
 job (line-oriented `content_block_delta` / `message_stop`; thinking frames with
-`"stop_reason": null` are not treated as done). If the wire body is incomplete,
-the controller can finish from a late DOM scrape. Conversation tokens use
+`"stop_reason": null` are not treated as done). An incomplete wire body is
+rejected; visible DOM text cannot substitute for a terminal network response. Conversation tokens use
 `/chat/<id>`. Do not point OpenCode `small_model` / session-title at `claude-web`
 while a long turn is running — use another provider or disable title LLM
 (Harness already disables `session-title-llm`). Captchas and plan limits must be
@@ -162,13 +162,12 @@ Export and install the userscripts, open a signed-in Gemini tab — either
 The site UI selects the model. Conversation tokens use `/app/<id>` when the
 SPA exposes one (not Antigravity UUIDs).
 
-**Answer capture (intentional fork).** Other tab providers finish from a
-network completion body that already holds assistant text. Google AI Mode
-often streams `/async/folif` HTML with early prompt-echo shells, so the
-controller prefers a late DOM→Markdown scrape; the server still accepts
-StreamGenerate text, folif HTML, or that plain Markdown. Prefer wire-first
-again only when a late frame is stable plain text/Markdown without echo —
-see the comment above `gemini_answer` in `providers/browser_protocol.py`.
+**Answer capture.** The controller forwards only request-bound network captures.
+It never substitutes visible DOM text or synthesizes completion markers. Google
+AI Mode HTML prompt echoes are removed only at an exact normalized prefix;
+ambiguous embedded echoes are rejected. A stalled capture stops the turn and
+retains the safety pause. These changes were verified offline, not against live
+Gemini accounts.
 
 ### Antigravity CLI (`GEMINI_TRANSPORT=cli`, default)
 

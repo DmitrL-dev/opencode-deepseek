@@ -603,17 +603,6 @@ class Attempt:
             return
         if self.guard._live.get(self.provider) == self.id:
             self.guard._live.pop(self.provider, None)
-        # Browser tab failures the user can see/fix in the normal UI clear the
-        # attempt without a durable pause (no providers.access resume).
-        if getattr(exc, 'clear_without_pause', False):
-            try:
-                self.complete()
-            except OSError:
-                self.guard._failed.add(self.provider)
-            except ProviderRejected as error:
-                if error.code == 'safety_state_unavailable':
-                    self.guard._failed.add(self.provider)
-            return
         # Cancellation before dispatch is harmless; afterwards an unverified
         # outcome remains durably pending even if writing the pause fails.
         if self.dispatched or isinstance(exc, Exception) and not isinstance(exc, ValueError) and not getattr(exc, 'before_dispatch', False):

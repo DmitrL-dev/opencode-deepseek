@@ -358,16 +358,12 @@ def _gemini_drop_prompt_echo(text, prompt):
     normalized = _gemini_norm_ws(got)
     if wanted and normalized == wanted:
         return ""
-    if wanted and wanted in normalized and len(normalized) <= len(wanted) + 160:
-        # Near-echo of the pasted prompt — not a real answer.
-        return ""
-    if wanted and wanted in got:
-        got = got.replace(wanted, "", 1)
+    if wanted and normalized.startswith(wanted):
+        prefix = r"\s*" + r"\s+".join(re.escape(word) for word in wanted.split())
+        got = re.sub(r"^" + prefix + r"\s*", "", got, count=1)
     elif wanted and wanted in normalized:
-        # Prompt was restated with different whitespace; strip via regex on
-        # collapsed form only when the whole prefix matches.
-        prefix = re.escape(wanted).replace(r"\ ", r"\s+")
-        got = re.sub(r"(?is)^" + prefix + r"\s*", "", got, count=1)
+        # Embedded prompt text has no trustworthy boundary; do not guess.
+        return ""
     if "Available tools, given as JSON Schema" in got or (
             "```tool_calls" in got and "You can call functions" in got):
         got = re.sub(
@@ -431,35 +427,13 @@ def gemini_conversation_path(body, reported_path=None):
 
 # Gemini browser answer capture — fork vs other tab providers
 # -----------------------------------------------------------
-# Other browser providers (Grok, Mistral, Kimi, ChatGPT, Qwen, GLM) expose a
-# single completion request whose body already contains assistant text (JSON /
-# SSE / NDJSON). The observer forwards that body; parsers here only unwrap
-# fields.
-#
-# Gemini AI Mode (www.google.com/search?udm=50) is different:
-#   - The useful stream is often /async/folif (HTML fragments, sometimes
-#     \\u003c-escaped), not a chat-completion JSON envelope.
-#   - Early folif shells frequently restate the pasted OpenCode prompt; waiting
-#     for HTTP EOF alone still yields echo unless the observer rejects it.
-#   - Headings/code live in unstable CSS classes (ZLzG0d, n6owBd,
-#     aiModeUiCodeBlock__Container). The rendered DOM is currently the most
-#     reliable final answer.
-#
-# Preferred path today (controller): after a completion is observed, scrape the
-# latest AI Mode turn to Markdown and POST plain UTF-8 (handled below as the
-# non-HTML branch). Wire bodies remain supported:
-#   1) StreamGenerate / batchexecute wrb.fr text parts (gemini.google.com)
-#   2) folif HTML → _gemini_html_text (server-side mirror of the DOM converter)
-#   3) plain Markdown from the controller scrape
-#
-# Evolve toward other providers when a late wire frame carries stable plain
-# text or Markdown (no prompt echo, keeps structure). Then prefer that body and
-# keep DOM scrape + _gemini_html_text as fallbacks. Do not drop DOM solely for
-# symmetry while folif stays HTML-centric.
+# Only request-bound wire captures reach this decoder. Gemini may use
+# StreamGenerate frames or folif HTML; visible DOM is not a completion source.
+# Prompt echoes without a separately identifiable answer remain failures.
 
 
 def gemini_answer(body, prompt=None):
-    """Extract the final Gemini browser answer (wire text, folif HTML, or DOM Markdown)."""
+    """Extract the final Gemini browser answer (wire text or folif HTML)."""
     if not body:
         raise ProviderUnavailable("Gemini browser returned an empty completion")
     texts = []
@@ -485,7 +459,7 @@ def gemini_answer(body, prompt=None):
             break
         prompt_only = True
     if not text:
-        # Fork branches 2–3: folif HTML, or controller DOM Markdown (plain UTF-8).
+        # Decode captured HTML or a plain-text wire body.
         raw = _gemini_decode_body(body)
         if "<" in raw:
             cleaned = _GEMINI_SCAFFOLD.sub("", _gemini_html_text(raw)).strip()
@@ -494,7 +468,7 @@ def gemini_answer(body, prompt=None):
                 prompt_only = True
         elif (raw.strip() and not texts and "wrb.fr" not in raw
               and not raw.lstrip().startswith("[[") and "BardErrorInfo" not in raw):
-            # Plain Markdown from finishGeminiDomAnswer — not a failed wrb unwrap.
+            # Plain captured text, not a failed wrb unwrap.
             cleaned = _GEMINI_SCAFFOLD.sub("", raw).strip()
             text = _gemini_drop_prompt_echo(cleaned, prompt)
             if cleaned and not text:
@@ -890,9 +864,7 @@ def _mistral_patch_answer(body, prompt, expected_chat, request_turn):
             else:
                 raise ProviderUnavailable("Unsupported Mistral assistant patch")
     text = "".join(c["text"] for c in chunks if not c["reasoning"]) if chunks is not None else content
-    # 8:null trailer (ended) is optional once generationStatus success was seen.
-    _ = ended
-    if not done or not text.strip() or (content and chunks is not None and content != text):
+    if not done or not ended or not text.strip() or (content and chunks is not None and content != text):
         raise ProviderUnavailable("Mistral disconnected before a complete assistant answer")
     return text
 
@@ -1109,8 +1081,10 @@ def _claude_stream_text(body):
         try:
             frame = json.loads(payload)
         except (ValueError, UnicodeError):
-            continue
+            raise ProviderUnavailable("Invalid JSON in Claude stream") from None
         chunk, stopped, known = _claude_delta_text(frame)
+        if done and chunk:
+            raise ProviderUnavailable("Claude content after terminal marker")
         if known:
             saw_frame = True
         if isinstance(chunk, str) and chunk:
@@ -1121,10 +1095,10 @@ def _claude_stream_text(body):
 
 
 def claude_answer(body, prompt=None):
-    """Claude.ai capture: conversation JSON, line SSE/NDJSON, then DOM-shaped SSE.
+    """Claude.ai capture: conversation JSON or terminal SSE/NDJSON.
 
-    Prefer chat_messages leaf text when the body is a conversation dump. DOM
-    scrape synthesizes Mistral-compatible message.delta SSE as a last resort.
+    Prefer chat_messages leaf text when the body is a conversation dump.
+    Streaming replies require a terminal marker.
     """
     sample = body.lstrip()
     if sample.startswith(b"{"):
@@ -1151,9 +1125,9 @@ def claude_answer(body, prompt=None):
                 elif isinstance(nested, str) and nested.strip():
                     return nested.strip()
     text, saw_frame, done = _claude_stream_text(body)
-    if text.strip() and (done or saw_frame):
+    if text.strip() and done:
         return text.strip()
-    # DOM fallback reuses the Mistral SSE shape (message.delta + message.completed).
+    # Generic terminal SSE uses message.delta + message.completed.
     try:
         return mistral_answer(body, prompt)
     except ProviderUnavailable:

@@ -51,11 +51,6 @@ _BRIDGE_PROTOCOL = (
     ("changed the resumed conversation", "browser_route"),
     ("did not complete the request", "browser_timeout"),
 )
-# Fixed bridge messages that still warrant a durable pause + manual resume.
-# Everything else is visible in the signed-in tab; the turn fails without pause.
-_BRIDGE_PAUSE = (
-    "rejected access or quota",
-)
 
 
 def _bridge_detail(value):
@@ -66,7 +61,7 @@ def _bridge_detail(value):
 
 
 def _annotate_bridge_failure(exc, detail=None):
-    """Attach allowlisted diagnostics; skip durable pause for tab-visible failures."""
+    """Attach diagnostic categories without changing the attempt safety policy."""
     if not isinstance(exc, ProviderUnavailable):
         return exc
     if not getattr(exc, "phase", None):
@@ -79,10 +74,7 @@ def _annotate_bridge_failure(exc, detail=None):
                 break
         else:
             exc.protocol = "browser_bridge"
-    # Quota/access status still pauses. Captcha, observe/send/tab errors do not —
-    # the user inspects the normal site UI and the next agent turn may retry.
-    if not any(needle in text for needle in _BRIDGE_PAUSE):
-        exc.clear_without_pause = True
+    # Unknown post-dispatch outcomes must retain the durable pause.
     return exc
 
 
@@ -342,15 +334,13 @@ def parse_browser_result(provider, result, path=None, prompt=None):
     elif provider == "claude":
         text = claude_answer(body, prompt)
     elif provider == "mistral":
+        if not body.lstrip().startswith(b"15:"):
+            raise ProviderUnavailable("Mistral browser response lacks verifiable turn binding")
         request_turn = result.get("request_turn")
-        # 15: patch streams are preferred; SSE (network or DOM fallback) is OK.
-        # Exclusive-tab capture may omit request_turn; bootstrap/prompt binds.
-        if path is not None and request_turn is not None:
-            if (not isinstance(request_turn, dict)
-                    or request_turn.get("chat_id") not in (None, reference.rsplit("/", 1)[-1])):
-                raise ProviderUnavailable("Mistral resumed request does not match its conversation")
-        chat_ref = reference.rsplit("/", 1)[-1] if isinstance(reference, str) and "/" in reference else None
-        text = mistral_answer(body, prompt, chat_ref, request_turn)
+        if path is not None and (not isinstance(request_turn, dict)
+                                 or request_turn.get("chat_id") != reference.rsplit("/", 1)[-1]):
+            raise ProviderUnavailable("Mistral resumed request does not match its conversation")
+        text = mistral_answer(body, prompt, reference.rsplit("/", 1)[-1], request_turn)
     else:
         text = kimi_answer(body, prompt, reference.rsplit("/", 1)[-1])
     if provider in ("gemini", "claude") and _browser_text_echoes_prompt(text, prompt):
@@ -397,7 +387,7 @@ class TabClient:
             try:
                 return self._chat(prompt, conversation_id, model, thinking, search)
             except ProviderUnavailable as exc:
-                # Tab-visible bridge failures skip durable pause; quota/access still pause.
+                # Diagnostic annotations never grant permission to repeat a request.
                 raise _annotate_bridge_failure(exc) from exc
 
     def _chat(self, prompt, conversation_id, model, thinking, search):

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.3.33
+// @version      0.3.34
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -612,11 +612,7 @@
     if (site.provider === "gemini") {
       const match = reported.match(/^\/(?:u\/\d+\/)?app\/([\w-]+)$/);
       reported = match ? "/app/" + match[1] : reported;
-      // Prefer DOM Markdown over forwarding the raw folif/wire body. See the
-      // "Gemini browser answer capture" note in providers/browser_protocol.py
-      // (gemini_answer): other tab providers unwrap JSON/SSE; AI Mode does not
-      // yet expose an equivalent stable text frame.
-      if (await finishGeminiDomAnswer(job.prompt, reported)) return;
+
     }
     await finish({ status: value.status, body: value.body, path: reported,
       ...(value.request_turn ? { request_turn: value.request_turn } : {}),
@@ -786,20 +782,12 @@
     // Sites flagged stalls may leave the HTTP body open after the UI finishes.
     // A capture that has started waits until the job deadline, which is
     // PROVIDER_RESPONSE_TIMEOUT. Twenty seconds applies only when no bytes were seen.
-    // Gemini AI Mode: DOM scrape runs only after a completion is observed (or
-    // as a late stall fallback), never as an early 8s race against the stream.
+    // Only request-bound network capture can finish a job. Never synthesize
+    // completion from visible DOM text, which may belong to an earlier turn.
     if (site.stalls && dispatching && pending?.id === job.id) {
       const sentAt = performance.now();
       while (pending?.id === job.id && performance.now() < deadline) {
-        if ((site.provider === "mistral" || site.provider === "claude")
-            && performance.now() - sentAt > 8000) {
-          if (site.provider === "mistral" && await finishMistralDomAnswer(job.prompt)) break;
-          if (site.provider === "claude" && await finishClaudeDomAnswer(job.prompt)) break;
-        }
         if (performance.now() - sentAt > 20000 && !pending.sawCapture) {
-          if (site.provider === "mistral" && await finishMistralDomAnswer(job.prompt)) break;
-          if (site.provider === "claude" && await finishClaudeDomAnswer(job.prompt)) break;
-          if (site.provider === "gemini" && await finishGeminiDomAnswer(job.prompt)) break;
           throw new BridgeFailure(site.provider === "grok"
             ? "Grok completion was not observed over REST or WebSocket"
             : "Completion request was not observed");
@@ -807,266 +795,10 @@
         await new Promise(resolve => setTimeout(resolve, 100));
       }
       if (pending?.id === job.id && pending.sawCapture) {
-        if (site.provider === "mistral" && await finishMistralDomAnswer(job.prompt)) return;
-        if (site.provider === "claude" && await finishClaudeDomAnswer(job.prompt)) return;
-        if (site.provider === "gemini" && await finishGeminiDomAnswer(job.prompt)) return;
         throw new BridgeFailure("Completion stream observation stalled");
       }
     }
   }
-
-  const geminiHtmlToMarkdown = root => {
-    const walk = (node, opts = {}) => {
-      if (!node) return "";
-      if (node.nodeType === 3) return node.nodeValue || "";
-      if (node.nodeType !== 1) return "";
-      const tag = node.tagName.toLowerCase();
-      if (tag === "script" || tag === "style" || tag === "svg" || tag === "button") return "";
-      const cls = typeof node.className === "string" ? node.className : "";
-      // Query rewrite / OpenCode paste lives in h3.MheKwc — never the model answer.
-      if (tag === "h3" && /\bMheKwc\b/.test(cls)) return "";
-      // Citation chips, "use code carefully", share/feedback chrome.
-      if (/\b(?:DHPVt|NMq1me|iMHp6c|vIWmYe|ofHStc|UrecDd|YOTKvb)\b/.test(cls)) return "";
-      // AI Mode fenced code: language chip + pre/code body.
-      if (/\baiModeUiCodeBlock__Container\b/.test(cls) || /\bBpxUDf\b/.test(cls)) {
-        const lang = (node.querySelector(".GlO4G")?.textContent || "").trim();
-        const code = (node.querySelector("pre code")?.textContent
-          || node.querySelector("pre")?.textContent || "").replace(/\n+$/, "");
-        if (!code) return "";
-        return "\n\n```" + lang + "\n" + code + "\n```\n\n";
-      }
-      const heading = /^h[1-6]$/.test(tag)
-        || node.getAttribute("role") === "heading"
-        || /\b(?:otQkpb|ZLzG0d)\b/.test(cls);
-      // Citation chips stay hidden, but AI Mode often puts section numbers
-      // ("1.", "2.") in aria-hidden spans inside headings — keep those.
-      if (node.getAttribute("aria-hidden") === "true" && !opts.inHeading) {
-        const label = (node.textContent || "").trim();
-        if (!/^\d+[.)]?$/.test(label)) return "";
-      }
-      const kids = (next = opts) => Array.from(node.childNodes).map(child => walk(child, next)).join("");
-      if (tag === "br") return "\n";
-      if (tag === "hr") return "\n---\n\n";
-      if (heading) {
-        const levelMatch = tag.match(/^h([1-6])$/);
-        let level = levelMatch ? Number(levelMatch[1]) : Number(node.getAttribute("aria-level") || 2);
-        if (!Number.isFinite(level) || level < 1) level = 2;
-        if (level > 6) level = 6;
-        const inner = kids({ inHeading: true }).replace(/\s+/g, " ").trim();
-        if (!inner) return "";
-        return "\n\n" + "#".repeat(level) + " " + inner + "\n\n";
-      }
-      if (tag === "strong" || tag === "b") return "**" + kids() + "**";
-      if (tag === "em" || tag === "i") return "*" + kids() + "*";
-      if (tag === "code") {
-        const body = kids().replace(/`/g, "\\`");
-        return node.closest("pre") ? body : "`" + body + "`";
-      }
-      if (tag === "pre") return "```\n" + kids().replace(/\n+$/, "") + "\n```\n\n";
-      if (tag === "li") {
-        const mark = opts.ordered ? `${opts.index || 1}. ` : "- ";
-        return mark + kids().trim().replace(/\n+/g, " ") + "\n";
-      }
-      if (tag === "ul") return kids({ ordered: false }) + "\n";
-      if (tag === "ol") {
-        let index = Number(node.getAttribute("start") || 1) || 1;
-        return Array.from(node.children).map(child => {
-          if (child.tagName && child.tagName.toLowerCase() !== "li") return walk(child, opts);
-          const row = walk(child, { ordered: true, index });
-          index += 1;
-          return row;
-        }).join("") + "\n";
-      }
-      if (tag === "a") {
-        const href = node.getAttribute("href") || "";
-        const label = kids().trim() || href;
-        if (href && !href.startsWith("javascript:") && !href.includes("google.com/search")) {
-          return "[" + label + "](" + href + ")";
-        }
-        return label;
-      }
-      // Answer paragraphs are div.n6owBd — keep as blocks. Other wrappers just flatten.
-      if (/\bn6owBd\b/.test(cls)) {
-        const inner = kids().trim();
-        return inner ? inner + "\n\n" : "";
-      }
-      if (tag === "p" || tag === "section") {
-        const inner = kids().trim();
-        return inner ? inner + "\n\n" : "";
-      }
-      return kids();
-    };
-    let text = walk(root).replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-    // Google AI Mode footer (any language variant we know).
-    text = text.replace(
-      /(?:\n|\s)*(?:В ответах искусственного интеллекта могут быть ошибки\.|AI responses may (?:include|contain) mistakes\.)[\s\S]*$/i,
-      "",
-    ).trim();
-    return text;
-  };
-
-  const scrapeGeminiVisibleAnswer = prompt => {
-    const norm = value => (value || "").replace(/\s+/g, " ").replace(/[\u200b\ufeff]/g, "").trim();
-    const wanted = norm(prompt);
-    const looksLikePrompt = text => {
-      const got = norm(text);
-      if (!got) return true;
-      if (wanted && (got === wanted || got.startsWith(wanted) && got.length <= wanted.length + 96)) {
-        return true;
-      }
-      if (got.includes("Available tools, given as JSON Schema")) return true;
-      if (got.includes("```tool_calls") && got.includes("You can call functions")) return true;
-      if (wanted && wanted.length >= 48 && got.includes(wanted.slice(0, 80))
-          && got.length <= wanted.length + 160) return true;
-      return false;
-    };
-    const lastOf = sel => {
-      const nodes = document.querySelectorAll(sel);
-      return nodes.length ? nodes[nodes.length - 1] : null;
-    };
-    // Latest AI Mode turn (.Zkbeff) → answer column only (skip h3.MheKwc rewrite).
-    const turn = lastOf(".Zkbeff");
-    const root = (turn && (
-      turn.querySelector('[data-container-id="main-col"]')
-      || turn.querySelector(".mZJni")
-    ))
-      || lastOf('[data-container-id="main-col"]')
-      || lastOf(".mZJni")
-      || lastOf('[data-subtree="aimc"]')
-      || lastOf('[data-message-author-role="model"]')
-      || lastOf("message-content")
-      || lastOf(".model-response-text");
-    if (root) {
-      const clone = root.cloneNode(true);
-      clone.querySelectorAll("h3.MheKwc, .DHPVt, .ofHStc, .UrecDd, .YOTKvb").forEach(el => el.remove());
-      const text = geminiHtmlToMarkdown(clone);
-      if (text && !looksLikePrompt(text)) return text;
-    }
-    for (const sel of [
-      '[data-container-id="main-col"]',
-      ".mZJni",
-      '[data-subtree="aimc"]',
-      '[data-message-author-role="model"]',
-      ".model-response-text",
-      "message-content",
-    ]) {
-      const nodes = Array.from(document.querySelectorAll(sel));
-      for (let i = nodes.length - 1; i >= 0; i--) {
-        const el = nodes[i];
-        if (el.closest('[contenteditable="true"], textarea, form, rich-textarea')) continue;
-        const clone = el.cloneNode(true);
-        clone.querySelectorAll("h3.MheKwc, .DHPVt").forEach(node => node.remove());
-        const text = geminiHtmlToMarkdown(clone);
-        if (text && !looksLikePrompt(text)) return text;
-      }
-    }
-    return null;
-  };
-
-  // AI Mode final answer → Markdown POST. Deliberate fork from Grok/Mistral/…
-  // (those finish with the captured network body). Revisit wire-first if late
-  // /async/folif gains plain assistant text; keep this as fallback. Details:
-  // providers/browser_protocol.py above gemini_answer.
-  const finishGeminiDomAnswer = async (prompt, reportedPath) => {
-    if (site.provider !== "gemini") return false;
-    const text = scrapeGeminiVisibleAnswer(prompt);
-    if (!text) return false;
-    const bytes = new TextEncoder().encode(text);
-    let encoded = "";
-    for (let i = 0; i < bytes.length; i += 16384) {
-      encoded += String.fromCharCode(...bytes.subarray(i, i + 16384));
-    }
-    let reported = typeof reportedPath === "string" ? reportedPath : location.pathname;
-    const match = reported.match(/^\/(?:u\/\d+\/)?app\/([\w-]+)$/);
-    if (match) reported = "/app/" + match[1];
-    else if (googleAiModePage() || reported === "/search" || reported.startsWith("/search?")) {
-      // Same synthetic token the server stores after the first AI Mode turn.
-      reported = "/app/aimode";
-    }
-    await finish({ status: 200, body: btoa(encoded), path: reported });
-    return true;
-  };
-
-  const scrapeMistralVisibleAnswer = prompt => {
-    const norm = value => (value || "").replace(/\s+/g, " ").replace(/[\u200b\ufeff]/g, "").trim();
-    const wanted = norm(prompt);
-    const pick = el => norm(el?.innerText || el?.textContent || "");
-    const selectors = [
-      '[data-message-role="assistant"]',
-      '[data-role="assistant"]',
-      '[data-testid*="assistant"]',
-      '[class*="assistant-message"]',
-      '[class*="AssistantMessage"]',
-      '[class*="assistant"] .markdown',
-      '[class*="assistant"] .prose',
-      '[role="article"]',
-    ];
-    for (const sel of selectors) {
-      const nodes = Array.from(document.querySelectorAll(sel));
-      for (let i = nodes.length - 1; i >= 0; i--) {
-        const el = nodes[i];
-        if (el.closest('[contenteditable="true"], textarea, form[data-composer], rich-textarea')) continue;
-        const text = pick(el);
-        if (!text || text === wanted) continue;
-        if (wanted && text.length <= wanted.length + 8 && text.includes(wanted.slice(0, 32))) continue;
-        return (el.innerText || el.textContent || "").trim();
-      }
-    }
-    return null;
-  };
-
-  const finishDomSseAnswer = async (text, path) => {
-    if (!text) return false;
-    const bytes = new TextEncoder().encode(
-      "data: " + JSON.stringify({ type: "message.delta", text }) + "\n\n"
-      + "data: " + JSON.stringify({ type: "message.completed" }) + "\n\n"
-      + "data: [DONE]\n\n",
-    );
-    let encoded = "";
-    for (let i = 0; i < bytes.length; i += 16384) {
-      encoded += String.fromCharCode(...bytes.subarray(i, i + 16384));
-    }
-    await finish({ status: 200, body: btoa(encoded), path });
-    return true;
-  };
-
-  const finishMistralDomAnswer = async prompt => {
-    if (site.provider !== "mistral") return false;
-    const text = scrapeMistralVisibleAnswer(prompt);
-    const reported = site.path.test(location.pathname) ? location.pathname : location.pathname;
-    return finishDomSseAnswer(text, reported);
-  };
-
-  const scrapeClaudeVisibleAnswer = prompt => {
-    const wanted = String(prompt || "").replace(/\u200b|\ufeff/g, "").trim();
-    const pick = el => (el.innerText || el.textContent || "").replace(/\u200b|\ufeff/g, "").trim();
-    const usable = text => {
-      if (!text || text === wanted) return false;
-      if (wanted && text.length <= wanted.length + 8 && text.includes(wanted.slice(0, 32))) return false;
-      return true;
-    };
-    // Prefer completed assistant turns (data-is-streaming="false") + markdown blocks.
-    const streaming = Array.from(document.querySelectorAll(
-      'div[data-is-streaming="false"] .standard-markdown, div[data-is-streaming="false"], .font-claude-response, [data-testid="assistant-message"]',
-    ));
-    for (let i = streaming.length - 1; i >= 0; i--) {
-      const el = streaming[i];
-      if (el.closest('[contenteditable="true"], textarea, [data-testid="chat-input"]')) continue;
-      if (el.getAttribute("data-is-streaming") === "true") continue;
-      const text = pick(el);
-      if (usable(text)) return text;
-    }
-    return scrapeMistralVisibleAnswer(prompt);
-  };
-
-  const finishClaudeDomAnswer = async prompt => {
-    if (site.provider !== "claude") return false;
-    // Still streaming — wait for data-is-streaming to settle.
-    if (document.querySelector('div[data-is-streaming="true"]')) return false;
-    const text = scrapeClaudeVisibleAnswer(prompt);
-    const reported = site.path.test(location.pathname) ? location.pathname : "/";
-    return finishDomSseAnswer(text, reported);
-  };
 
   async function poll() {
     if (busy || finishing || !enabled) return;

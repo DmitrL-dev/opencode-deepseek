@@ -298,10 +298,6 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         # A contender that never owned an attempt cannot mutate its peer state.
         if attempt is not None:
             _invalidate_client(provider, client)
-        # Browser tab-visible failures clear without pause; keep them as
-        # ProviderUnavailable (HTTP 400) so clients are not told the account is paused.
-        if getattr(exc, "clear_without_pause", False):
-            raise
         error = exc if isinstance(exc, ProviderRejected) else rejection(exc)
         raise error from exc
 

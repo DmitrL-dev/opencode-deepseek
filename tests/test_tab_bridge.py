@@ -137,7 +137,7 @@ class BrokerTests(unittest.TestCase):
                 self.assertEqual(file.stat().st_mode & 0o777, 0o600)
             self.assertEqual(destination.stat().st_mode & 0o777, 0o700)
 
-    def test_tab_visible_bridge_failure_does_not_durable_pause(self):
+    def test_tab_visible_bridge_failure_requires_manual_recovery(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         guard = AccessGuard(Path(directory.name) / "pauses.json", interval=0)
@@ -150,9 +150,10 @@ class BrokerTests(unittest.TestCase):
             }
             with self.assertRaises(ProviderUnavailable) as err:
                 client.chat("marker")
-            self.assertTrue(getattr(err.exception, "clear_without_pause", False))
-            self.assertEqual(guard.status(), {})
-            guard.check("qwen")
+            self.assertFalse(getattr(err.exception, "clear_without_pause", False))
+            self.assertEqual(guard.status()["qwen"], "upstream_failure")
+            with self.assertRaises(ProviderRejected):
+                AccessGuard(guard.path, interval=0).check("qwen")
 
     def test_browser_quota_status_still_durable_pauses(self):
         directory = tempfile.TemporaryDirectory()
@@ -345,28 +346,29 @@ class TabApiTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(choice['message']['tool_calls'][0]['function']['name'],'read')
                     self.assertEqual(choice['finish_reason'],'tool_calls')
 
-    async def test_tab_visible_failure_is_400_without_pause_next_turn_may_retry(self):
+    async def test_unknown_browser_outcome_pauses_and_blocks_the_next_turn(self):
         api.guard.resume("qwen")
+        def fail(*args, **kwargs):
+            from providers.access import current_attempt
+            current_attempt("qwen").dispatch()
+            return {"error": "Provider response could not be observed"}
         with patch.dict(os.environ, {"BROWSER_BRIDGE_ENABLED": "1"}), \
              patch.dict(config.MODEL_MAP, {"qwen-web": "default"}), \
              patch.dict(config.OPTIONAL_MODEL_PROVIDERS, {"qwen-web": "qwen"}), \
+             patch.object(api, "qwen_uses_browser", return_value=True), \
+             patch.object(config, "qwen_uses_browser", return_value=True), \
              patch.object(api, "build_provider_client", return_value=tab_bridge.TabClient("qwen")), \
-             patch.object(tab_bridge.broker, "submit", return_value={
-                 "error": "Provider response could not be observed",
-             }):
-            first = await self.client.post("/v1/chat/completions", json={
-                "model": "qwen-web",
-                "messages": [{"role": "user", "content": "marker"}],
-            })
-            second = await self.client.post("/v1/chat/completions", json={
-                "model": "qwen-web",
-                "messages": [{"role": "user", "content": "retry"}],
-            })
-        self.assertEqual(first.status_code, 400)
-        self.assertNotEqual(first.json()["error"].get("code"), "upstream_failure")
-        # Second request is not blocked by a durable pause (would be 403).
+             patch.object(tab_bridge.broker, "submit", side_effect=fail) as submit:
+            body = {"model": "qwen-web", "messages": [{"role": "user", "content": "marker"}]}
+            first = await self.client.post("/v1/chat/completions", json=body)
+            second = await self.client.post("/v1/chat/completions", json=body)
+        self.assertEqual(first.status_code, 403)
         self.assertEqual(second.status_code, 400)
-        self.assertEqual(api.guard.status(), {})
+        for response in (first, second):
+            self.assertEqual(response.json()["error"]["code"], "upstream_failure")
+            self.assertFalse(response.json()["error"]["retryable"])
+        submit.assert_called_once()
+        self.assertEqual(api.guard.status()["qwen"], "upstream_failure")
 
     async def test_failed_grok_terminal_never_becomes_tool_calls(self):
         tools = [{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}]

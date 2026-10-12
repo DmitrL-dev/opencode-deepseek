@@ -168,7 +168,9 @@ class QwenApiTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(api.guard.status()['qwen'], 'quota_exceeded')
                         # A later goal turn must stop before session lookup/renewal.
                         again = await self.http.post('/v1/chat/completions', json=self.body)
-                        self.assertEqual(again.status_code, 403)
+                        self.assertEqual(again.status_code, 400)
+                        self.assertEqual(again.json()["error"]["code"], "quota_exceeded")
+                        self.assertFalse(again.json()["error"]["retryable"])
                         self.assertEqual(get_client.call_count, 1)
                         renew.assert_not_called()
                 finally:

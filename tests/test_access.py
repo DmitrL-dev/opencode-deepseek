@@ -377,8 +377,10 @@ class SafetySdkTests(unittest.TestCase):
                     self.assertEqual(failure.exception.body["code"], "session_expired")
                     self.assertFalse(failure.exception.body["retryable"])
                     restarted = AccessGuard(case_guard.path, interval=0)
-                    with patch.object(api, "guard", restarted), self.assertRaises(PermissionDeniedError):
+                    with patch.object(api, "guard", restarted), self.assertRaises(BadRequestError) as resumed:
                         self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
+                    self.assertEqual(resumed.exception.body["code"], "session_expired")
+                    self.assertFalse(resumed.exception.body["retryable"])
                     self.assertEqual(calls.count(path), 1)
                     self.assertEqual(factory.call_count, 1)
 

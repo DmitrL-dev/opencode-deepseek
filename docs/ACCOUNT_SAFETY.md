@@ -88,12 +88,11 @@ resume revokes the previous attempt; it cannot authorize an old job or let it
 pause a new owner. Rejected cached sessions are invalidated
 so a manual sign-in plus explicit resume can load the new token.
 
-Browser tab transport is different for most operational failures: captcha,
-observe/send/editor/tab errors and other tab-visible bridge problems fail that
-turn without writing a durable pause. Inspect and fix the normal website UI,
-then the next agent request may proceed without `providers.access resume`.
-Non-200 completion status (quota/access) and uncertain cancellation after
-dispatch still pause and still require an explicit resume.
+Browser visibility does not establish whether a request completed. Unknown
+post-dispatch outcomes, including capture stalls, retain the pending attempt
+and durable pause across restart. Only proven pre-dispatch cancellation may
+release safely. There is no exception-attribute override to clear a dispatched
+attempt. DOM text is not accepted as a substitute for a network completion.
 
 ## Manual recovery
 
