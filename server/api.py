@@ -82,7 +82,7 @@ from .openai_format import (
 )
 from .ratelimit import RateLimiter, install_rate_limit
 from .browser_routes import router as browser_router
-from .schemas import ChatCompletionRequest
+from .schemas import ChatCompletionRequest, ChatMessage
 
 _log = logging.getLogger(__name__)
 
@@ -409,8 +409,37 @@ def _conversation_tool_chat(prompt, req, model_type):
                 req.messages, req.tools, req.tool_choice,
                 tools_continuation=True, provider=provider)
             model_type = None
-        result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
-                  _plain_conversation_reply(prompt, req, model_type))
+        try:
+            result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
+                      _plain_conversation_reply(prompt, req, model_type))
+        except ProviderRejected as exc:
+            # One opt-in migration, never a transport retry or a format repair.
+            # Existing pauses cannot enter here: only this request's first,
+            # proven empty context refusal may retire its own durable attempt.
+            if (os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') != '1'
+                    or provider != 'deepseek' or original.conversation_id or not claim
+                    or exc.code != 'conversation_context_exceeded'
+                    or len(binding['attempts']) != 1
+                    or not getattr(binding['attempts'][0], 'empty_context_refusal', False)):
+                raise
+            from .context_rollover import checkpoint
+            _check_cancelled()
+            handoff, archive = checkpoint(original, req.conversation_id,
+                                          conversation_cache.path.parent / 'context-checkpoints')
+            migrated = original.model_copy(update={'conversation_id': None,
+                'messages': [ChatMessage(role='user', content=handoff)]})
+            migration_prompt = messages_to_prompt(migrated.messages, migrated.tools,
+                migrated.tool_choice, tools_continuation=False, provider=provider)
+            if len(migration_prompt.encode('utf-8')) > 131072:
+                raise ConversationStateError('Migration prompt exceeds local limit; no new chat.')
+            conversation_cache.claim_rollover(claim, req.conversation_id, archive)
+            _check_cancelled()
+            guard.retire_context_refusal(binding['attempts'][0])
+            # No format-repair or output continuation on the migration request.
+            # Any new failure stops with the new attempt still consumed.
+            migrated_reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
+            result = (_validate_tool_reply(migrated_reply, migrated, allow_continuation=False) if migrated.tools else
+                      (migrated_reply, migrated_reply.text, None))
         conversation_cache.remember(original, *result, steps, scope=scope)
         succeeded = True
         return result
@@ -467,7 +496,7 @@ def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         return result
 
 
-def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
+def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest, *, allow_continuation=True):
     """Validate the whole reply; continuation requires opt-in and an output limit.
 
     A missing Markdown fence alone is not evidence of an output limit. A
@@ -476,7 +505,8 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
     """
     names = _tool_names(req.tools)
 
-    for attempt in range(_MAX_CONTINUATIONS + 1):
+    maximum = _MAX_CONTINUATIONS if allow_continuation else 0
+    for attempt in range(maximum + 1):
         _check_cancelled()
         can_continue = (reply.finish_reason == "length"
                         and looks_truncated(reply.text, names))
@@ -497,7 +527,7 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest):
             return reply, content, tool_calls
         if req.tool_choice == "none":
             raise ToolCallError("The model started a tool call while tool_choice='none'")
-        if attempt == _MAX_CONTINUATIONS:
+        if attempt == maximum:
             raise ToolCallError("The provider reached its output limit before completing the tool reply; "
                                 "no calls were returned and no further continuation is allowed")
         print(

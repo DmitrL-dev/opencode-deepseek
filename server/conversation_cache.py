@@ -158,6 +158,22 @@ class ConversationCache:
             db.execute('UPDATE links SET used=0, reservation=NULL WHERE key=? AND reservation=?',
                        (claim['key'], claim['reservation']))
 
+    def claim_rollover(self, claim, previous_cid, archive):
+        """Journal migration before clearing a refusal; never reopen an old link."""
+        if not claim:
+            raise ConversationStateError('Migration requires an owned history reservation.')
+        with self.connection() as db:
+            db.execute('CREATE TABLE IF NOT EXISTS rollovers '
+                       '(key TEXT PRIMARY KEY, previous_cid TEXT NOT NULL, archive TEXT NOT NULL)')
+            owned = db.execute('SELECT used, reservation, cid FROM links WHERE key=?',
+                               (claim['key'],)).fetchone()
+            if owned != (1, claim['reservation'], previous_cid):
+                raise ConversationStateError('Migration history reservation changed.')
+            if db.execute('SELECT 1 FROM rollovers WHERE key=?', (claim['key'],)).fetchone():
+                raise ConversationStateError('Migration already attempted; automatic replay disabled.')
+            db.execute('INSERT INTO rollovers VALUES (?, ?, ?)',
+                       (claim['key'], previous_cid, str(archive)))
+
     def remember(self, original, reply, content, calls, steps, *, scope=None):
         if original.conversation_id or not reply.conversation_id:
             return

@@ -13,6 +13,15 @@ this control does not guarantee continued access or qualify the Expert model.
 
 ## Defaults and migration
 
+`DEEPSEEK_CONTEXT_ROLLOVER=1` is a separate opt-in exception for an explicit
+empty context refusal (`clear_response=true`) observed in the current attempt.
+It archives the full history privately before retiring only that attempt's
+context pause, then permits one new conversation request. It preserves usage,
+pacing, accepted-reply counts and the old consumed history link. Any new error
+stops. Partial answers, session/auth refusals, old persisted pauses and unknown
+outcomes never authorize migration. A failed/oversized checkpoint also stops.
+Only offline fixtures have verified this path. See the Harness guide for limits.
+
 All providers are disabled by default, including DeepSeek (`DEEPSEEK_ENABLED=0`).
 Enabling a provider is an explicit decision. Existing `.env` settings cannot
 enable automatic server browser login or background session capture anymore.

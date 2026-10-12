@@ -400,6 +400,26 @@ class AccessGuard:
                 raise ProviderRejected('safety_state_unavailable') from exc
         return attempt
 
+    def retire_context_refusal(self, attempt):
+        """Retire only this in-memory proven refusal; keep every budget entry."""
+        if (attempt.guard is not self or attempt.provider != 'deepseek'
+                or attempt.completed or not getattr(attempt, 'empty_context_refusal', False)
+                or not attempt.generation_dispatched or 'deepseek' in self._failed):
+            raise ProviderRejected('upstream_failure')
+        with self._state() as state:
+            record = state.get('deepseek', {})
+            if (record.get('pending') != attempt.id
+                    or record.get('pause') != 'conversation_context_exceeded'):
+                raise ProviderRejected('upstream_failure')
+            for key in ('pending', 'dispatched', 'pause'):
+                record.pop(key, None)
+            try:
+                self._save(state)
+            except OSError as exc:
+                self._failed.add('deepseek')
+                raise ProviderRejected('safety_state_unavailable') from exc
+            attempt.completed = True
+
     @contextlib.contextmanager
     def attempt(self, provider, cancelled=None):
         attempt = self.begin(provider, cancelled)

@@ -496,6 +496,19 @@ existing-conversation continuation and duplicate-step rejection without counter
 changes. This is not a live account check or a guarantee that arbitrary goals
 will complete.
 
+### Automatic context migration
+
+`DEEPSEEK_CONTEXT_ROLLOVER=1` enables a new DeepSeek conversation within the
+same Harness goal after restarting the bridge. Only an explicit
+`context_length_exceeded` refusal with an empty, cleared answer permits one
+migration. Full history is stored privately in `session/context-checkpoints/`;
+the model receives exact instructions, a completed-call ledger and result
+excerpts. Missing details can be read from the archive. This is not a semantic
+summary. Harness history, usage and accepted-reply counts are preserved.
+Any new failure stops without retry; existing pauses are not cleared automatically.
+Off by default. Verified offline without account requests.
+[Conditions and limits](docs/HARNESS.en.md#deepseek-conversation-context-exhausted).
+
 **MIT · unofficial project.** Based on
 [Tsuev/opencode-deepseek](https://github.com/Tsuev/opencode-deepseek) and
 [sums001/Deepseek-API](https://github.com/sums001/Deepseek-API).

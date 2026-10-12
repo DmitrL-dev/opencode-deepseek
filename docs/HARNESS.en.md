@@ -364,7 +364,27 @@ This feature has not been tested against a live account.
 An SSE `hint` with `type=error` and `finish_reason=context_length_exceeded`
 means the provider conversation has reached its context limit. The bridge retains
 a `conversation_context_exceeded` pause. Signing in again, resetting local
-budgets or increasing the reply cap does not resolve the cause. No new chat or
-repeated generation is started automatically. Continuing requires a separately
-authorized migration of the goal and necessary context to a new conversation;
-preserve the old history.
+budgets or increasing the reply cap does not resolve the cause.
+
+For future refusals, set `DEEPSEEK_CONTEXT_ROLLOVER=1` in `.env` and restart the
+bridge. Harness keeps the same chat and goal; only the DeepSeek conversation
+changes. An exact refusal with `clear_response=true`, before any answer text or
+terminal marker, permits a private full-request checkpoint, a durable single-use
+migration claim and one request in a new conversation. The old consumed step is
+never released. Usage, pacing and accepted-reply counts are preserved. Any new
+error stops; format repair and truncated-output continuation are disabled for
+the migration request.
+
+The packet preserves exact user/system instructions, every completed call ID
+and abbreviated results. A result is not assumed successful. The model must
+read the archive when details are missing and avoid repeating completed actions;
+a prompt cannot guarantee model compliance. Oversized instructions/ledgers,
+unresolved calls, partial streams and write failures stop migration. Limits:
+32 KiB instructions, 64 KiB packet, 16 MiB archive, at most 64 archives and
+64 MiB total. Archives are not automatically deleted.
+
+Proof belongs to the current in-memory attempt. Existing pauses and crashes
+during migration never authorize a replay; those require separate local
+diagnostic review. Offline checks:
+`python -m unittest tests.test_context_rollover tests.test_deepseek_protocol`.
+No live accounts were used.

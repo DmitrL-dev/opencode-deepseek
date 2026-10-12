@@ -289,6 +289,9 @@ class _Stream:
                 if owned:
                     attempt.complete()
             except BaseException as exc:
+                if (attempt is not None and getattr(exc, 'empty_context_refusal', False)
+                        and attempt.generation_dispatched):
+                    attempt.empty_context_refusal = True
                 phase = getattr(self._client, "_diagnostic_phase", "before_request")
                 status = getattr(self._client, "_diagnostic_status", None)
                 _log.warning("DeepSeek request stopped: phase=%s http_status=%s reason=%s",
@@ -484,7 +487,12 @@ def _parse_sse(lines, meta: Optional[dict] = None) -> Iterator[str]:
             raise DeepSeekStreamError("Unexpected DeepSeek SSE event shape")
         if event == "hint" and obj.get("type") == "error":
             if obj.get("finish_reason") == "context_length_exceeded":
-                raise ProviderRejected("conversation_context_exceeded")
+                error = ProviderRejected("conversation_context_exceeded")
+                # Only the exact empty/cleared refusal can authorize migration.
+                # A late hint after any emitted text or terminal is uncertain.
+                error.empty_context_refusal = (
+                    not emitted and not terminal and obj.get('clear_response') is True)
+                raise error
             raise _deepseek_rejection(obj)
         envelope = obj
         if isinstance(obj.get("v"), dict) and ("error" in obj["v"] or "code" in obj["v"]):
