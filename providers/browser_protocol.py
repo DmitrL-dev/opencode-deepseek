@@ -523,8 +523,13 @@ def qwen_conversation_path(body, reported_path=None):
     return _sse_conversation_path(body, reported_path, "Qwen", _qwen_chat_id)
 
 
-def qwen_answer(body):
-    """Extract the finished answer phase from Qwen Chat's website SSE."""
+def qwen_reply(body, chat_id=None):
+    """Return (answer, finish_reason) from Qwen Chat's website SSE.
+
+    Uses the same candidate/terminal state machine as the HTTP client: one
+    primary response_id contributes text, ambiguous unnamed frames are
+    rejected, and an output-limit stop stays `length` for the tool contract.
+    """
     if not body:
         raise ProviderUnavailable("Qwen browser returned an empty completion")
     # Anti-bot / captcha envelopes are JSON, not SSE.
@@ -540,45 +545,25 @@ def qwen_answer(body):
             raise ProviderUnavailable(
                 "Qwen requested browser verification; complete it in the paired tab")
         raise ProviderUnavailable("Qwen browser did not return an SSE completion")
-    text, done = "", False
-    for event, payload in sse_events(body.decode("utf-8").splitlines()):
-        if event == "error":
-            raise ProviderUnavailable("Qwen rejected the completion")
-        if not payload:
-            continue
-        if payload == "[DONE]":
-            done = True
-            break
-        frame = _object(payload)
-        if frame.get("success") is False or frame.get("error"):
-            raise ProviderUnavailable("Qwen rejected the completion")
-        if frame.get("response.stopped"):
-            raise ProviderUnavailable("Qwen stopped before a complete answer")
-        choices = frame.get("choices")
-        if not isinstance(choices, list):
-            continue
-        for choice in choices:
-            if not isinstance(choice, dict) or choice.get("index", 0) != 0:
-                continue
-            delta = choice.get("delta")
-            if not isinstance(delta, dict):
-                raise ProviderUnavailable("Invalid Qwen answer delta")
-            phase = delta.get("phase")
-            if phase in (None, "answer", "final"):
-                content = delta.get("content")
-                if content is not None:
-                    if not isinstance(content, str):
-                        raise ProviderUnavailable("Invalid Qwen answer content")
-                    text += content
-                if delta.get("status") == "finished":
-                    done = True
-            finish = choice.get("finish_reason")
-            if finish is not None:
-                if finish not in ("stop", "length"):
-                    raise ProviderUnavailable("Unsupported Qwen finish_reason")
-                done = True
-    if not done or not text.strip():
+    from qwen.client import QwenStreamError, _parse_sse
+    meta = {"chat_id": chat_id}
+    try:
+        text = "".join(_parse_sse(body.decode("utf-8").splitlines(), meta))
+    except QwenStreamError:
+        raise ProviderUnavailable("Qwen disconnected before a complete text answer") from None
+    except UnicodeError:
+        raise ProviderUnavailable("Invalid Qwen answer content") from None
+    if not text.strip():
         raise ProviderUnavailable("Qwen disconnected before a complete text answer")
+    return text, meta.get("finish_reason", "stop")
+
+
+def qwen_answer(body, chat_id=None):
+    """Compatibility wrapper: answer text only. Output-limit stops are refused
+    here because a bare string cannot carry finish_reason=length."""
+    text, finish = qwen_reply(body, chat_id)
+    if finish != "stop":
+        raise ProviderUnavailable("Qwen stopped at its output limit")
     return text
 
 

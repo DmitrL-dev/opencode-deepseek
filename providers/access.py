@@ -36,6 +36,12 @@ def _access_pause_enabled() -> bool:
     return os.getenv('PROVIDER_ACCESS_PAUSE', '1') == '1'
 MESSAGES = {
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
+    'local_prompt_too_large': 'The prompt exceeds the local per-request size limit (128 KiB). Shorten the context; waiting or resetting budgets does not help.',
+    'account_muted': 'DeepSeek temporarily disabled sending for this account. Signing in again does not clear this restriction.',
+    'account_banned': 'DeepSeek banned this account. Stop and review the restriction manually.',
+    'ip_restricted': 'DeepSeek restricted access from this network. Automatic retries are disabled.',
+    'gateway_challenge': 'The browser security gateway requires verification. This is not session expiry; automatic retries are disabled.',
+    'pow_rejected': 'DeepSeek rejected the proof of work. Automatic retries are disabled.',
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
     'quota_exceeded': 'The provider rejected the request because of a quota or usage limit.',
     'conversation_context_exceeded': 'DeepSeek conversation context limit reached. This is not a local budget or session expiry. No automatic new chat or replay; preserve the goal before manually migrating to a new conversation.',
@@ -229,7 +235,9 @@ class ProviderRejected(RuntimeError):
 
     def __init__(self, code='upstream_failure', *, source='upstream'):
         self.code = code if code in MESSAGES else 'upstream_failure'
-        self.source = source if source in ('upstream', 'local_pause') else 'upstream'
+        # local_limit: refused locally; nothing was sent unless `paused` is set.
+        self.source = source if source in ('upstream', 'local_pause', 'local_limit') else 'upstream'
+        self.paused = False
         super().__init__(MESSAGES[self.code])
 
 
@@ -459,13 +467,21 @@ class AccessGuard:
                     return ProviderRejected('upstream_failure')
                 record = state.setdefault(provider, {})
                 previous = record.get('pause')
-                record.setdefault('pause', error.code)
+                restriction = error.code in ('account_restricted', 'account_muted', 'account_banned', 'ip_restricted', 'gateway_challenge')
+                if restriction and previous == 'session_expired':
+                    record['pause'] = error.code
+                    record.pop('recoverable_auth', None)
+                else:
+                    record.setdefault('pause', error.code)
                 self._save(state)
                 # First latch is upstream-driven; later hits are the durable local pause.
+                local = (isinstance(exc, ProviderRejected) and exc.source == 'local_limit'
+                         and previous is None)
                 error = ProviderRejected(
                     record['pause'],
-                    source='local_pause' if previous else 'upstream',
+                    source='local_limit' if local else 'local_pause' if previous else 'upstream',
                 )
+                error.paused = True
                 newly_paused = previous is None
         except (OSError, ProviderRejected):
             self._failed.add(provider)
@@ -535,7 +551,7 @@ def _budget_usage(record, kind, now, http_cost=1, limits=None):
             count = sum(t > now - window and (category is None or k == category)
                         for t, k in usage)
             if count + (http_cost if category is None else 1) > maximum:
-                error = ProviderRejected('local_budget_exceeded')
+                error = ProviderRejected('local_budget_exceeded', source='local_limit')
                 error.before_dispatch = True
                 raise error
     return usage
@@ -548,7 +564,7 @@ class Attempt:
         self.completed = False
         self.dispatched = False
         self.generation_dispatched = False
-        self.challenge_auth_rejected = False
+        self.pre_generation_auth_rejected = False
 
     @contextlib.contextmanager
     def bind(self):
@@ -593,30 +609,70 @@ class Attempt:
                 if self.provider == 'deepseek':
                     delay = max(delay, record.get('next_http_at', 0) - time.time())
                 if delay <= 0:
-                    # Conservative even if persisting the dispatch later fails.
-                    if kind == 'generation':
-                        self.generation_dispatched = True
+                    entry = None
+                    first = not self.dispatched
+                    restore = {key: record[key] for key in ('next_at', 'next_http_at') if key in record}
                     if self.provider == 'deepseek':
                         now = time.time()
                         usage = _budget_usage(record, kind, now, limits=self.guard.budget_limits)
-                        record['usage'] = [*usage, [now, kind]]
+                        entry = [now, kind]
+                        record['usage'] = [*usage, entry]
                         record['next_http_at'] = now + min(self.guard.interval, 3)
                     if validate is not None:
                         validate()
-                    if not self.dispatched:
+                    if first:
                         record.update(dispatched=True, next_at=time.time() + self.guard.interval)
-                        self.guard._save(state)
-                        self.dispatched = True
-                    else:
-                        self.guard._save(state)
+                    # Conservative even if persisting the dispatch later fails.
+                    generation_before = self.generation_dispatched
+                    if kind == 'generation':
+                        self.generation_dispatched = True
+                    self.guard._save(state)
+                    self.dispatched = True
             if delay <= 0:
                 # Saving/fsync and lock acquisition can block. Revoke the
                 # authorization if cancellation or resume happened meanwhile.
-                self.check()
-                if validate is not None:
-                    validate()
+                try:
+                    self.check()
+                    if validate is not None:
+                        validate()
+                except BaseException:
+                    # Control never returned to the transport: this dispatch
+                    # provably sent nothing. Retract only it; earlier sends of
+                    # this attempt and crash recovery stay conservative.
+                    self._retract_unsent(entry, first, restore, generation_before)
+                    raise
                 return
             time.sleep(min(delay, 0.1))
+
+    def _retract_unsent(self, entry, first, restore, generation_before):
+        try:
+            with self.guard._state() as state:
+                record = state.get(self.provider, {})
+                if record.get('pending') != self.id:
+                    return
+                if entry is not None:
+                    usage = record.get('usage', [])
+                    for index in range(len(usage) - 1, -1, -1):
+                        if usage[index] == entry:
+                            del usage[index]
+                            break
+                    for key in ('next_at', 'next_http_at'):
+                        if key in restore:
+                            record[key] = restore[key]
+                        elif key == 'next_http_at':
+                            record.pop(key, None)
+                if first:
+                    record['dispatched'] = False
+                    if 'next_at' in restore:
+                        record['next_at'] = restore['next_at']
+                    else:
+                        record.pop('next_at', None)
+                self.guard._save(state)
+                if first:
+                    self.dispatched = False
+                self.generation_dispatched = generation_before
+        except (OSError, ProviderRejected):
+            pass  # Unproven retraction keeps the conservative journal.
 
     def complete(self):
         if self.completed:
@@ -640,7 +696,7 @@ class Attempt:
         # outcome remains durably pending even if writing the pause fails.
         if self.dispatched or isinstance(exc, Exception) and not isinstance(exc, ValueError) and not getattr(exc, 'before_dispatch', False):
             self.guard.reject(self.provider, exc or ProviderRejected(), owner=self.id)
-            if (self.provider == 'deepseek' and self.challenge_auth_rejected
+            if (self.provider == 'deepseek' and self.pre_generation_auth_rejected
                     and not self.generation_dispatched):
                 with self.guard._state() as state:
                     record = state[self.provider]

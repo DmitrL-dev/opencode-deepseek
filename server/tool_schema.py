@@ -16,9 +16,11 @@ def validate_arguments(name, arguments, tools):
             fn = tool.get('function', tool)
             if isinstance(fn, dict) and fn.get('name') == name:
                 matches.append(fn)
-    if len(matches) != 1 or 'parameters' not in matches[0]:
+    if len(matches) != 1:
         raise ValueError('Tool schema is missing or ambiguous; no calls were returned')
-    schema = matches[0]['parameters']
+    # OpenAI allows omitting parameters; the prompt advertises the same empty
+    # object schema (openai_format._tool_specs), so validate against it.
+    schema = matches[0]['parameters'] if 'parameters' in matches[0] else {'type': 'object', 'properties': {}}
     try:
         cls = validators.Draft202012Validator
         if isinstance(schema, dict) and '$schema' in schema:

@@ -172,7 +172,7 @@ python app.py
 Alternative via uvicorn with a different address:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 python app.py  # token still required
 # or
 uvicorn server.api:app --host 0.0.0.0 --port 8080 --no-proxy-headers
 ```
@@ -240,7 +240,7 @@ Python SDK:
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 r = client.chat.completions.create(
     model="deepseek-chat",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -265,12 +265,12 @@ The port changes via the `PORT` variable in `.env` / launchd.
 
 **API key:** any value. The bridge does **not** check or read `Authorization`
 (`server/api.py` never looks at the header), so in SDKs where the key is
-syntactically required you pass a placeholder — historically `api_key="unused"`.
+syntactically required you pass a placeholder — historically `api_key=open("session/api-token").read().strip()`.
 With plain HTTP via `curl`, the `Authorization` header is not needed at all.
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 ```
 
 ```bash
@@ -304,7 +304,7 @@ Create `opencode.json` in the root of your working project (or in
       "name": "DeepSeek (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "deepseek-chat": {
@@ -326,7 +326,7 @@ Create `opencode.json` in the root of your working project (or in
 ```
 
 - `npm: "@ai-sdk/openai-compatible"` — the universal OpenAI-compatible driver.
-- `apiKey` is required by the SDK, but the bridge ignores it.
+- `apiKey` must be the bridge API token from `session/api-token` (`python -m server.api_auth path`); `/v1` refuses requests without it.
 - In opencode, `model` is specified as `local-deepseek/deepseek-chat` or
   `local-deepseek/deepseek-expert`.
 - `limit.context` is approximate; reduce it if you get context-overflow errors.
@@ -347,7 +347,7 @@ Create `opencode.json` in the root of your working project (or in
       "name": "Qwen (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "qwen3.8-omni-flash": {
@@ -614,7 +614,7 @@ The web service determines model access and quotas. Support is disabled by defau
   "name": "Qwen Chat (local bridge)",
   "options": {
     "baseURL": "http://127.0.0.1:8000/v1",
-    "apiKey": "unused"
+    "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
   },
   "models": {
     "qwen3.8-omni-flash": {
@@ -692,7 +692,7 @@ variables take precedence.
 Example:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 ```
 
 ---

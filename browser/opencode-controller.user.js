@@ -38,7 +38,12 @@
     return null;
   };
   const TOKEN = "__BRIDGE_TOKEN__"; // Replaced only in ignored private exports.
-  const BASE = "http://127.0.0.1:8000";
+  // Replaced by `python -m providers.tab_bridge` with the bridge PORT.
+  const PORT_TEMPLATE = "__BRIDGE_PORT__";
+  // Same range as the exporter (1..65535); only the unexported template means 8000.
+  const validPort = value => /^[1-9][0-9]{0,4}$/.test(value) && Number(value) <= 65535;
+  if (PORT_TEMPLATE !== "__BRIDGE_" + "PORT__" && !validPort(PORT_TEMPLATE)) return;
+  const BASE = "http://127.0.0.1:" + (validPort(PORT_TEMPLATE) ? PORT_TEMPLATE : "8000");
   const geminiInput = 'div.ql-editor[contenteditable="true"], rich-textarea [contenteditable="true"], div[contenteditable="true"][role="textbox"], textarea[aria-label], textarea';
   const chatgptInput = '[data-composer-input] div.ProseMirror[contenteditable="true"], div.ProseMirror[contenteditable="true"][data-composer-markdown], div.ProseMirror[contenteditable="true"][role="textbox"], #prompt-textarea, div#prompt-textarea[contenteditable="true"], textarea#prompt-textarea';
   // Claude.ai: ProseMirror composer with a stable data-testid; keep ChatGPT-like fill flags.

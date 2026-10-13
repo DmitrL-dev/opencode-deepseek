@@ -292,7 +292,9 @@ class ProviderTests(unittest.TestCase):
             script.write_text("#!" + sys.executable + "\nimport os,time,pathlib,sys\n"
                               "print(" + repr(json.dumps(cli_init())) + ",flush=True)\n"
                               "sys.stdin.read(1)\n"
-                              "pathlib.Path(" + repr(str(pidfile)) + ").write_text(str(os.getpid()))\n"
+                              # Atomic publish: the test cancels as soon as the file exists.
+                              "pathlib.Path(" + repr(str(pidfile) + ".tmp") + ").write_text(str(os.getpid()))\n"
+                              "os.replace(" + repr(str(pidfile) + ".tmp") + ", " + repr(str(pidfile)) + ")\n"
                               "time.sleep(30)\n")
             script.chmod(0o700)
 
@@ -352,7 +354,7 @@ class ProviderTests(unittest.TestCase):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 pidfile = root / 'child-pid'
-                child = "import os,signal,time,pathlib;signal.signal(signal.SIGTERM,signal.SIG_IGN);pathlib.Path(" + repr(str(pidfile)) + ").write_text(str(os.getpid()));time.sleep(30)"
+                child = "import os,signal,time,pathlib;signal.signal(signal.SIGTERM,signal.SIG_IGN);pathlib.Path(" + repr(str(pidfile) + ".tmp") + ").write_text(str(os.getpid()));os.replace(" + repr(str(pidfile) + ".tmp") + "," + repr(str(pidfile)) + ");time.sleep(30)"
                 script = root / 'agy-test'
                 script.write_text('#!' + sys.executable + '\nimport sys,json,time,subprocess,pathlib\n'
                     + 'subprocess.Popen([sys.executable,"-c",' + repr(child) + '])\n'

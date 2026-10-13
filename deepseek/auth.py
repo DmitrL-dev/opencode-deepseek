@@ -212,6 +212,62 @@ _READ_TOKEN_JS = """
 """
 
 
+# Same field the Safari transfer reads; only used to bind history to an account.
+_READ_ACCOUNT_JS = """
+() => {
+  if (window.location.origin !== 'https://chat.deepseek.com') return null;
+  try {
+    const id = JSON.parse(window.localStorage.getItem('__appKit_userInfo'))?.value?.id;
+    return id === undefined || id === null ? null : String(id);
+  } catch (e) { return null; }
+}
+"""
+
+
+def _valid_account(value) -> Optional[str]:
+    if (isinstance(value, str) and 1 <= len(value) <= 128
+            and all(33 <= ord(c) <= 126 for c in value)):
+        return value
+    return None
+
+
+class AccountBindingError(RuntimeError):
+    """A capture would silently detach saved history from its verified account."""
+
+
+def bind_capture(fresh: "Session", session_file: Path = DEFAULT_SESSION_FILE, *,
+                 same_account=False, replace_account=False) -> "Session":
+    """Carry the history pin only to a verified same-account capture.
+
+    A previous Safari transfer pins continuation_scope and account_id. A new
+    browser capture must neither drop that pin silently nor move it to another
+    account. Never clears provider pauses or unconsumes history.
+    """
+    previous = Session.load(Path(session_file))
+    if previous is None or replace_account:
+        return fresh
+    if previous.account_id is not None:
+        if fresh.account_id is None:
+            raise AccountBindingError(
+                "Saved history is bound to a verified DeepSeek account, but this capture has no "
+                "account id. Session not saved; use /deepseek-login (Safari) or --replace-account.")
+        if fresh.account_id != previous.account_id:
+            raise AccountBindingError(
+                "This is a different DeepSeek account than the saved history. Session not saved; "
+                "pass --replace-account only to deliberately start unrelated history.")
+        fresh.preserve_history_from(previous, same_account_confirmed=True)
+    elif same_account:
+        fresh.preserve_history_from(previous, same_account_confirmed=True)
+    else:
+        # The previous session (pinned or not) scopes saved histories, and its
+        # account is unknown. Never overwrite it silently.
+        raise AccountBindingError(
+            "The saved session has no verified account; overwriting it would detach saved "
+            "Harness histories. Session not saved; rerun with --same-account (same account) "
+            "or --replace-account (deliberately start unrelated history).")
+    return fresh
+
+
 def _safe_evaluate(page, js: str):
     """Run page.evaluate, swallowing the benign 'Execution context was destroyed'
     error that fires when a navigation (e.g. the post-login redirect) happens to
@@ -240,7 +296,9 @@ def _capture_from_context(context, page) -> Optional[Session]:
         return None
     cookies = [c for c in context.cookies([CHAT_URL]) if _deepseek_cookie(c)]
     ua = _safe_evaluate(page, "() => navigator.userAgent") or ""
-    return Session(token=token, cookies=cookies, user_agent=ua, captured_at=time.time())
+    account = _valid_account(_safe_evaluate(page, _READ_ACCOUNT_JS))
+    return Session(token=token, cookies=cookies, user_agent=ua, captured_at=time.time(),
+                   account_id=account)
 
 
 def _wait_for_token(page, timeout: float) -> Optional[str]:
@@ -301,6 +359,8 @@ def login(
     assume_logged_out: bool = False,
     channel: Optional[str] = DEFAULT_CHANNEL,
     session_file: Path = DEFAULT_SESSION_FILE,
+    same_account: bool = False,
+    replace_account: bool = False,
 ) -> Session:
     """Interactive login. Opens a visible window and waits for you to sign in by
     hand (and clear the AWS WAF human-check); once a token appears it captures
@@ -333,7 +393,8 @@ def login(
             context.close()
         if session is None:
             raise RuntimeError("Logged in but could not read the token.")
-        session.save(session_file)
+        bind_capture(session, session_file, same_account=same_account,
+                     replace_account=replace_account).save(session_file)
         return session
 
 
@@ -396,7 +457,7 @@ def get_session(
                   "trying the next configured channel.")
             continue
         if session is not None:
-            session.save(session_file)
+            bind_capture(session, session_file).save(session_file)
             return session
 
     if not allow_interactive:
@@ -413,7 +474,8 @@ def get_session(
 @_serialize_profile
 def keep_open(profile_dir: Path = DEFAULT_PROFILE_DIR,
               session_file: Path = DEFAULT_SESSION_FILE,
-              channel: Optional[str] = DEFAULT_CHANNEL) -> None:
+              channel: Optional[str] = DEFAULT_CHANNEL,
+              same_account: bool = False, replace_account: bool = False) -> None:
     """Explicit foreground inspection/capture; never used by the API server."""
     with sync_playwright() as p:
         context = _launch_context(p, profile_dir, False, channel, allow_fallback=False)
@@ -437,7 +499,9 @@ def keep_open(profile_dir: Path = DEFAULT_PROFILE_DIR,
                     state = (session.token, session.user_agent,
                              tuple(sorted(json.dumps(cookie, sort_keys=True) for cookie in session.cookies)))
                     if state != previous:
-                        session.save(session_file)
+                        # Only the first save may deliberately replace an account.
+                        bind_capture(session, session_file, same_account=same_account,
+                                     replace_account=replace_account and previous is None).save(session_file)
                         previous = state
                         print('[auth] Session captured. Provider pauses are unchanged.', flush=True)
                 page.wait_for_timeout(1000)
@@ -459,16 +523,24 @@ def main(argv=None) -> None:
                         help='Inspect the website and capture changed sessions until Ctrl+C or window close.')
     parser.add_argument('--channel', choices=('chrome', 'chromium'), default='chrome',
                         help='Browser for manual sign-in; chromium uses the bundled browser.')
+    parser.add_argument('--same-account', action='store_true',
+                        help='Confirm this is the account of the saved history (unverified captures only).')
+    parser.add_argument('--replace-account', action='store_true',
+                        help='Deliberately detach saved history and bind a different account.')
     args = parser.parse_args(argv)
     channel = None if args.channel == 'chromium' else args.channel
+    binding = dict(same_account=args.same_account, replace_account=args.replace_account)
     try:
         if args.keep_open:
-            keep_open(channel=channel)
+            keep_open(channel=channel, **binding)
         else:
-            session = login(channel=channel)
+            session = login(channel=channel, **binding)
             print(f'[auth] Session saved ({len(session.cookies)} cookies). Provider pauses are unchanged.', flush=True)
     except KeyboardInterrupt:
         print('[auth] Capture stopped.', flush=True)
+    except AccountBindingError as exc:
+        print('[auth] ' + str(exc), flush=True)
+        raise SystemExit(1) from None
     except (PlaywrightError, OSError, RuntimeError):
         print('[auth] Sign-in capture failed; stopped without retry.', flush=True)
         raise SystemExit(1) from None

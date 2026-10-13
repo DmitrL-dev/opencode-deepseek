@@ -1,3 +1,4 @@
+from tests import TEST_API_TOKEN
 import asyncio
 import json
 import os
@@ -182,10 +183,10 @@ class AccessTests(unittest.TestCase):
             guard.wait("qwen", lambda: (_ for _ in ()).throw(asyncio.CancelledError()))
 
     def test_business_errors_are_checked_in_json_and_sse_and_sanitized(self):
-        for operation in (lambda: _biz(MUTED), lambda: list(_parse_sse(event(MUTED).splitlines()))):
+        for operation, reason in ((lambda: _biz(MUTED), 'account_restricted'), (lambda: list(_parse_sse(event(MUTED).splitlines())), 'account_muted')):
             with self.assertRaises(ProviderRejected) as error:
                 operation()
-            self.assertEqual(error.exception.code, "account_restricted")
+            self.assertEqual(error.exception.code, reason)
             self.assertNotIn("biz_data", str(error.exception))
         with self.assertRaises(ProviderRejected) as error:
             _biz({"code": 123, "msg": "secret=private"})
@@ -362,7 +363,7 @@ class SafetySdkTests(unittest.TestCase):
         self.transport.__enter__()
         self.addCleanup(self.transport.__exit__, None, None, None)
         # Keep the SDK's actual default retry policy enabled.
-        self.sdk = OpenAI(api_key="offline", base_url="http://testserver/v1", http_client=self.transport)
+        self.sdk = OpenAI(api_key=TEST_API_TOKEN, base_url="http://testserver/v1", http_client=self.transport)
         self.addCleanup(self.sdk.close)
         self.messages = [{"role": "user", "content": "offline fixture"}]
 
@@ -404,6 +405,7 @@ class SafetySdkTests(unittest.TestCase):
     def test_muted_at_each_protocol_step_stops_sdk_and_later_requests(self):
         for path in ("/api/v0/chat_session/create", "/api/v0/chat/create_pow_challenge", "/api/v0/chat/completion"):
             self.guard.resume("deepseek")
+            reason = 'account_muted' if path.endswith('/completion') else 'account_restricted'
             client, calls = self.deepseek_fixture(path)
             with self.subTest(path=path), patch.object(api, "get_client", return_value=client) as factory, \
                     self.assertLogs('deepseek.client', level='WARNING') as diagnostics:
@@ -413,14 +415,11 @@ class SafetySdkTests(unittest.TestCase):
                     with self.assertRaises(expected) as failure:
                         self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
                     self.assertFalse(failure.exception.body["retryable"])
-                    self.assertEqual(failure.exception.body["code"], "account_restricted")
+                    self.assertEqual(failure.exception.body["code"], reason)
                     message = failure.exception.body["message"]
-                    self.assertIn("providers.access resume deepseek", message)
-                    if attempt == 0:
-                        self.assertIn("Upstream provider `deepseek` refused", message)
-                        self.assertIn("enabled a durable providers.access pause", message)
-                    else:
-                        self.assertIn("Manual providers.access pause is blocking", message)
+                    self.assertNotIn("providers.access resume deepseek", message)
+                    self.assertIn("requires human review", message)
+                    if attempt != 0:
                         self.assertIn("No request was sent", message)
                 self.assertEqual(calls.count(path), 1)
                 self.assertEqual(factory.call_count, 1)
@@ -428,7 +427,7 @@ class SafetySdkTests(unittest.TestCase):
                               '/api/v0/chat/create_pow_challenge': 'challenge',
                               '/api/v0/chat/completion': 'completion'}[path]
             self.assertEqual(len(diagnostics.records), 1)
-            self.assertIn('phase=' + expected_phase + ' http_status=200 reason=account_restricted',
+            self.assertIn('phase=' + expected_phase + ' http_status=200 reason=' + reason,
                           diagnostics.output[0])
             self.assertNotIn('user is muted', diagnostics.output[0])
 
@@ -453,7 +452,8 @@ class SafetySdkTests(unittest.TestCase):
                         list(stream)
                 with self.assertRaises(BadRequestError) as blocked:
                     self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages, tools=tools, stream=True)
-                self.assertIn("providers.access resume deepseek", blocked.exception.body["message"])
+                self.assertNotIn("providers.access resume deepseek", blocked.exception.body["message"])
+                self.assertIn("human review", blocked.exception.body["message"])
                 self.assertEqual(calls.count("/api/v0/chat/completion"), 1)
                 self.assertEqual(factory.call_count, 1)
 
@@ -501,7 +501,8 @@ class SafetySdkTests(unittest.TestCase):
             return client
         with patch.object(api, "get_client", side_effect=factory), self.assertRaises(BadRequestError) as blocked:
             self.sdk.chat.completions.create(model="deepseek-chat", messages=self.messages)
-        self.assertIn("providers.access resume deepseek", blocked.exception.body["message"])
+        self.assertNotIn("providers.access resume deepseek", blocked.exception.body["message"])
+        self.assertIn("human review", blocked.exception.body["message"])
         self.assertEqual(calls, [])
 
     def test_signin_and_resume_replace_rejected_clients_without_server_restart(self):

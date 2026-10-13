@@ -25,5 +25,6 @@ async function run({statuses=['saved'],hash=true,confirm=true}={}) {
  x=await run({statuses:['confirmation_required'],confirm:false});assert.equal(x.requests.length,1);assert.equal(x.storage.size,0);
  x=await run({statuses:['new_login_required','saved']});await x.tick();assert.equal(x.requests.length,1);x.changeToken();await x.tick();assert.equal(x.requests.length,2);
  assert(x.labels.some(v=>v.includes('Цель в Harness не запускалась')));
+ x=await run({statuses:['saved_paused']});assert.equal(x.requests.length,1);await x.tick();assert.equal(x.requests.length,1);assert(x.labels.some(v=>v.includes('Защитная пауза сохранена')));
  console.log('Safari transfer: unarmed page inert; one-use capture; explicit first-account confirmation; waits locally for changed token; no model requests');
 })().catch(e=>{console.error(e);process.exitCode=1;});

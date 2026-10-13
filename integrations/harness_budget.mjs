@@ -6,7 +6,9 @@ export const inject = ['commands'];
 
 export async function openSessionSafari(data, baseURL, run = promisify(execFile)) {
   const base = new URL(baseURL);
-  if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || base.port !== '8000'
+  // The exported session-transfer userscript carries the same bridge PORT.
+  const port = base.port || '80';
+  if (base.protocol !== 'http:' || base.hostname !== '127.0.0.1' || !/^[1-9][0-9]{0,4}$/.test(port) || Number(port) > 65535
       || !/^[A-Za-z0-9_-]{43}$/.test(data.nonce)) throw new Error('Unsupported Safari transfer endpoint');
   const fragment = new URLSearchParams({bridge_session: data.nonce, expires: String(Date.now() + data.expires_in * 1000)});
   await run('/usr/bin/open', ['-a', 'Safari', 'https://chat.deepseek.com/#' + fragment.toString()], {timeout:5000});
@@ -59,7 +61,7 @@ export function apply(ctx, config, {openSafari = openSessionSafari} = {}) {
     description:'Результат переноса сессии Safari', recordInput:false,
     handler:handler(async () => {
       const data = await request('/admin/session/deepseek/status');
-      const labels = {idle:'Перенос ещё не запускался.', waiting:'Ожидается сессия Safari.', saved:'Сессия сохранена. История и счётчики сохранены. Цель не возобновлялась.', expired:'Время переноса истекло. Повтори /deepseek-login.', cancelled:'Перенос отменён.', state_changed:'Состояние изменилось. Повтори /deepseek-login.', failed:'Перенос не завершён. Проверь состояние моста.'};
+      const labels = {idle:'Перенос ещё не запускался.', waiting:'Ожидается сессия Safari.', saved_paused:'Сессия сохранена; защитная пауза и незавершённый запрос сохранены. Проверьте ограничения аккаунта и исход запроса перед ручным продолжением. История и счётчики не изменены.', saved:'Сессия сохранена. История и счётчики сохранены. Цель не возобновлялась.', expired:'Время переноса истекло. Повтори /deepseek-login.', cancelled:'Перенос отменён.', state_changed:'Состояние изменилось. Повтори /deepseek-login.', failed:'Перенос не завершён. Проверь состояние моста.'};
       return labels[data.status] || 'Неизвестный результат переноса.';
     })});
   ctx.commands.register({definitionId:'local/bridge-budget-reset', name:'bridge-budget-reset',

@@ -42,19 +42,74 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
                                        base_url='http://127.0.0.1',headers={'Authorization':'Bearer '+'d'*64})
         self.addAsyncCleanup(self.client.aclose)
 
+    async def test_create_chat_auth_refusal_allows_refresh_only_before_generation(self):
+        from deepseek.client import DeepSeekClient
+        cases = ('40002', '40003', 'string_code', 'timeout', 'http401',
+                 'malformed', 'generic_auth', 'restricted', 'after_generation')
+        for mode in cases:
+            with self.subTest(mode=mode):
+                guard = AccessGuard(self.root / (mode + '.json'), interval=0)
+                calls = []
+                def handler(request):
+                    calls.append(request.url.path)
+                    if mode == 'timeout':
+                        raise httpx.ReadTimeout('offline', request=request)
+                    if mode == 'http401':
+                        return httpx.Response(401)
+                    if mode == 'malformed':
+                        return httpx.Response(200, text='invalid')
+                    data = {'code': '40003' if mode == 'string_code' else
+                            40002 if mode == '40002' else 40003}
+                    if mode == 'generic_auth':
+                        data = {'code': 999, 'msg': 'invalid_token'}
+                    if mode == 'restricted':
+                        data = {'code': 0, 'data': {'biz_code': 5}}
+                    return httpx.Response(200, json=data)
+                client = DeepSeekClient.__new__(DeepSeekClient)
+                with httpx.Client(base_url='https://offline.invalid',
+                                  transport=httpx.MockTransport(handler)) as client._http:
+                    with self.assertRaises(Exception):
+                        with guard.attempt('deepseek') as attempt:
+                            if mode == 'after_generation':
+                                attempt.dispatch(kind='generation')
+                            client.create_chat_session(attempt)
+                self.assertEqual(calls, ['/api/v0/chat_session/create'])
+                safe = mode in ('40002', '40003', 'string_code')
+                before = json.loads(guard.path.read_text())['deepseek']
+                self.assertEqual(before.get('recoverable_auth', False), safe)
+                with self.assertRaises(ProviderRejected):
+                    with guard.attempt('deepseek'):
+                        self.fail('Refusal must block another request')
+                transfer = SessionTransfer(self.path)
+                if safe:
+                    payload = dict(self.payload, token=('e' if mode == '40003' else 'f') * 64)
+                    # Each case has its own initial auth fixture.
+                    self.old.save(self.path)
+                    ticket = transfer.start(guard)
+                    self.assertEqual(transfer.capture(ticket['nonce'], payload, guard)['status'], 'saved_paused')
+                    after = json.loads(guard.path.read_text())['deepseek']
+                    self.assertEqual(after['usage'], before['usage'])
+                    self.assertEqual(Session.load(self.path).continuation_scope, self.old.identity())
+                    self.assertEqual(after, before)
+                    with self.assertRaises(ProviderRejected):
+                        guard.begin('deepseek')
+                else:
+                    with self.assertRaises(TransferError):
+                        transfer.start(guard)
+
     async def test_human_flow_preserves_history_scope_usage_pacing_and_no_model(self):
         started = (await self.client.post('/admin/session/deepseek/start')).json()
         with patch.object(api, 'get_client') as factory:
             r = await self.client.post('/session/deepseek/capture', json=self.payload,
                                       headers={'Authorization':'Bearer '+started['nonce'],'Origin':module.ORIGIN})
-            self.assertEqual(r.json(), {'status':'saved','goal_resumed':False})
+            self.assertEqual(r.json(), {'status':'saved_paused','goal_resumed':False})
             factory.assert_not_called()
         fresh = Session.load(self.path)
         self.assertEqual(fresh.continuation_scope, self.old.identity())
         self.assertEqual(fresh.account_id, 'owned-account')
         record = json.loads(self.guard.path.read_text())['deepseek']
-        self.assertEqual(record, {k:v for k,v in self.record.items() if k in ('usage','next_at','next_http_at')})
-        self.assertEqual((await self.client.get('/admin/session/deepseek/status')).json()['status'], 'saved')
+        self.assertEqual(record, self.record)
+        self.assertEqual((await self.client.get('/admin/session/deepseek/status')).json()['status'], 'saved_paused')
         before = self.path.read_bytes()
         r = await self.client.post('/session/deepseek/capture',json=self.payload,headers={'Authorization':'Bearer '+started['nonce']})
         self.assertEqual(r.status_code,409)
@@ -91,7 +146,7 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Session.load(self.path).token,self.old.token)
 
     async def test_other_restrictions_and_uncertain_requests_cannot_be_cleared(self):
-        for record in ({'pause':'account_restricted'}, {'pause':'quota_exceeded'},
+        for record in ({'pause':'account_muted'}, {'pause':'account_banned'}, {'pause':'ip_restricted'}, {'pause':'gateway_challenge'}, {'pause':'pow_rejected'}, {'pause':'account_restricted'}, {'pause':'quota_exceeded'},
                        {'pause':'session_expired','pending':'f'*32,'dispatched':True}, {'pending':'f'*32}):
             with self.guard._state() as state:
                 state['deepseek'] = record; self.guard._save(state)
@@ -138,11 +193,11 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
         changed = Session('f'*64, [], 'changed', 2); changed.save(self.path)
         with self.assertRaises(TransferError): self.transfer.capture(ticket['nonce'],self.payload,self.guard)
 
-    async def test_safety_save_failure_leaves_runtime_fail_closed(self):
+    async def test_capture_never_rewrites_safety_state(self):
         ticket = self.transfer.start(self.guard)
-        with patch.object(self.guard,'_save',side_effect=OSError('offline disk failure')):
-            with self.assertRaises(ProviderRejected):
-                self.transfer.capture(ticket['nonce'],self.payload,self.guard)
+        with patch.object(self.guard,'_save',side_effect=OSError('offline disk failure')) as save:
+            self.assertEqual(self.transfer.capture(ticket['nonce'],self.payload,self.guard)['status'], 'saved_paused')
+            save.assert_not_called()
         with self.assertRaises(ProviderRejected): self.guard.check('deepseek')
         self.assertEqual(json.loads(self.guard.path.read_text())['deepseek']['pause'],'session_expired')
 

@@ -1,20 +1,17 @@
 """Install local Harness shell policy without touching sessions or accounts."""
 import argparse
-import os
 from pathlib import Path
-import shutil
-import tempfile
-import time
-from .harness import profile_lock, render, yaml_codec
+from .harness import default_home, install_plugin_copy, profile_lock, render, write_private, yaml_codec
 
 IDENTITY = 'local-bridge-shell-safety'
+SOURCES = (Path(__file__).with_suffix('.mjs'), Path(__file__).with_name('harness_gh_checks.py'))
 
 
-def patch_document(document):
+def patch_document(document, entry=None):
     if not isinstance(document, list):
         raise ValueError('Unsupported Harness profile')
-    row = {'insert': [{'id': IDENTITY, 'name': str(
-        Path(__file__).with_suffix('.mjs').resolve()), 'disabled': False}]}
+    entry = str(Path(__file__).with_suffix('.mjs').resolve()) if entry is None else str(entry)
+    row = {'insert': [{'id': IDENTITY, 'name': entry, 'disabled': False}]}
     matches = [i for i, item in enumerate(document) if isinstance(item, dict) and
                (item.get('id') == IDENTITY or any(isinstance(child, dict) and
                 child.get('id') == IDENTITY for child in item.get('insert', []) or []))]
@@ -34,29 +31,18 @@ def patch_document(document):
 def install(home, profile):
     with profile_lock(home, profile):
         path = Path(home) / 'profiles' / profile / 'cordis.patch.yml'
+        if path.is_symlink():
+            raise ValueError('Refusing to replace a symlinked Harness profile')
         original = path.read_bytes()
-        updated = render(patch_document(yaml_codec().load(original.decode())))
-        if updated == original:
-            return path
-        backup = path.with_name(path.name + '.shell-backup-' + str(time.time_ns()))
-        shutil.copy2(path, backup)
-        backup.chmod(0o600)
-        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix='.shell-')
-        try:
-            with os.fdopen(fd, 'wb') as out:
-                out.write(updated)
-            if path.read_bytes() != original:
-                raise ValueError('Harness profile changed during installation')
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        entry = install_plugin_copy(home, IDENTITY, SOURCES)
+        updated = render(patch_document(yaml_codec().load(original.decode()), entry))
+        write_private(path, updated, original)
         return path
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--home', type=Path, default=Path.home() / '.dsh')
+    parser.add_argument('--home', type=Path, default=default_home())
     parser.add_argument('--profile', default='desktop', choices=['desktop', 'web', 'headless'])
     args = parser.parse_args()
     print(install(args.home, args.profile))

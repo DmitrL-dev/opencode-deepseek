@@ -171,7 +171,7 @@ python app.py
 Альтернатива через uvicorn с другим адресом:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 python app.py  # token still required
 # или
 uvicorn server.api:app --host 0.0.0.0 --port 8080 --no-proxy-headers
 ```
@@ -239,7 +239,7 @@ Python SDK:
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 r = client.chat.completions.create(
     model="deepseek-chat",
     messages=[{"role": "user", "content": "Hello!"}],
@@ -264,12 +264,12 @@ print(r.choices[0].message.content)
 
 **API-ключ:** любой. Мост **не проверяет** `Authorization` и не читает его
 (`server/api.py` не смотрит заголовок), поэтому в SDK, где ключ обязателен
-синтаксически, пишут заглушку — исторически `api_key="unused"`. В чистом HTTP
+синтаксически, пишут заглушку — исторически `api_key=open("session/api-token").read().strip()`. В чистом HTTP
 через `curl` заголовок `Authorization` вообще не нужен.
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://localhost:8000/v1", api_key="unused")
+client = OpenAI(base_url="http://localhost:8000/v1", api_key=open("session/api-token").read().strip())
 ```
 
 ```bash
@@ -351,7 +351,7 @@ opencode подключается к мосту как к **OpenAI-совмес�
       "name": "DeepSeek (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "deepseek-chat": {
@@ -373,7 +373,7 @@ opencode подключается к мосту как к **OpenAI-совмес�
 ```
 
 - `npm: "@ai-sdk/openai-compatible"` — универсальный OpenAI-совместимый драйвер.
-- `apiKey` обязателен для SDK, но мост его игнорирует.
+- `apiKey` — токен API моста из `session/api-token` (`python -m server.api_auth path`); без него `/v1` отклоняет запросы.
 - `model` в opencode указывается как `local-deepseek/deepseek-chat` или
   `local-deepseek/deepseek-expert`.
 - `limit.context` — приблизительный; уменьшите, если получаете ошибки о
@@ -395,7 +395,7 @@ opencode подключается к мосту как к **OpenAI-совмес�
       "name": "Qwen (local bridge)",
       "options": {
         "baseURL": "http://127.0.0.1:8000/v1",
-        "apiKey": "unused"
+        "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
       },
       "models": {
         "qwen3.8-omni-flash": {
@@ -661,7 +661,7 @@ Qwen подключается к тому же `/v1` отдельным пров
   "name": "Qwen Chat (local bridge)",
   "options": {
     "baseURL": "http://127.0.0.1:8000/v1",
-    "apiKey": "unused"
+    "apiKey": "{file:/ABSOLUTE/PATH/TO/opencode-deepseek/session/api-token}"
   },
   "models": {
     "qwen3.8-omni-flash": {
@@ -740,7 +740,7 @@ opencode run --model local-qwen/qwen3.8-max "Объясни этот проек�
 Пример:
 
 ```bash
-HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
+API_ALLOW_PUBLIC_BIND=1 API_ALLOWED_HOSTS=bridge.lan HOST=0.0.0.0 PORT=8080 RATE_LIMIT_PER_MINUTE=60 python app.py
 ```
 
 ---

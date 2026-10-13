@@ -125,7 +125,8 @@ class ConversationCache:
             if db is not None:
                 db.close()
 
-    def prepare(self, req, *, scope=None, claim=None, compact_results=False):
+    def prepare(self, req, *, scope=None, claim=None, compact_results=False,
+                legacy_scopes=(), allow_local_rollover=False):
         # Explicit protocol clients already own their conversation identity.
         if req.conversation_id:
             return req, 0
@@ -164,13 +165,21 @@ class ConversationCache:
         key = self.key(req, req.messages[:end], scope)
         with self.connection() as db:
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
+            # A namespace upgrade must not orphan histories stored before it.
+            # The legacy link is claimed exactly like a current one.
+            for legacy in () if row else legacy_scopes:
+                legacy_key = self.key(req, req.messages[:end], legacy)
+                row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (legacy_key,)).fetchone()
+                if row:
+                    key = legacy_key
+                    break
             if not row:
                 raise ConversationStateError(
                     'History is unknown; automatic replay and new-chat fallback are disabled.')
             if row[1]:
                 raise ConversationStateError(
                     'History is already consumed; automatic replay and new-chat fallback are disabled.')
-            if row[2] >= self.max_replies:
+            if row[2] >= self.max_replies and not (allow_local_rollover and claim is not None):
                 raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.
             reservation = uuid.uuid4().hex

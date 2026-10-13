@@ -218,3 +218,17 @@ ceiling retains charged events and does not clear provider pauses. Raising a
 local ceiling does not raise a website quota. The 1000-entry ledger bound is
 compatible with the maximum permitted daily HTTP ceiling. See
 [Harness examples and error distinctions](HARNESS.en.md#local-limits-and-errors).
+
+
+### Safari refresh and private refusal metadata
+
+Safari transfer never clears safety state. `saved_paused` confirms only that
+same-account credentials were saved while history binding, pending ownership,
+usage and pacing were preserved. Inspect the account and establish the previous
+request outcome before any explicit manual resume. A new credential is not proof
+that muted/banned/IP/gateway restrictions ended. Do not use a counter reset to
+recover a refusal.
+
+`session/refusal-diagnostics/` records bounded, private numeric refusal metadata,
+not response bodies or credentials. It is limited to 64 files without automatic
+deletion. See the root README for classification and storage details.

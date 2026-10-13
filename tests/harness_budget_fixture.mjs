@@ -22,5 +22,9 @@ try {
  assert.equal(JSON.parse(calls.at(-1).body).revision,data.revision);
  await commands.get('bridge-budget-reset').handler(invocation('CONFIRM'));
  assert.equal(calls.length,3);
+ data.status='saved_paused';
+ const transfer=(await commands.get('deepseek-login-status').handler(invocation(''))).text;
+ assert.match(transfer,/защитная пауза/);
+ assert.equal(calls.filter(c=>c.method==='POST').length,1);
  console.log('Harness budget commands: read, preview, confirmation and no replay passed');
 } finally {await rm(dir,{recursive:true,force:true});}

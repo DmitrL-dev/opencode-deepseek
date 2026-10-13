@@ -14,9 +14,14 @@ from settings import load_environment
 load_environment()
 
 if __name__ == "__main__":
+    from server.api_auth import public_bind_refusal
+    host = os.getenv("HOST", "127.0.0.1")
+    refusal = public_bind_refusal(host)
+    if refusal:
+        raise SystemExit(refusal)
     uvicorn.run(
         "server.api:app",
-        host=os.getenv("HOST", "127.0.0.1"),
+        host=host,
         port=int(os.getenv("PORT", "8000")),
         reload=False,
         proxy_headers=False,
