@@ -193,47 +193,73 @@ in `light`. Continuation prompts are longer. A reply like `{"question": ..., "op
 is rejected with "Tool arguments do not satisfy the advertised schema". No extra
 generation.
 
-Tool calls from browser providers (every provider except DeepSeek, whose behavior is
-unchanged) are handled like in any agent. Only a top-level fenced `tool_calls` block is
-a call, wherever it stands in the message. Prose, text after the block, several
-blocks, arrays without that fence (also inside a ```` ```json ```` block) and quoted
-blocks are plain text. A block is text, not an error, when its JSON is syntactically
-broken (a missing comma, an ellipsis `...`) or names no tool: an abstract sample.
-Otherwise it must be valid: an unknown tool name (even in a well-formed demo) or
-arguments that do not fit that tool's schema stop the whole message and nothing runs.
-When every block is valid, all calls run in order: the agent receives them as
-`tool_calls` and the rest of the message, with the call blocks cut out, as ordinary
-content. `tool_choice: none` never turns text into an error. Verified offline.
+Temporary switch `TOOLCALL_LEGACY` (default `1`): `1` — main-era contract for
+**every** provider (`server/api.py` + `server/tool_protocol.py`: one block,
+DeepSeek-only repair, always `invalid_tool_response`; will be removed); `0` — one
+tool-rework path in `server/api_new.py` + `server/tool_protocol_new.py` for **every**
+provider, including DeepSeek (demote, multi-block, pointed repair,
+`TOOLCALL_INVALID_MODE`). Summary in
+[SETUP §5](docs/SETUP.en.md#5-why-the-model-doesnt-make-edits-emulated-tool-calling);
+longer notes (Russian):
+[`docs/toolcall-format-repair-legacy.md`](docs/toolcall-format-repair-legacy.md)
+(`LEGACY=1`) and
+[`docs/toolcall-format-repair.md`](docs/toolcall-format-repair.md) (`LEGACY=0`).
+With `TOOLCALL_LEGACY=0`, tool calls are handled like in any agent. Only a top-level
+fenced `tool_calls` block is a call, wherever it stands in the message. Prose, text
+after the block, several blocks, arrays without that fence (also inside a
+```` ```json ```` block) and quoted blocks are plain text. Before validate/repair the
+bridge may demote advice mistagged as a call: if a block has no call-level `name`
+(JSON whole or broken) or the name is unknown and there is accompanying prose, the
+opening fence is relabeled from `tool_calls` to `text` and the agent gets ordinary
+successful `content` — no repair and no `TOOLCALL_INVALID_MODE`. Otherwise every
+remaining block must be valid: broken JSON (including a known tool name), an unknown
+name with no prose, or arguments off-schema stop the whole message (repair /
+`TOOLCALL_INVALID_MODE`); there is no silent validate pass. When every block is
+valid, all calls run in order: the agent receives them as `tool_calls` and the rest
+of the message, with the call blocks cut out, as ordinary content.
+`tool_choice: none` never turns text into an error. Verified offline.
 
-With `TOOLCALL_FORMAT_REPAIR=1` (off by default) an erroneous call gets one correction
-in the same chat, as one extra generation on the provider account: for an unknown tool
-the full list of tools with their argument shapes (field names, nesting, `?` =
+With `TOOLCALL_FORMAT_REPAIR=1` (off by default), under `LEGACY=0` an erroneous call
+gets one pointed correction in the same chat (one extra generation): for an unknown
+tool the full list of tools with their argument shapes (field names, nesting, `?` =
 optional; not shortened), for wrong arguments that tool's argument shape (no values).
 No second correction is requested. If the corrected reply is valid the agent sees only
-the final call, with no notice. If it is erroneous again, or with
-`TOOLCALL_FORMAT_REPAIR=0` at once (log line `format_correction=not_eligible`), the
-agent receives the message below. Verified offline.
+the final call, with no notice. What happens next is `TOOLCALL_INVALID_MODE` (below).
+Under `LEGACY=1`, repair remains DeepSeek-only (main-era prompt). Verified offline.
 
-That message is an ordinary assistant message, not an error: the model's raw reply
-followed by one line `Bridge notice: the tool call in the message above was NOT
-executed: …` that names at most the offending tool (no tool list, no argument shapes,
-no values). Nothing runs and no extra generation happens. The provider link is kept, so
-you can keep writing (otherwise: "History is already consumed…"): your next message
-goes to the same chat together with that line. Still errors, as before: DeepSeek,
-`tool_choice` required/specific tool, a reply without a conversation id and an
-unfinished reply. Verified offline.
+`TOOLCALL_INVALID_MODE` (default `error`; only when `LEGACY=0`): what to do with an
+invalid call after validation or after one failed correction — for **any** provider,
+including DeepSeek. With `error` the agent gets
+`invalid_tool_response` (fail-closed). With `text` — HTTP success and a live provider
+chat, but an explicit failed tool step for the agent:
+
+- `content`: raw reply plus `Bridge notice: BRIDGE_TOOL_NOT_EXECUTED: …` (tool name at
+  most; no schemas or values);
+- top-level `bridge_notice` (`executed: false`, `code`, `kind`, `tool`, `as_tool_error`
+  shaped like a tool-role error);
+- `message.refusal`: the same notice text (for clients that honor refusal);
+- the next user message is sent to the provider tab as
+  `Tool result (name): <notice>` plus the follow-up — as if the tool returned an error.
+
+Executable `tool_calls` are not invented on reject (the agent would run them). Even with
+`text`, these still error: `tool_choice` required/specific tool, a reply without a
+conversation id, and an unfinished reply. Mistagged advice (no call-level name, or
+unknown name with prose) is demoted to a `text` fence before this path.
+Verified offline.
 
 A call that repeats, with identical arguments, the call whose result the request
 carries (the model answers a tool result with the same call again) is not executed a
-second time: the agent gets the same kind of message (raw reply plus a line saying the
-call repeats the one just executed), not an error. A different call, or a call after a
-new user message, runs normally. Verified offline.
+second time: with `TOOLCALL_INVALID_MODE=text` the agent gets the same kind of message
+(raw reply plus a line saying the call repeats the one just executed); with `error` it
+raises. A different call, or a call after a new user message, runs normally. Verified
+offline.
 
 The tool result the agent returns (for example the option you picked) goes to the
 provider as just `Tool result (name): <result JSON>`. It carries no tools reminder
 (`TOOL_INSTRUCTIONS_BROWSER` still applies to ordinary user messages), no repeated
 question or call and no bridge call id; results of several calls to the same tool keep
-the identifier mapping. DeepSeek and HTTP providers are unchanged. Verified offline.
+the identifier mapping. Invalid-call outcome follows `TOOLCALL_INVALID_MODE` (above).
+Verified offline.
 
 For DeepSeek, disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
 it does not disable tool-markup validation. Malformed tool blocks stop the step
@@ -516,7 +542,7 @@ Claude requires a network terminal marker; truncated, partial or malformed answe
 not reported as complete. Uncertain dispatched outcomes retain pending state
 and a safety pause across restart. There is no automatic retry.
 Verified offline without live accounts. Re-export and update the userscripts
-to apply the browser changes (controller 0.3.34).
+to apply the browser changes (controller 0.3.35).
 
 Mistral accepts only a request-bound stream with a terminal trailer.
 Harness `--without-browser` excludes browser models and their aliases.

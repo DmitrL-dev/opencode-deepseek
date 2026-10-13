@@ -25,6 +25,15 @@ else:
 MAX_BUDGET = 2000
 
 PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini', 'chatgpt', 'claude'))
+
+
+def _access_pause_enabled() -> bool:
+    """Durable pause latch (needs ``python -m providers.access resume``). Default on.
+
+    ``PROVIDER_ACCESS_PAUSE=0`` skips latching and enforcing those pauses. For local
+    testing only; at your own risk — may keep hitting a restricted account.
+    """
+    return os.getenv('PROVIDER_ACCESS_PAUSE', '1') == '1'
 MESSAGES = {
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
     'account_restricted': 'The provider restricted this account. Stop and inspect the normal website.',
@@ -373,7 +382,7 @@ class AccessGuard:
         owner = owner or (active.id if active is not None and active.guard is self else None)
         with self._state() as state:
             record = state.get(provider, {})
-            if record.get('pause'):
+            if record.get('pause') and _access_pause_enabled():
                 raise ProviderRejected(record['pause'], source='local_pause')
             if owner is not None and record.get('pending') != owner:
                 raise ProviderRejected('upstream_failure')
@@ -386,10 +395,11 @@ class AccessGuard:
         self.check(provider)
         with self._state() as state:
             record = state.setdefault(provider, {})
-            if record.get("pause") or record.get("pending"):
+            paused = bool(record.get("pause") and _access_pause_enabled())
+            if paused or record.get("pending"):
                 raise ProviderRejected(
                     record.get("pause") or "upstream_failure",
-                    source='local_pause' if record.get("pause") else 'upstream',
+                    source='local_pause' if paused else 'upstream',
                 )
             record.update(pending=attempt.id, dispatched=False)
             try:
@@ -439,6 +449,9 @@ class AccessGuard:
     def reject(self, provider, exc, owner=None):
         error = exc if isinstance(exc, ProviderRejected) else rejection(
             exc, status=exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None)
+        if not _access_pause_enabled():
+            # Testing opt-out: fail this request without a durable pause latch.
+            return error
         newly_paused = False
         try:
             with self._state() as state:

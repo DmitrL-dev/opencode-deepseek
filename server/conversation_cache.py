@@ -17,7 +17,7 @@ from .config import canonical_model
 from .schemas import ChatMessage
 from .openai_format import _text_of
 from .recovery_status import RECOVERY_STOP_TEXT
-from .tool_notice import notice_of
+from .tool_notice import notice_of, provider_tool_error_followup
 
 # OpenCode (and similar agents) inject ephemeral <system-reminder> wrappers into
 # user text around tool loops. Those wrappers are not part of the delivered
@@ -180,12 +180,13 @@ class ConversationCache:
         tail = [m.model_copy(update={'name': calls[m.tool_call_id]['function']['name']})
                 if m.role == 'tool' else m for m in tail]
         # A bridge notice about a rejected tool reply is a delivered assistant turn
-        # the provider chat never saw; hand its text to the model with the user's
-        # next message so it can correct the call.
+        # the provider chat never saw; hand it to the model with the user's next
+        # message as a failed Tool result so the provider loop matches a tool error.
         notice = notice_of(_text_of(req.messages[end - 1].content))
         if notice and not calls and tail and tail[0].role == 'user':
             tail = [tail[0].model_copy(update={
-                'content': notice + '\n\n' + _text_of(tail[0].content)}), *tail[1:]]
+                'content': provider_tool_error_followup(
+                    notice, _text_of(tail[0].content))}), *tail[1:]]
         # Browser providers: one result per tool name is unambiguous by name, so
         # the result is sent bare. Results of the same tool still need the
         # identifier mapping (and keep their call_id labels).

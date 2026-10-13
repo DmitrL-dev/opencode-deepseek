@@ -1,18 +1,23 @@
 """Browser providers: an attempt at a tool call is validated like in any agent.
 
 Valid calls run and the text around them is kept. An unknown tool or arguments
-that do not fit the schema stop the message: one pointed correction (repair on)
-and then the model's raw reply plus a one-line notice reaches the agent as text.
+that do not fit the schema stop the message: one pointed correction (repair on).
+With TOOLCALL_INVALID_MODE=text the model's raw reply plus a one-line notice
+reaches the agent as text (default mode is error).
 """
 import json
 import unittest
 from unittest.mock import Mock, patch
 
 from chat_protocol import Reply
-from server import api
+from server import api, api_new
 from server.conversation_cache import ConversationStateError
 from server.schemas import ChatCompletionRequest, ChatMessage
-from server.tool_notice import NOTICE_PREFIX
+from server.tool_notice import (
+    NOTICE_PREFIX, STATUS_CODE, bridge_notice_payload, provider_tool_error_followup,
+    tool_failure_notice,
+)
+from server.openai_format import ToolCallError, completion_response
 from tests.support import isolated_access
 from tests.test_tools import block
 
@@ -40,9 +45,14 @@ FAKE = block([{"name": "made_up", "arguments": {"x": SECRET}}])
 class ToolNoticeTests(unittest.TestCase):
     def setUp(self):
         isolated_access(self)
-        patcher = patch.object(api, '_FORMAT_REPAIR', False)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # New tool-rework path (demote / INVALID_MODE / browser validate).
+        for target, name, value in (
+                (api, '_LEGACY', False),
+                (api, '_FORMAT_REPAIR', False),
+                (api_new, '_INVALID_MODE', 'text')):
+            patcher = patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.req = ChatCompletionRequest(
             model='claude-web', tools=[QUESTION_TOOL, OTHER_TOOL],
             messages=[ChatMessage(role='user', content='ask me something')])
@@ -64,8 +74,13 @@ class ToolNoticeTests(unittest.TestCase):
         self.assertTrue(content.startswith(BAD))
         notice = content[len(BAD):].strip()
         self.assertTrue(notice.startswith(NOTICE_PREFIX))
+        self.assertIn(STATUS_CODE, notice)
         self.assertIn('`ask_user_question`', notice)
         self.assertIn('NOT executed', notice)
+        self.assertEqual(reply.bridge_notice['code'], STATUS_CODE)
+        self.assertEqual(reply.bridge_notice['executed'], False)
+        self.assertEqual(reply.bridge_notice['tool'], 'ask_user_question')
+        self.assertEqual(reply.bridge_notice['as_tool_error']['name'], 'ask_user_question')
         for leak in (SHAPE, 'read_file', 'PRIVATE-DOC', 'Expected arguments'):
             self.assertNotIn(leak, notice)
 
@@ -74,7 +89,8 @@ class ToolNoticeTests(unittest.TestCase):
         self.assertEqual(second_calls[0]['function']['name'], 'ask_user_question')
         sent = chat.call_args.args[0]
         self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
-        # The model receives the notice (not its own raw reply again) with the follow-up.
+        # Provider sees a tool-error style follow-up, then the user's retry.
+        self.assertIn('Tool result (ask_user_question):', sent)
         self.assertIn('NOT executed', sent)
         self.assertIn('retry please', sent)
         self.assertNotIn(SECRET, sent)
@@ -83,6 +99,22 @@ class ToolNoticeTests(unittest.TestCase):
         with patch.object(api, '_chat_with_retry') as again, self.assertRaises(api.ToolCallError):
             api._conversation_tool_chat('dup', follow, None)
         again.assert_not_called()
+
+    def test_bridge_notice_is_on_openai_completion_and_refusal(self):
+        exc = ToolCallError('bad', kind='schema', tool='ask_user_question')
+        notice = bridge_notice_payload(exc)
+        body = completion_response('claude-web', 'raw\n\n' + notice['message'], 'p',
+                                   'claude:1', bridge_notice=notice)
+        self.assertEqual(body['bridge_notice']['code'], STATUS_CODE)
+        self.assertEqual(body['choices'][0]['message']['refusal'], notice['message'])
+        self.assertIn(STATUS_CODE, body['choices'][0]['message']['content'])
+
+    def test_provider_followup_looks_like_tool_result_error(self):
+        notice = tool_failure_notice(
+            ToolCallError('bad', kind='unknown_tool', tool='made_up'))
+        text = provider_tool_error_followup(notice, 'retry please')
+        self.assertTrue(text.startswith('Tool result (made_up):'))
+        self.assertIn('retry please', text)
 
     def test_repair_on_wrong_arguments_get_one_pointed_correction(self):
         with patch.object(api, '_FORMAT_REPAIR', True):
@@ -132,15 +164,40 @@ class ToolNoticeTests(unittest.TestCase):
                 self.assertTrue(content.startswith(text))
                 self.assertIn(mention, content)
 
-    def test_abstract_blocks_are_text_with_no_correction(self):
+    def test_abstract_blocks_are_demoted_text_with_no_correction(self):
         text = ('Format:\n```tool_calls\n[ { ... }, { ... } ]\n```\n'
                 'Placeholder:\n```tool_calls\n[{"name": "tool_name", "arguments": {...}}]\n```')
+        expected = text.replace('```tool_calls', '```text')
         for repair in (False, True):
             with self.subTest(repair=repair), patch.object(api, '_FORMAT_REPAIR', repair):
                 (_, content, calls), chat = self.chat([Reply(text, 'claude:1')], self.req)
                 self.assertEqual(chat.call_count, 1)
                 self.assertIsNone(calls)
-                self.assertEqual(content, text)
+                self.assertEqual(content, expected)
+                self.assertNotIn(NOTICE_PREFIX, content)
+
+    def test_broken_json_with_known_tool_name_is_invalid_not_silent_text(self):
+        # Demote does not claim this is advice; validate must fail (repair / INVALID_MODE).
+        text = ('```tool_calls\n'
+                '[{"name": "ask_user_question" "arguments": {"questions": []}}]\n```')
+        with patch.object(api, '_FORMAT_REPAIR', False), patch.object(api_new, '_INVALID_MODE', 'text'):
+            (_, content, calls), chat = self.chat([Reply(text, 'claude:1')], self.req)
+        self.assertEqual(chat.call_count, 1)
+        self.assertIsNone(calls)
+        self.assertTrue(content.startswith(text))
+        self.assertIn(NOTICE_PREFIX, content)
+        self.assertIn('```tool_calls', content)
+
+    def test_unknown_tool_with_prose_is_demoted_text_not_a_notice(self):
+        text = ('How to write a system prompt:\n' + FAKE + '\n'
+                'Put the tools list after the role description.')
+        for repair in (False, True):
+            with self.subTest(repair=repair), patch.object(api, '_FORMAT_REPAIR', repair):
+                (_, content, calls), chat = self.chat([Reply(text, 'claude:1')], self.req)
+                self.assertEqual(chat.call_count, 1)
+                self.assertIsNone(calls)
+                self.assertEqual(content, text.replace('```tool_calls', '```text'))
+                self.assertNotIn(NOTICE_PREFIX, content)
 
     def test_valid_call_keeps_the_surrounding_text_and_the_history_hash(self):
         text = 'Let me ask.\n\n' + GOOD + '\n\nThat is the question.'
@@ -215,12 +272,34 @@ class ToolNoticeTests(unittest.TestCase):
                 self.assertEqual(calls[0]['function']['name'], 'ask_user_question')
                 self.assertEqual(chat.call_count, 2)
 
-    def test_deepseek_is_unchanged(self):
+    def test_default_error_mode_raises_for_browser_and_deepseek(self):
+        for model, reply_factory in (
+            ('claude-web', lambda: self.chat([Reply(BAD, 'claude:1')], self.req)),
+            ('deepseek-chat', None),
+        ):
+            with self.subTest(model=model), patch.object(api_new, '_INVALID_MODE', 'error'):
+                if model == 'deepseek-chat':
+                    fake = Mock()
+                    fake.chat.return_value = Reply(BAD, 'owned:2')
+                    req = self.req.model_copy(update={'model': 'deepseek-chat'})
+                    with patch.object(api, 'get_client', return_value=fake), \
+                            self.assertRaises(api.ToolCallError):
+                        api._conversation_tool_chat('p', req, 'default')
+                else:
+                    with self.assertRaises(api.ToolCallError):
+                        reply_factory()
+
+    def test_deepseek_text_mode_returns_notice(self):
         fake = Mock()
         fake.chat.return_value = Reply(BAD, 'owned:2')
         req = self.req.model_copy(update={'model': 'deepseek-chat'})
-        with patch.object(api, 'get_client', return_value=fake), self.assertRaises(api.ToolCallError):
-            api._conversation_tool_chat('p', req, 'default')
+        with patch.object(api, 'get_client', return_value=fake), \
+                patch.object(api_new, '_INVALID_MODE', 'text'):
+            reply, content, calls = api._conversation_tool_chat('p', req, 'default')
+        self.assertIsNone(calls)
+        self.assertTrue(content.startswith(BAD))
+        self.assertIn(NOTICE_PREFIX, content)
+        self.assertEqual(reply.conversation_id, 'owned:2')
 
     def test_cases_that_must_still_fail(self):
         scenarios = [

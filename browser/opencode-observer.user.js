@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode browser response observer
 // @namespace    opencode-local-bridge
-// @version      0.3.17
+// @version      0.3.18
 // @description  Observe only the completion caused by an active local bridge job.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -12,6 +12,7 @@
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @match        https://claude.ai/*
+// @match        https://chat.chatgbot.ai/*
 // @match        https://gemini.google.com/*
 // @match        https://www.google.com/*
 // @inject-into  page
@@ -39,6 +40,7 @@
     "chat.openai.com": { provider: "chatgpt", stalls: true, fullTail: true },
     // Claude wire paths drift; capture same-origin /api/* and fall back to DOM scrape.
     "claude.ai": { provider: "claude", stalls: true, fullTail: true },
+    "chat.chatgbot.ai": { provider: "claude", stalls: true, fullTail: true },
     "gemini.google.com": { provider: "gemini", stalls: true, fullTail: true },
     "www.google.com": { provider: "gemini", stalls: true, fullTail: true },
   };
@@ -567,7 +569,8 @@
       }
     } catch (_) { /* opaque / stream bodies */ }
     if (job.path !== null) return { path: job.path };
-    const match = location.pathname.match(/^\/chat\/([\w-]+)$/);
+    // claude.ai: /chat/<id>. ChatGBot: /en/chat/<id> (locale prefix).
+    const match = location.pathname.match(/^\/(?:[a-z]{2}\/)?chat\/([\w-]+)$/);
     return { path: match ? "/chat/" + match[1] : null };
   };
 

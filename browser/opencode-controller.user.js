@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.3.34
+// @version      0.3.35
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -12,6 +12,7 @@
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @match        https://claude.ai/*
+// @match        https://chat.chatgbot.ai/*
 // @match        https://gemini.google.com/*
 // @match        https://www.google.com/*
 // @inject-into  content
@@ -60,6 +61,11 @@
     looseEmpty: true, rebindEditor: true, ignoreMarkup: true,
     fillDelayMs: 40, fillFallback: "paragraph", clearForeignDraft: true, stalls: true,
   };
+  // ChatGBot Claude UI: locale-prefixed routes; bridge tokens stay /chat/<id>.
+  const claudeChatgbotSite = {
+    ...claudeSite,
+    home: "/en/chat",
+  };
   const sites = {
     "chat.z.ai": { provider: "glm", home: "/", input: "#chat-input", path: /^\/c\/[\w-]+$/ },
     "grok.com": {
@@ -82,6 +88,7 @@
     "chatgpt.com": chatgptSite,
     "chat.openai.com": chatgptSite,
     "claude.ai": claudeSite,
+    "chat.chatgbot.ai": claudeChatgbotSite,
     "gemini.google.com": {
       provider: "gemini", home: "/app", input: geminiInput, stalls: true,
       path: /^\/(?:u\/\d+\/)?app\/[\w-]+$/,
@@ -108,6 +115,20 @@
   const googleAiModePage = () => location.hostname === "www.google.com"
     && location.pathname === "/search"
     && new URLSearchParams(location.search).get("udm") === "50";
+  // ChatGBot: browser shows /en/chat[/id]; bridge tokens stay /chat/<id>.
+  const claudeChatgbotPage = () => location.hostname === "chat.chatgbot.ai";
+  const claudeCanonicalPath = value => {
+    const path = String(value || "");
+    if (path === "/en/chat" || /^\/[a-z]{2}\/chat$/.test(path)) return site.home;
+    const match = path.match(/^\/(?:[a-z]{2}\/)?chat\/([\w-]+)$/);
+    return match ? "/chat/" + match[1] : path;
+  };
+  const claudeBrowserPath = value => {
+    const path = String(value || "");
+    if (path === site.home || path === "/en/chat") return "/en/chat";
+    const match = path.match(/^\/chat\/([\w-]+)$/);
+    return match ? "/en/chat/" + match[1] : path;
+  };
   const sameRoute = (pathname, target) => {
     if (location.hostname === "www.google.com") {
       let targetPath = target;
@@ -121,6 +142,9 @@
           && new URLSearchParams(location.search).get("udm") === "50";
       }
       return geminiAppRoute(pathname) === geminiAppRoute(targetPath);
+    }
+    if (claudeChatgbotPage() && site.provider === "claude") {
+      return claudeCanonicalPath(pathname) === claudeCanonicalPath(target);
     }
     if (pathname === target) return true;
     if (site.provider !== "gemini") return false;
@@ -391,6 +415,7 @@
   kimiSite.send = kimiSend;
   chatgptSite.send = chatgptSend;
   claudeSite.send = claudeSend;
+  claudeChatgbotSite.send = claudeSend;
   async function submitComposer(input, prompt, form) {
     const send = site.send;
     if (!send) {
@@ -607,7 +632,9 @@
     }
     // Give the frontend a bounded chance to render its final answer and route.
     for (let attempt = 0; attempt < 50 && pending === job; attempt++) {
-      if (site.path.test(location.pathname)) break;
+      const route = claudeChatgbotPage()
+        ? claudeCanonicalPath(location.pathname) : location.pathname;
+      if (site.path.test(route)) break;
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     if (pending !== job) return;
@@ -617,6 +644,9 @@
       const match = reported.match(/^\/(?:u\/\d+\/)?app\/([\w-]+)$/);
       reported = match ? "/app/" + match[1] : reported;
 
+    }
+    if (claudeChatgbotPage() && site.provider === "claude") {
+      reported = claudeCanonicalPath(reported);
     }
     await finish({ status: value.status, body: value.body, path: reported,
       ...(value.request_turn ? { request_turn: value.request_turn } : {}),
@@ -646,6 +676,9 @@
       // Bounce that token to the AI Mode search URL — never gemini.google.com.
       let navTarget = target;
       if (geminiAiModeToken(target)) navTarget = "/search?udm=50";
+      if (claudeChatgbotPage() && site.provider === "claude") {
+        navTarget = claudeBrowserPath(target);
+      }
       const origin = location.hostname === "www.google.com"
         && /^\/(?:u\/\d+\/)?app\//.test(navTarget)
         && navTarget !== "/app/aimode"

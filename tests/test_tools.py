@@ -490,6 +490,20 @@ class ToolProtocolTests(unittest.TestCase):
     def test_markdown_inside_cut_arguments_does_not_hide_truncation(self):
         self.assertTrue(looks_truncated('```tool_calls\n[{"name":"write","arguments":{"content":"```code'))
 
+    def test_mid_message_unclosed_tool_fence_looks_truncated(self):
+        # Browser replies may put the protocol block after prose; continuation
+        # must still see the open top-level fence (not only whole-reply starts).
+        cut = ('I will write the file now.\n\n```tool_calls\n'
+               '[{"name":"write","arguments":{"file_path":"/x","content":"partial')
+        self.assertTrue(looks_truncated(cut, {"write"}))
+        self.assertTrue(looks_truncated(cut))
+        closed = ('Intro.\n```tool_calls\n'
+                  '[{"name":"write","arguments":{"file_path":"/x","content":"y"}}]\n```')
+        self.assertFalse(looks_truncated(closed))
+        # Quoted / nested open fences do not count.
+        nested = '```markdown\n```tool_calls\n[{"name":"write"\n```'
+        self.assertFalse(looks_truncated(nested))
+
     def test_tool_choice_is_enforced(self):
         _, bash = parse_tool_calls(block([{"name":"bash","arguments":{}}]), {"bash","write"})
         for choice, calls in [("none",bash),("required",None),

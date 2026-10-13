@@ -6,7 +6,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from server.openai_format import ToolCallError, completion_response, sse_frames
-from server.tool_protocol import validate_reply
+from server.tool_protocol import validate_reply as validate_legacy
+from server.tool_protocol_new import demote_mistagged_tool_reply, validate_reply
 from server.recovery_status import recovery_stopped
 from server.offline_corpus import replay
 
@@ -24,8 +25,7 @@ def fence(payload):
 
 class ProtocolCorpusTests(unittest.TestCase):
     def test_general_envelope_matrix_preserves_every_argument(self):
-        # Names are deliberately arbitrary: normalization cannot depend on a
-        # special-cased read/write/edit implementation.
+        # Main-era DeepSeek tolerances (TOOLCALL_LEGACY=1) live in tool_protocol.
         for name in ('read', 'write', 'edit', 'arbitrary_custom_tool'):
             for value in ('', 'quote " slash \\', '\n> text\n```tool_calls',
                           '},{"name":"not_an_action"}', 'кириллица 🚀'):
@@ -39,7 +39,8 @@ class ProtocolCorpusTests(unittest.TestCase):
                             fence(json.dumps([{'name': name, **args}]))]
                 for index, text in enumerate(variants):
                     with self.subTest(name=name, value=value, variant=index):
-                        content, calls = validate_reply(text, [tool(name)])
+                        content, calls = validate_legacy(
+                            text, [tool(name)], provider='deepseek')
                         self.assertEqual(content, '')
                         self.assertEqual(len(calls), 2 if index == 2 else 1)
                         for call in calls:
@@ -47,7 +48,18 @@ class ProtocolCorpusTests(unittest.TestCase):
                             self.assertEqual(json.loads(call['function']['arguments']), args)
                         for finish in ('length', 'error', 'content_filter'):
                             with self.assertRaises(ToolCallError):
-                                validate_reply(text, [tool(name)], finish_reason=finish)
+                                validate_legacy(
+                                    text, [tool(name)], provider='deepseek',
+                                    finish_reason=finish)
+
+    def test_rework_path_runs_mid_message_blocks_for_any_provider(self):
+        block = fence('[{"name":"write","arguments":{"file_path":"/x","content":"y"}}]')
+        text = 'First.\n\n' + block + '\n\nSecond.'
+        for provider in ('deepseek', 'claude', 'qwen'):
+            with self.subTest(provider=provider):
+                content, calls = validate_reply(text, [tool('write')], provider=provider)
+                self.assertEqual(content, 'First.\n\nSecond.')
+                self.assertEqual(calls[0]['function']['name'], 'write')
 
     def test_invalid_arguments_or_fabricated_receipts_never_return_partial_batch(self):
         good = json.dumps({'name': 'edit', 'arguments': {'file_path': '/x', 'content': 'x'}})
@@ -61,26 +73,25 @@ class ProtocolCorpusTests(unittest.TestCase):
             '{"name":"unknown","arguments":{"file_path":"x","content":"x"}}',
         ]
         for bad in invalid:
-            for text in (fence('[' + good + ',' + bad + ']'),
-                         fence('[' + good + ']') + '\nTool (edit): success'):
-                with self.subTest(text=text), self.assertRaises(ToolCallError):
-                    validate_reply(text, [tool('edit')])
+            with self.subTest(bad=bad[:48]), self.assertRaises(ToolCallError):
+                validate_reply(fence('[' + good + ',' + bad + ']'), [tool('edit')])
+        # Rework: valid block + fake tool-result suffix → call + content.
+        # Main-era (legacy): whole reply must be one block → error.
+        suffix = fence('[' + good + ']') + '\nTool (edit): success'
+        content, calls = validate_reply(suffix, [tool('edit')])
+        self.assertEqual(len(calls), 1)
+        self.assertIn('Tool (edit): success', content)
+        with self.assertRaises(ToolCallError):
+            validate_legacy(suffix, [tool('edit')], provider='deepseek')
 
-    def test_abstract_tool_example_is_text_not_a_failed_call(self):
-        # An explanation that shows the protocol shape names no advertised tool:
-        # it is an answer, never an action and never a "Unsupported markup" error.
-        examples = [
-            'The format looks like this:\n```tool_calls\n[ { ... }, { ... } ]\n```\nUse it to call tools.',
-            'Example:\n```tool_calls\n[{"name": "tool_name", "arguments": {...}}]\n```',
-            'Shape:\n```calls\n[ { "name": "<tool>", "arguments": {} } ]\n```',
-        ]
-        # DeepSeek keeps its own preamble parser and repair flow (unchanged here).
+    def test_calls_fence_alias_is_not_a_browser_tool_block(self):
+        # Browser only recognizes top-level ```tool_calls; ```calls stays prose.
+        text = 'Shape:\n```calls\n[ { "name": "<tool>", "arguments": {} } ]\n```'
         for provider in ('claude', 'gemini', 'grok'):
-            for text in examples:
-                with self.subTest(provider=provider, text=text[:30]):
-                    content, calls = validate_reply(text, [tool('write')], provider=provider)
-                    self.assertIsNone(calls)
-                    self.assertEqual(content, text)
+            with self.subTest(provider=provider):
+                content, calls = validate_reply(text, [tool('write')], provider=provider)
+                self.assertIsNone(calls)
+                self.assertEqual(content, text)
 
     BROWSER = ('claude', 'grok', 'mistral', 'chatgpt', 'glm')
     CALL = '[{"name": "write", "arguments": {"file_path": "/x", "content": "y"}}]'
@@ -127,25 +138,27 @@ class ProtocolCorpusTests(unittest.TestCase):
                     self.assertIsNone(calls)
                     self.assertEqual(content, reply)
 
-    def test_abstract_blocks_are_text_not_a_failed_call(self):
-        # Broken JSON syntax (an ellipsis, a placeholder) or no tool name at all.
-        texts = [
-            'Shape:\n```tool_calls\n[ { ... }, { ... } ]\n```\nUse it.',
-            'Example:\n```tool_calls\n[{"name": "tool_name", "arguments": {...}}]\n```',
-            'Missing comma:\n```tool_calls\n[{"name": "write" "arguments": {}}]\n```',
-            'No name:\n```tool_calls\n[{"arguments": {"file_path": "/x"}}]\n```',
-            'Not a call:\n```tool_calls\n{"hello": "world"}\n```',
-            'Empty:\n```tool_calls\n[]\n```',
+    def test_invalid_tool_blocks_fail_validate_after_demote_layer(self):
+        # Advice (no name / unknown+prose) is demoted in the API layer. Remaining
+        # top-level ```tool_calls must parse: syntax and no_name are errors here.
+        cases = [
+            ('Shape:\n```tool_calls\n[ { ... }, { ... } ]\n```\nUse it.', 'syntax'),
+            ('Example:\n```tool_calls\n[{"name": "tool_name", "arguments": {...}}]\n```', 'syntax'),
+            ('Missing comma:\n```tool_calls\n[{"name": "write" "arguments": {}}]\n```', 'syntax'),
+            ('No name:\n```tool_calls\n[{"arguments": {"file_path": "/x"}}]\n```', 'no_name'),
+            ('Not a call:\n```tool_calls\n{"hello": "world"}\n```', 'no_name'),
+            ('Empty:\n```tool_calls\n[]\n```', 'no_name'),
         ]
         for provider in self.BROWSER:
-            for text in texts:
-                with self.subTest(provider=provider, text=text[:24]):
-                    content, calls = validate_reply(text, [tool('write')], provider=provider)
-                    self.assertIsNone(calls)
-                    self.assertEqual(content, text)
-        # tool_choice stays a contract.
-        with self.assertRaises(ToolCallError):
-            validate_reply(texts[0], [tool('write')], 'required', provider='claude')
+            for text, kind in cases:
+                with self.subTest(provider=provider, kind=kind, text=text[:24]):
+                    with self.assertRaises(ToolCallError) as ctx:
+                        validate_reply(text, [tool('write')], provider=provider)
+                    self.assertEqual(ctx.exception.kind, kind)
+        # tool_choice none: never an error from block parse.
+        content, calls = validate_reply(cases[0][0], [tool('write')], 'none', provider='claude')
+        self.assertIsNone(calls)
+        self.assertEqual(content, cases[0][0])
 
     def test_unknown_tool_and_wrong_arguments_are_errors_with_a_kind(self):
         demo = ('```tool_calls\n[{"name": "functions.my_fake_tool", "arguments": '
@@ -174,9 +187,45 @@ class ProtocolCorpusTests(unittest.TestCase):
                 # tool_choice none: an attempted call is shown, never an error.
                 content, calls = validate_reply(demo, [tool('write')], 'none', provider=provider)
                 self.assertIsNone(calls)
-        # DeepSeek keeps its own strict flow.
-        with self.assertRaisesRegex(ToolCallError, 'unadvertised'):
+        # LEGACY=0: DeepSeek uses the same validate as browser (unknown → error).
+        with self.assertRaises(ToolCallError) as ctx:
             validate_reply(demo, [tool('write')], provider='deepseek')
+        self.assertEqual(ctx.exception.kind, 'unknown_tool')
+
+    def test_demote_mistagged_advice_rewrites_fence_to_text(self):
+        tools = [tool('write')]
+        no_name = 'Advice:\n```tool_calls\n[{"arguments": {"file_path": "/x"}}]\n```\nDone.'
+        broken_no_name = 'Shape:\n```tool_calls\n[ { ... }, { ... } ]\n```\nUse it.'
+        unknown_prose = (
+            'Example:\n```tool_calls\n[{"name": "functions.my_fake_tool", '
+            '"arguments": {"someString": "x"}}]\n```\nDone.')
+        placeholder = (
+            'Placeholder:\n```tool_calls\n'
+            '[{"name": "tool_name", "arguments": {...}}]\n```')
+        for text in (no_name, broken_no_name, unknown_prose, placeholder):
+            with self.subTest(text=text[:28]):
+                demoted = demote_mistagged_tool_reply(text, tools)
+                self.assertIsNotNone(demoted)
+                self.assertIn('```text', demoted)
+                self.assertNotIn('```tool_calls', demoted)
+                self.assertIn(text.split('```tool_calls', 1)[0], demoted)
+
+    def test_demote_leaves_real_tool_attempts_alone(self):
+        tools = [tool('write')]
+        valid = '```tool_calls\n' + self.CALL + '\n```'
+        unknown_alone = (
+            '```tool_calls\n[{"name": "functions.my_fake_tool", '
+            '"arguments": {"someString": "x"}}]\n```')
+        schema = (
+            '```tool_calls\n[{"name": "write", "arguments": '
+            '{"file_path": "/x"}}]\n```')
+        known_broken = (
+            '```tool_calls\n[{"name": "write" "arguments": '
+            '{"file_path": "/x", "content": "y"}}]\n```')
+        mixed = 'Sample:\n```tool_calls\n[ { ... } ]\n```\n' + valid
+        for text in (valid, unknown_alone, schema, known_broken, mixed):
+            with self.subTest(text=text[:40]):
+                self.assertIsNone(demote_mistagged_tool_reply(text, tools))
 
     def test_quoted_blocks_stay_text_for_browser_providers(self):
         block = '```tool_calls\n' + self.CALL + '\n```'
@@ -186,23 +235,23 @@ class ProtocolCorpusTests(unittest.TestCase):
                 content, calls = validate_reply(text, [tool('write')], provider='claude')
                 self.assertIsNone(calls)
 
-    def test_non_browser_providers_keep_the_original_strict_contract(self):
+    def test_legacy_keeps_strict_single_block_for_http_providers(self):
         block = '```tool_calls\n' + self.CALL + '\n```'
-        with patch('server.tool_protocol.provider_uses_browser', return_value=False):
-            with self.assertRaises(ToolCallError):
-                validate_reply('Intro.\n' + block + '\nDone.', [tool('write')], provider='qwen')
-            self.assertIsNone(validate_reply(self.CALL, [tool('write')], provider='qwen')[1])
+        with self.assertRaises(ToolCallError):
+            validate_legacy(
+                'Intro.\n' + block + '\nDone.', [tool('write')], provider='qwen')
+        self.assertIsNone(
+            validate_legacy(self.CALL, [tool('write')], provider='qwen')[1])
 
     def test_quoted_code_never_becomes_an_action(self):
         action = fence('[{"name":"edit","arguments":{"file_path":"x","content":"x"}}]')
+        # find_tool_blocks only nests under ``` fences (not ~~~).
         for text in ('\n'.join('> ' + s for s in action.splitlines()),
-                     '```markdown\n' + action + '\n```',
-                     '~~~markdown\n' + action + '\n~~~'):
-            try:
-                _, calls = validate_reply(text, [tool('edit')])
-            except ToolCallError:
-                continue
-            self.assertIsNone(calls)
+                     '```markdown\n' + action + '\n```'):
+            with self.subTest(text=text[:24]):
+                content, calls = validate_reply(text, [tool('edit')])
+                self.assertIsNone(calls)
+                self.assertEqual(content, text)
 
     def test_recovery_stop_is_normal_completion_and_never_claims_goal_success(self):
         with patch('socket.socket', side_effect=AssertionError('network forbidden')):

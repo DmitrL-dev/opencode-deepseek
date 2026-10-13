@@ -420,7 +420,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(finish=finish, policy=policy, stream=stream):
                         fake = Mock()
                         fake.chat.return_value = Reply(answer, 'fixture:2', finish)
-                        with patch.object(api, 'get_client', return_value=fake), \
+                        with patch.object(api, '_FORMAT_REPAIR', False), \
+                                patch.object(api, 'get_client', return_value=fake), \
                                 patch.object(api, '_continue_reply') as continuation:
                             response = await self.post(tools=FLAT_TOOLS, tool_choice=policy, stream=stream)
                         if finish == 'stop' and policy == 'auto':
@@ -440,7 +441,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(stream=stream):
                 fake = Mock()
                 fake.chat.return_value = Reply(reply, "fake:2")
-                with patch.object(api, "get_client", return_value=fake), \
+                with patch.object(api, "_FORMAT_REPAIR", False), \
+                        patch.object(api, "get_client", return_value=fake), \
                         patch.object(api, "_continue_reply") as continuation, \
                         patch.object(api, "save_tool_failure") as diagnostic, \
                         patch.object(api, "_toolcall_debug", return_value=False), \
@@ -649,7 +651,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_unfinished_json_after_normal_stop_never_requests_continuation(self):
         fake = Mock()
         fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{', "fake:2")
-        with patch.object(api, "get_client", return_value=fake), \
+        with patch.object(api, "_FORMAT_REPAIR", False), \
+                patch.object(api, "get_client", return_value=fake), \
                 patch.object(api, "_MAX_CONTINUATIONS", 3), \
                 patch.object(api, "_continue_reply") as continuation:
             response = await self.post(tools=TOOLS)
@@ -675,7 +678,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_exhausted_continuation_returns_error_instead_of_partial_write(self):
         fake = Mock()
         fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{}},{',"fake:2")
-        with patch.object(api,"get_client",return_value=fake), patch.object(api,"_MAX_CONTINUATIONS",0):
+        with patch.object(api, "_FORMAT_REPAIR", False), \
+                patch.object(api, "get_client", return_value=fake), \
+                patch.object(api, "_MAX_CONTINUATIONS", 0):
             response = await self.post(tools=TOOLS)
         self.assertEqual(response.status_code,400)
         self.assertEqual(fake.chat.call_count,1)

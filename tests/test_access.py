@@ -50,6 +50,23 @@ class AccessTests(unittest.TestCase):
         restarted.resume("deepseek")
         guard.check("deepseek")
 
+    def test_access_pause_opt_out_skips_latch_and_enforcement(self):
+        guard = AccessGuard(self.path, interval=0)
+        with patch.dict(os.environ, {'PROVIDER_ACCESS_PAUSE': '0'}):
+            error = guard.reject("deepseek", ProviderRejected("account_restricted"))
+            self.assertEqual(error.code, "account_restricted")
+            guard.check("deepseek")
+            guard.begin("deepseek").complete()
+        self.assertFalse(self.path.exists() and 'pause' in (
+            json.loads(self.path.read_text()).get('deepseek') or {}))
+        # Default on: a latched pause still blocks until resume.
+        with self.assertLogs("providers.access", level="WARNING"):
+            guard.reject("deepseek", ProviderRejected("quota_exceeded"))
+        with self.assertRaises(ProviderRejected):
+            AccessGuard(self.path, interval=0).check("deepseek")
+        with patch.dict(os.environ, {'PROVIDER_ACCESS_PAUSE': '0'}):
+            AccessGuard(self.path, interval=0).check("deepseek")
+
     def test_new_pause_logs_sanitized_http_shape_not_payload_text(self):
         request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
         response = httpx.Response(

@@ -860,9 +860,14 @@ def _json_tool_error(message: str, exc: json.JSONDecodeError, *, kind=None, tool
 
 
 def looks_truncated(text: str, allowed_names: Optional[Iterable[str]] = None) -> bool:
-    """Continue only an explicitly started tool block missing its closing fence."""
-    stripped = (text or "").strip()
-    return bool(_TOOL_START_RE.match(stripped)) and not _CLOSING_TOOL_FENCE_RE.search(stripped)
+    """Continue when a top-level tool_calls fence was opened and not closed.
+
+    The block may sit anywhere in the reply (browser mid-message prose + fence).
+    Nested/quoted fences are ignored the same way as ``find_tool_blocks``.
+    ``allowed_names`` is kept for call-site compatibility; truncation is
+    fence-shaped only.
+    """
+    return any(not closed for _start, _end, _body, closed in find_tool_blocks(text or ""))
 
 
 # --- OpenAI response shapes -----------------------------------------------
@@ -883,11 +888,13 @@ def _est_tokens(text: str) -> int:
 
 def completion_response(model: str, content: str, prompt: str,
                         conversation_id: str = None, tool_calls: List[dict] = None,
-                        finish_reason: str = "stop") -> dict:
+                        finish_reason: str = "stop", bridge_notice: dict = None) -> dict:
     """A full (non-streaming) OpenAI chat.completion object.
 
     `conversation_id` is an extra top-level field (outside OpenAI's schema) you
-    send back to resume the conversation.
+    send back to resume the conversation. When `bridge_notice` is set (invalid
+    tool under TOOLCALL_INVALID_MODE=text), the message also carries OpenAI
+    `refusal` and a top-level `bridge_notice` for agent-side step failure.
     """
     pt, ct = _est_tokens(prompt), _est_tokens(content or "")
     message: dict = {"role": "assistant", "content": content or ""}
@@ -896,7 +903,10 @@ def completion_response(model: str, content: str, prompt: str,
         message["tool_calls"] = tool_calls
         message["content"] = content or None
         finish = "tool_calls"
-    return {
+    if bridge_notice:
+        # OpenAI refusal: agents that honor it treat the turn as a failed step.
+        message["refusal"] = bridge_notice.get("message") or bridge_notice.get("code")
+    obj = {
         "id": _id(),
         "object": "chat.completion",
         "created": _now(),
@@ -915,11 +925,14 @@ def completion_response(model: str, content: str, prompt: str,
             "total_tokens": pt + ct,
         },
     }
+    if bridge_notice:
+        obj["bridge_notice"] = bridge_notice
+    return obj
 
 
 def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
                conversation_id: str = None, cid: str = None, created: int = None,
-               finish_reason: str = "stop") -> Iterable[str]:
+               finish_reason: str = "stop", bridge_notice: dict = None) -> Iterable[str]:
     """Yield OpenAI SSE frames for an already-computed reply.
 
     Used when the caller has a full result (e.g. it ran a non-streaming request
@@ -949,11 +962,19 @@ def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
                 "type": "function",
                 "function": call["function"],
             }]})
-        yield frame({}, finish="tool_calls", extra={"conversation_id": conversation_id})
+        extra = {"conversation_id": conversation_id}
+        if bridge_notice:
+            extra["bridge_notice"] = bridge_notice
+        yield frame({}, finish="tool_calls", extra=extra)
     else:
         if content:
             yield frame({"content": content})
-        yield frame({}, finish=finish_reason, extra={"conversation_id": conversation_id})
+        if bridge_notice:
+            yield frame({"refusal": bridge_notice.get("message") or bridge_notice.get("code")})
+        extra = {"conversation_id": conversation_id}
+        if bridge_notice:
+            extra["bridge_notice"] = bridge_notice
+        yield frame({}, finish=finish_reason, extra=extra)
     yield "data: [DONE]\n\n"
 
 
