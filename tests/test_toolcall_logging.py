@@ -69,6 +69,9 @@ class ToolcallLoggingTests(unittest.TestCase):
                 ("to_agent", 'data: {"id":"chunk-1","choices":[{"delta":{"content":"hello"}}]}\\n\\n'),
                 ("to_agent", 'data: {"id":"chunk-2","choices":[{"delta":{"content":"```tool_calls id=\\"c1\\"\\n[{\\"name\\":\\"read\\",\\"arguments\\":{\\"file_path\\":\\"a.py\\"}}]\\n```"},"finish_reason":null}]}'),
                 ("to_agent", 'data: {"id":"chunk-3","choices":[{"delta":{"content":"real\\nline"}}]}'),
+                ("add_chat", {"key": "history-key", "used": 0}),
+                ("search_chat", {"key": "history-key"}),
+                ("consume_chat", {"key": "history-key", "used": 1}),
             ):
                 toolcall_logging.record(first, direction, payload)
         text = "".join(chunks[first])
