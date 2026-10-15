@@ -119,6 +119,17 @@ class ToolProtocolTests(unittest.TestCase):
             parse_tool_calls(block([{'name': 'write', 'arguments': {'content': 'data'}}]),
                              {'write'}, flat_argument_tools=tools)
 
+    def test_tool_calls_fence_accepts_metadata_after_label(self):
+        text = ('```tool_calls id="z8q3md"\n'
+                '[{"name":"read","arguments":{"file_path":"server/api.py",'
+                '"offset":1032,"limit":125}}]\n```')
+        content, calls = parse_tool_calls(text, {"read"}, flat_argument_tools=FLAT_TOOLS)
+        self.assertEqual(content, "")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["function"]["name"], "read")
+        self.assertEqual(json.loads(calls[0]["function"]["arguments"]),
+                         {"file_path": "server/api.py", "offset": 1032, "limit": 125})
+
     def test_generic_call_array_can_request_correction_but_never_execute(self):
         payload = [{"name": "bash", "arguments": {"command": "pwd && ls -la"}}]
         for language in ('json', ''):
@@ -316,6 +327,12 @@ class ToolProtocolTests(unittest.TestCase):
             tools_continuation=True, tool_instructions="light")
         self.assertIn("Available tools, given as JSON Schema", first)
         self.assertIn('"name": "write"', first)
+        self.assertIn("Developer: The preceding transcript", first)
+        self.assertIn("User: edit", first)
+        plain = messages_to_prompt(
+            [ChatMessage(role="user", content="edit")], tools=None,
+            tool_instructions="light")
+        self.assertEqual(plain, "edit")
         self.assertIn("Tools remain available from earlier in this chat: write", follow)
         self.assertNotIn("Available tools, given as JSON Schema", follow)
         self.assertNotIn('"required": ["path"]', follow)
@@ -400,7 +417,7 @@ class ToolProtocolTests(unittest.TestCase):
             with self.subTest(mode=mode):
                 sent = messages_to_prompt([result], tools=tools, tools_continuation=True,
                                           tool_instructions=mode, tool_results_compact=True)
-                self.assertEqual(sent, 'Tool result (write): {"ok": true}')
+                self.assertEqual(sent, 'Tool result (write id="call_1"): {"ok": true}')
         # The reminder stays for a plain user message, and nothing changes without the flag.
         user = messages_to_prompt([ChatMessage(role="user", content="again")], tools=tools,
                                   tools_continuation=True, tool_instructions="light",

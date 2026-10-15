@@ -23,8 +23,8 @@ from .schemas import ChatMessage
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
 
 # Only the complete, explicitly requested protocol may produce actions.
-_TOOL_BLOCK_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n(.*?)\r?\n```[ \t]*\Z", re.DOTALL)
-_TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
+_TOOL_BLOCK_RE = re.compile(r"\A```tool_calls(?:[ \t]+[^\r\n]*)?\r?\n(.*?)\r?\n```[ \t]*\Z", re.DOTALL)
+_TOOL_START_RE = re.compile(r"\A```tool_calls(?:[ \t]+[^\r\n]*)?\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
 _TOOL_MARKUP_RE = re.compile(
     r"(?m)^[ \t]*```(?:tool_calls|calls)[ \t]*\r?$"
@@ -68,7 +68,7 @@ def find_tool_blocks(text: str):
     for line in (text or "").splitlines(keepends=True):
         bare = line.rstrip("\r\n")
         if label is None:
-            opened = re.fullmatch(r"[ \t]*```([A-Za-z0-9_-]*)[ \t]*", bare)
+            opened = re.fullmatch(r"[ \t]*```([A-Za-z0-9_-]*)(?:[ \t]+[^\r\n]*)?", bare)
             if opened:
                 label, start, body_start = opened.group(1), pos, pos + len(line)
         elif re.fullmatch(r"[ \t]*```[ \t]*", bare):
@@ -412,8 +412,10 @@ def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = Fa
     if m.role == "tool":
         label = m.name or call_names.get(m.tool_call_id, "tool")
         if compact_results:
-            # The bridge-made call_id means nothing to the provider chat.
-            return f"Tool result ({label}): {content}"
+            # Keep the bridge's call ID visible so the provider can associate the
+            # result with its request when that metadata is available.
+            call_id = f' id="{m.tool_call_id}"' if m.tool_call_id else ""
+            return f"Tool result ({label}{call_id}): {content}"
         return f"Tool ({label}, call_id={m.tool_call_id or 'unknown'}): {content}"
     label = _ROLE_LABELS.get(m.role, m.role.capitalize())
     return f"{label}: {content}"
@@ -491,7 +493,9 @@ def messages_to_prompt(
                 call_names[call["id"]] = fn.get("name", "tool")
     lines.extend(_render_message(m, call_names, bare_results) for m in convo)
     if tool_instr:
-        lines.append(tool_instr)
+        # Mark the injected tool block as a developer instruction at the point
+        # it is actually included; do not change empty/other instruction paths.
+        lines.append("Developer: " + tool_instr)
     if not bare_results:
         lines.append("Assistant:")
     return "\n\n".join(lines)

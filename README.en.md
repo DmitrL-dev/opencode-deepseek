@@ -237,6 +237,16 @@ its context. It is not a local budget or expired session; resetting counters or
 signing in again will not fix it. The bridge preserves history and stops, without
 creating a new chat. Migrating the goal requires a separate manual decision.
 
+Optional `TOOLCALL_LOG=1` enables detailed conversation traces in `logs/` (default
+`0`, disabled). Each conversation gets one file named `MMDDHHmmss-<provider>.log`;
+it accumulates agent requests, assembled provider prompts, raw provider replies,
+final JSON/SSE responses to the agent, and errors, separated by `from agent`, `to provider`,
+`from provider`, and `to agent` markers. Logs can contain source code, secrets and
+tool results; enable only for local diagnosis and do not publish them. Git ignores
+the directory. Implementation checks are offline; live-account exchanges were not
+verified. Continuations are associated via the persisted conversation ID; if a
+provider returns no ID, a later request cannot be linked to this trace.
+
 New mode `TOOL_INSTRUCTIONS_BROWSER=medium` (the default stays `light`, unchanged:
 tool names only). On chat continuations the reminder also includes each tool's
 argument shape (field names, nesting, `?` = optional; no descriptions) so the model

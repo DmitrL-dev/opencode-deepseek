@@ -114,6 +114,8 @@ class ConversationCache:
             os.chmod(self.path, 0o600)
             db = sqlite3.connect(str(self.path), timeout=5)
             db.execute('CREATE TABLE IF NOT EXISTS links (key TEXT PRIMARY KEY, cid TEXT NOT NULL, used INTEGER NOT NULL, steps INTEGER NOT NULL)')
+            db.execute('CREATE TABLE IF NOT EXISTS trace_links (cid TEXT PRIMARY KEY, trace_path TEXT NOT NULL)')
+
             db.execute('BEGIN IMMEDIATE')
             if 'reservation' not in [row[1] for row in db.execute('PRAGMA table_info(links)')]:
                 db.execute('ALTER TABLE links ADD COLUMN reservation TEXT')
@@ -239,6 +241,31 @@ class ConversationCache:
         key = self.key(original, [*original.messages, assistant], scope)
         with self.connection() as db:
             db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, 0, ?) ON CONFLICT(key) DO UPDATE SET used=1, reservation=NULL', (key, reply.conversation_id, steps + 1))
+
+    def trace_path(self, conversation_id):
+        if not conversation_id:
+            return None
+        try:
+            with self.connection() as db:
+                row = db.execute('SELECT trace_path FROM trace_links WHERE cid=?',
+                                 (conversation_id,)).fetchone()
+            return row[0] if row else None
+        except ConversationStateError:
+            # Existing conversations should not fail just because tracing state is unavailable.
+            return None
+
+    def remember_trace(self, conversation_id, trace_path):
+        if not conversation_id or not trace_path:
+            return
+        try:
+            with self.connection() as db:
+                db.execute('INSERT INTO trace_links (cid,trace_path) VALUES (?, ?) '
+                           'ON CONFLICT(cid) DO UPDATE SET trace_path=excluded.trace_path',
+                           (conversation_id, str(trace_path)))
+        except ConversationStateError:
+            # Tracing is observational; preserve the provider response if unavailable.
+            return
+
 
 
 conversation_cache = ConversationCache(ROOT / 'session' / 'deepseek-conversations.sqlite3',

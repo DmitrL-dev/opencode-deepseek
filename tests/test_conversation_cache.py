@@ -17,6 +17,17 @@ from tests.test_tools import block, FLAT_TOOLS
 
 
 class ConversationTests(unittest.TestCase):
+    def test_trace_path_follows_provider_conversation_across_requests(self):
+        trace = self.cache.path.parent / 'trace.log'
+        self.cache.remember_trace(self.reply.conversation_id, trace)
+        self.assertEqual(self.cache.trace_path(self.reply.conversation_id), str(trace))
+        self.assertIsNone(self.cache.trace_path('unknown:2'))
+
+    def test_trace_path_survives_conversation_cache_restart(self):
+        trace = self.cache.path.parent / 'trace.log'
+        self.cache.remember_trace(self.reply.conversation_id, trace)
+        restarted = ConversationCache(self.cache.path)
+        self.assertEqual(restarted.trace_path(self.reply.conversation_id), str(trace))
     def test_local_stop_preserves_original_results_and_single_use_claim(self):
         from server.recovery_status import RECOVERY_STOP_TEXT
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
