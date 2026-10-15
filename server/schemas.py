@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, PrivateAttr, field_validator
 
 from .config import DEFAULT_MODEL
 
@@ -48,6 +48,8 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
+    _toolcall_log_path: object = PrivateAttr(default=None)
+
     model: str = DEFAULT_MODEL
     messages: List[ChatMessage]
     stream: bool = False

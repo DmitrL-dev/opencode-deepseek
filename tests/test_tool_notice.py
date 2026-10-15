@@ -211,8 +211,10 @@ class ToolNoticeTests(unittest.TestCase):
         (_, again, again_calls), chat = self.chat([Reply('You chose Tea.', 'claude:2')], follow, 'unused')
         self.assertIsNone(again_calls)
         self.assertEqual(again, 'You chose Tea.')
-        # Only the answer goes to the provider: no reminder, no echoed call, no ids.
-        self.assertEqual(chat.call_args.args[0], f'Tool result (ask_user_question): {answer}')
+        # Keep the call ID from history while sending only the answer (no echoed call).
+        self.assertEqual(
+            chat.call_args.args[0],
+            f"Tool result (ask_user_question id=\"{calls[0]['id']}\"): {answer}")
         self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
 
     def test_results_of_one_tool_keep_the_identifier_mapping(self):

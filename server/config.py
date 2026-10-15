@@ -4,6 +4,7 @@ import os
 import json
 import re
 
+from providers.access import PROVIDERS
 from settings import load_environment
 from providers.kimi_http import direct_enabled
 from providers.kimi_models import PUBLIC_MODELS as KIMI_MODELS
@@ -206,8 +207,19 @@ def canonical_model(name: str):
 
 
 def model_provider(name: str) -> str:
+    """Resolve a model's provider; preserve known provider IDs when disabled."""
     bare = canonical_model(name)
-    return _bare_owner(bare if bare is not None else name)
+    if bare is not None:
+        return _bare_owner(bare)
+    if isinstance(name, str) and "/" in name:
+        owner, _, bare = name.partition("/")
+        if bare in MODEL_MAP and _bare_owner(bare) == owner:
+            return owner
+    if isinstance(name, str) and name.endswith("-web"):
+        provider = name[:-4]
+        if provider in PROVIDERS:
+            return provider
+    return _bare_owner(name)
 
 
 def is_known_model(name: str) -> bool:
