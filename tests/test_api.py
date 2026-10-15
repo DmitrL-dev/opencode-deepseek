@@ -31,6 +31,21 @@ def auth_error():
     return httpx.HTTPStatusError("token expired",request=request,response=response)
 
 
+class ProviderPauseMessageTests(unittest.TestCase):
+    def test_disabled_pause_message_does_not_suggest_resume_command(self):
+        exc = ProviderRejected('upstream_failure', source='upstream')
+        with patch.dict('os.environ', {'PROVIDER_ACCESS_PAUSE': '0'}):
+            message = api._provider_pause_message(exc, 'mistral-web')
+        self.assertIn('Provider blocking is disabled', message)
+        self.assertNotIn('providers.access resume', message)
+
+    def test_enabled_pause_message_explains_resume_command(self):
+        exc = ProviderRejected('upstream_failure', source='upstream')
+        with patch.dict('os.environ', {'PROVIDER_ACCESS_PAUSE': '1'}):
+            message = api._provider_pause_message(exc, 'mistral-web')
+        self.assertIn('providers.access resume mistral', message)
+
+
 class TextStream:
     conversation_id = "fake:2"
     finish_reason = "stop"

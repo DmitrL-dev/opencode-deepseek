@@ -684,6 +684,7 @@ def _sse_error(message: str, err_type: str = "server_error") -> str:
 def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
     """Client-facing pause text. Never includes upstream bodies or secrets."""
     provider = model_provider(model)
+    pause_enabled = os.getenv('PROVIDER_ACCESS_PAUSE', '1') == '1'
     resume = f"python -m providers.access resume {provider}"
     if exc.code in ('account_restricted', 'account_muted', 'account_banned',
                     'ip_restricted', 'gateway_challenge', 'pow_rejected'):
@@ -707,6 +708,13 @@ def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
             f"(pause={exc.code}): {exc} "
             f"No request was sent to the upstream provider. "
             f"Inspect the normal website, then clear the pause with: `{resume}`"
+        )
+    if not pause_enabled:
+        return (
+            f"Upstream provider `{provider}` refused this request "
+            f"(mapped={exc.code}): {exc} "
+            "Provider blocking is disabled (`PROVIDER_ACCESS_PAUSE=0`); "
+            "no `providers.access resume` command is required."
         )
     # Fresh allowlisted upstream refusal that just latched a durable pause.
     return (
