@@ -4,6 +4,7 @@ Used only when TOOLCALL_LEGACY=0. Main-era validate lives in tool_protocol.py.
 """
 
 import re
+from typing import Optional
 
 from .openai_format import (
     ToolCallError, enforce_tool_choice, find_tool_blocks, parse_tool_calls,
@@ -48,7 +49,7 @@ def _rewrite_tool_calls_fences_to_text(text: str, blocks) -> str:
     return result
 
 
-def demote_mistagged_tool_reply(text, tools) -> str | None:
+def demote_mistagged_tool_reply(text, tools) -> Optional[str]:
     """If a reply is advice mistagged as tool_calls, return rewritten text.
 
     Demote (```tool_calls → ```text) when every top-level tool fence is either:
