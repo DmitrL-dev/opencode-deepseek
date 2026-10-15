@@ -51,17 +51,23 @@ class AccessTests(unittest.TestCase):
         restarted.resume("deepseek")
         guard.check("deepseek")
 
-    def test_access_pause_opt_out_skips_latch_and_enforcement(self):
+    def test_access_pause_opt_out_skips_latch_and_all_shared_blocking(self):
         guard = AccessGuard(self.path, interval=0)
+        # Simulate state latched by a previous server run with the default on.
+        guard.reject("deepseek", ProviderRejected("account_restricted"))
         with patch.dict(os.environ, {'PROVIDER_ACCESS_PAUSE': '0'}):
-            error = guard.reject("deepseek", ProviderRejected("account_restricted"))
-            self.assertEqual(error.code, "account_restricted")
+            # The opt-out means callers need not run `resume` to clear either a
+            # stored pause or an unresolved pending owner.
             guard.check("deepseek")
-            guard.begin("deepseek").complete()
-        self.assertFalse(self.path.exists() and 'pause' in (
-            json.loads(self.path.read_text()).get('deepseek') or {}))
-        # Default on: a latched pause still blocks until resume.
+            attempt = guard.begin("deepseek")
+            attempt.dispatch()
+            attempt.complete()
+            error = guard.reject("deepseek", ProviderRejected("quota_exceeded"))
+            self.assertEqual(error.code, "quota_exceeded")
+            self.assertEqual(guard.status(), {})
+        # Default on: a newly latched pause still blocks until resume.
         with self.assertLogs("providers.access", level="WARNING"):
+            guard.resume("deepseek")
             guard.reject("deepseek", ProviderRejected("quota_exceeded"))
         with self.assertRaises(ProviderRejected):
             AccessGuard(self.path, interval=0).check("deepseek")

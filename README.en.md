@@ -509,7 +509,10 @@ DeepSeek defaults are **12/60 generations, 3/6 new chats and 40/200 HTTP request
 per hour/day**, with a shared 20 accepted replies per conversation
 (`CONVERSATION_MAX_REPLIES`) and a 30-second interval. `DEEPSEEK_MAX_*` budget
 ceilings and `CONVERSATION_MAX_REPLIES` belong to the bridge process environment.
-Raising a local ceiling does not raise the website's allowance.
+Raising a local ceiling does not raise the website's allowance. `PROVIDER_ACCESS_PAUSE=0`
+disables provider pause and pending blocks, including persisted ones; it does not
+bypass budgets, provider quotas or conversation-history safeguards, and can allow
+retries after an uncertain outcome.
 [Configuration and error guide](docs/HARNESS.en.md#local-limits-and-errors).
 
 ## Connect OpenCode

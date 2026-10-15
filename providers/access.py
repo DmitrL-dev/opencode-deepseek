@@ -28,10 +28,12 @@ PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'ge
 
 
 def _access_pause_enabled() -> bool:
-    """Durable pause latch (needs ``python -m providers.access resume``). Default on.
+    """Whether durable provider errors block future attempts; default on.
 
-    ``PROVIDER_ACCESS_PAUSE=0`` skips latching and enforcing those pauses. For local
-    testing only; at your own risk — may keep hitting a restricted account.
+    ``PROVIDER_ACCESS_PAUSE=0`` ignores persisted pause/pending blocks and does
+    not latch new provider failures. Provider/account quotas, local budgets,
+    active-attempt ownership, and conversation-history safety checks remain.
+    This opt-out can retry after an uncertain outcome and may duplicate requests.
     """
     return os.getenv('PROVIDER_ACCESS_PAUSE', '1') == '1'
 MESSAGES = {
@@ -384,13 +386,15 @@ class AccessGuard:
     def check(self, provider, owner=None, queued=False):
         if provider not in PROVIDERS:
             raise ValueError('Unknown provider')
-        if provider in self._failed:
+        if _access_pause_enabled() and provider in self._failed:
             raise ProviderRejected('safety_state_unavailable')
         active = current_attempt(provider)
         owner = owner or (active.id if active is not None and active.guard is self else None)
         with self._state() as state:
             record = state.get(provider, {})
-            if record.get('pause') and _access_pause_enabled():
+            if not _access_pause_enabled():
+                return
+            if record.get('pause'):
                 raise ProviderRejected(record['pause'], source='local_pause')
             if owner is not None and record.get('pending') != owner:
                 raise ProviderRejected('upstream_failure')
@@ -403,12 +407,14 @@ class AccessGuard:
         self.check(provider)
         with self._state() as state:
             record = state.setdefault(provider, {})
-            paused = bool(record.get("pause") and _access_pause_enabled())
-            if paused or record.get("pending"):
-                raise ProviderRejected(
-                    record.get("pause") or "upstream_failure",
-                    source='local_pause' if paused else 'upstream',
-                )
+            if _access_pause_enabled():
+                paused = bool(record.get("pause"))
+                pending = bool(record.get("pending"))
+                if paused or pending:
+                    raise ProviderRejected(
+                        record.get("pause") or "upstream_failure",
+                        source='local_pause' if paused else 'upstream',
+                    )
             record.update(pending=attempt.id, dispatched=False)
             try:
                 self._save(state)  # Write-ahead: failure here prohibits all dispatch.
@@ -538,6 +544,8 @@ class AccessGuard:
 
     def status(self):
         with self._state() as state:
+            if not _access_pause_enabled():
+                return {}
             return {name: ('safety_state_unavailable' if name in self._failed else record.get('pause') or 'upstream_failure')
                     for name, record in state.items() if name in self._failed or record.get('pause') or record.get('pending')}
 
@@ -600,11 +608,17 @@ class Attempt:
                 validate()
             with self.guard._state() as state:
                 record = state[self.provider]
-                if record.get('pending') != self.id or record.get('pause'):
-                    raise ProviderRejected(
-                        record.get('pause') or 'upstream_failure',
-                        source='local_pause' if record.get('pause') else 'upstream',
-                    )
+                if _access_pause_enabled():
+                    paused = bool(record.get('pause'))
+                    if record.get('pending') != self.id or paused:
+                        raise ProviderRejected(
+                            record.get('pause') or 'upstream_failure',
+                            source='local_pause' if paused else 'upstream',
+                        )
+                elif record.get('pending') != self.id:
+                    # Even with the opt-out, an individual live attempt must
+                    # still own its write-ahead dispatch record.
+                    raise ProviderRejected('upstream_failure')
                 delay = 0 if self.dispatched else record.get('next_at', 0) - time.time()
                 if self.provider == 'deepseek':
                     delay = max(delay, record.get('next_http_at', 0) - time.time())
