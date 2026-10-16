@@ -857,10 +857,24 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             attempt.complete()
 
         trace = req._toolcall_log_path
-        reply_chunks = [chunk for chunk in remaining() if chunk]
-        reply_text = "".join(reply_chunks)
-        record_toolcall_log(trace, "from_provider", reply_text)
-        for frame in stream_chunks(req.model, stream, iterator=reply_chunks):
+        reply_chunks = []
+        first_frame = True
+        for chunk in remaining():
+            if not chunk:
+                continue
+            reply_chunks.append(chunk)
+            # Keep pulling the provider iterator on this worker, but expose each
+            # chunk immediately so an open stream does not wait for completion.
+            record_toolcall_log(trace, "from_provider", chunk)
+            for frame in stream_chunks(
+                    req.model, stream,
+                    iterator=([chunk] if first_frame else ()),
+                    include_role=first_frame, include_final=False):
+                record_toolcall_log(trace, "to_agent", frame)
+                yield frame
+            first_frame = False
+        for frame in stream_chunks(req.model, stream, iterator=(),
+                                   include_role=first_frame, include_final=True):
             record_toolcall_log(trace, "to_agent", frame)
             yield frame
     except LoginRequired as exc:

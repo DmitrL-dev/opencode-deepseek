@@ -986,7 +986,8 @@ def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
 
 
 def stream_chunks(model: str, stream: Iterable[str], tool_supported: bool = False,
-                  iterator: Iterable[str] = None) -> Iterable[str]:
+                  iterator: Iterable[str] = None, *, include_role: bool = True,
+                  include_final: bool = True) -> Iterable[str]:
     """Yield OpenAI SSE lines (`data: {...}\\n\\n`) for a streamed completion.
 
     `stream` is the client's stream object; after it's consumed we read its
@@ -1022,12 +1023,15 @@ def stream_chunks(model: str, stream: Iterable[str], tool_supported: bool = Fals
                               finish_reason=getattr(stream, "finish_reason", "stop"))
         return
 
-    # First frame announces the assistant role.
-    yield frame({"role": "assistant", "content": ""})
+    # First frame announces the assistant role unless already sent by a caller
+    # that streams provider chunks incrementally.
+    if include_role:
+        yield frame({"role": "assistant", "content": ""})
     for d in it:
         if d:
             yield frame({"content": d})
-    conversation_id = getattr(stream, "conversation_id", None)
-    yield frame({}, finish=getattr(stream, "finish_reason", "stop"),
-                extra={"conversation_id": conversation_id})
-    yield "data: [DONE]\n\n"
+    if include_final:
+        conversation_id = getattr(stream, "conversation_id", None)
+        yield frame({}, finish=getattr(stream, "finish_reason", "stop"),
+                    extra={"conversation_id": conversation_id})
+        yield "data: [DONE]\n\n"
