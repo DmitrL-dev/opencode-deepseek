@@ -23,7 +23,8 @@ class ConversationTests(unittest.TestCase):
         request = ChatCompletionRequest(
             model='deepseek-chat', tools=FLAT_TOOLS,
             messages=[ChatMessage(role='user', content='PRIVATE PROMPT CONTENT')])
-        with patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')) as new_chat, \
+        with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
+             patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')) as new_chat, \
              patch.object(toolcall_logging, 'record') as record:
             self.cache.remember(request, self.reply, 'assistant PRIVATE TEXT', None, 0,
                                 scope='isolated-test')
@@ -38,7 +39,8 @@ class ConversationTests(unittest.TestCase):
                 request, [*request.messages, ChatMessage(role='assistant', content='assistant PRIVATE TEXT')]))
             self.assertEqual(record.call_args.args[1], 'add_chat')
         request = request.model_copy(update={'messages': self.history()})
-        with patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')), \
+        with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
+             patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')), \
              patch.object(toolcall_logging, 'record') as record:
             self.cache.prepare(request, scope='isolated-test')
             searched = record.call_args.args[2]
