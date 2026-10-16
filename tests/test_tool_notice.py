@@ -204,18 +204,23 @@ class ToolNoticeTests(unittest.TestCase):
         (_, content, calls), _ = self.chat([Reply(text, 'claude:1')], self.req)
         self.assertEqual(content, 'Let me ask.\n\nThat is the question.')
         answer = json.dumps({"answers": [{"id": "q1", "selected": ["Tea"]}]})
-        history = [*self.req.messages,
-                   ChatMessage(role='assistant', content=content, tool_calls=calls),
-                   ChatMessage(role='tool', tool_call_id=calls[0]['id'], content=answer)]
-        follow = self.req.model_copy(update={'messages': history})
-        (_, again, again_calls), chat = self.chat([Reply('You chose Tea.', 'claude:2')], follow, 'unused')
-        self.assertIsNone(again_calls)
-        self.assertEqual(again, 'You chose Tea.')
-        # Keep the call ID from history while sending only the answer (no echoed call).
-        self.assertEqual(
-            chat.call_args.args[0],
-            f"Tool result (ask_user_question id=\"{calls[0]['id']}\"): {answer}")
-        self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
+
+        for call_id in (calls[0]['id'], None):
+            with self.subTest(call_id=call_id):
+                history = [*self.req.messages,
+                           ChatMessage(role='assistant', content=content, tool_calls=calls),
+                           ChatMessage(role='tool', tool_call_id=call_id, content=answer)]
+                follow = self.req.model_copy(update={'messages': history})
+                (_, again, again_calls), chat = self.chat(
+                    [Reply('You chose Tea.', 'claude:2')], follow, 'unused')
+                self.assertIsNone(again_calls)
+                self.assertEqual(again, 'You chose Tea.')
+                # Include the ID only when the tool result carries one.
+                id_suffix = f' id="{call_id}"' if call_id else ''
+                self.assertEqual(
+                    chat.call_args.args[0],
+                    f'Tool result (ask_user_question{id_suffix}): {answer}')
+                self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
 
     def test_results_of_one_tool_keep_the_identifier_mapping(self):
         two = block([{"name": "read_file", "arguments": {"path": "a"}},
