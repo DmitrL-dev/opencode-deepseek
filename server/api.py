@@ -847,24 +847,18 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
         stream = _open_stream(client, prompt, req, model_type)
         stream.access_attempt = attempt
         iterator = iter(stream)
-        first = next(iterator, _MISSING)
-
-        def remaining():
-            if first is not _MISSING:
-                yield first
-            yield from iterator
-            # Verify and clear the journal before yielding final SSE frames.
-            attempt.complete()
-
         trace = req._toolcall_log_path
         reply_chunks = []
         first_frame = True
-        for chunk in remaining():
+        while True:
+            chunk = next(iterator, _MISSING)
+            if chunk is _MISSING:
+                # Verify and clear the journal before emitting final SSE.
+                attempt.complete()
+                break
             if not chunk:
                 continue
             reply_chunks.append(chunk)
-            # Keep pulling the provider iterator on this worker, but expose each
-            # chunk immediately so an open stream does not wait for completion.
             record_toolcall_log(trace, "from_provider", chunk)
             for frame in stream_chunks(
                     req.model, stream,
@@ -873,10 +867,12 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
                 record_toolcall_log(trace, "to_agent", frame)
                 yield frame
             first_frame = False
+        record_toolcall_log(trace, "from_provider", "".join(reply_chunks))
         for frame in stream_chunks(req.model, stream, iterator=(),
                                    include_role=first_frame, include_final=True):
             record_toolcall_log(trace, "to_agent", frame)
             yield frame
+
     except LoginRequired as exc:
         _invalidate_client(model_provider(req.model), client)
         trace = req._toolcall_log_path
