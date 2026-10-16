@@ -198,9 +198,8 @@ class ConversationCache:
             tail = [tail[0].model_copy(update={
                 'content': provider_tool_error_followup(
                     notice, _text_of(tail[0].content))}), *tail[1:]]
-        # Browser providers: one result per tool name is unambiguous by name, so
-        # the result is sent bare. Results of the same tool still need the
-        # identifier mapping (and keep their call_id labels).
+        # Multiple results of the same tool name need a call-ID mapping block;
+        # compact rendering still preserves each result's own tool_call_id.
         names = [calls[cid]['function']['name'] for cid in result_ids]
         unambiguous = compact_results and len(set(names)) == len(names)
         if result_ids and not unambiguous:

@@ -729,7 +729,7 @@ def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
             f"Upstream provider `{provider}` refused this request "
             f"(mapped={exc.code}): {exc} "
             "Provider blocking is disabled (`PROVIDER_ACCESS_PAUSE=0`); "
-            "no `providers.access resume` command is required."
+            "no manual pause reset is required."
         )
     # Fresh allowlisted upstream refusal that just latched a durable pause.
     return (
@@ -856,9 +856,10 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             attempt.complete()
 
         trace = req._toolcall_log_path
-        reply_text = "".join(chunk for chunk in remaining() if chunk)
+        reply_chunks = [chunk for chunk in remaining() if chunk]
+        reply_text = "".join(reply_chunks)
         record_toolcall_log(trace, "from_provider", reply_text)
-        for frame in stream_chunks(req.model, stream, iterator=[reply_text]):
+        for frame in stream_chunks(req.model, stream, iterator=reply_chunks):
             record_toolcall_log(trace, "to_agent", frame)
             yield frame
     except LoginRequired as exc:

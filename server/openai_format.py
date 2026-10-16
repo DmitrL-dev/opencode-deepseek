@@ -412,8 +412,7 @@ def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = Fa
     if m.role == "tool":
         label = m.name or call_names.get(m.tool_call_id, "tool")
         if compact_results:
-            # Keep the bridge's call ID visible so the provider can associate the
-            # result with its request when that metadata is available.
+            # Preserve the request's tool_call_id so the provider can bind this result.
             call_id = f' id="{m.tool_call_id}"' if m.tool_call_id else ""
             return f"Tool result ({label}{call_id}): {content}"
         return f"Tool ({label}, call_id={m.tool_call_id or 'unknown'}): {content}"
