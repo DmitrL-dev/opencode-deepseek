@@ -308,8 +308,11 @@ class AccessGuard:
             raise ValueError('Invalid safety state')
         records = {}
         for provider, item in state.items():
+            # Ignore records for removed providers. Preserve active provider
+            # records, but do not let stale keys make the whole safety file
+            # unavailable after a provider is retired or renamed.
             if provider not in PROVIDERS:
-                raise ValueError('Unknown provider')
+                continue
             # Upgrade the initial flat pause format without losing restrictions.
             if isinstance(item, str) and item in MESSAGES:
                 item = {'pause': item}

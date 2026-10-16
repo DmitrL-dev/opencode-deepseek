@@ -182,6 +182,17 @@ class AccessTests(unittest.TestCase):
         with self.assertRaises(ProviderRejected):
             guard.check("qwen")
 
+    def test_removed_provider_records_are_ignored(self):
+        self.path.write_text(json.dumps({
+            'qwen': {'next_at': 10},
+            'removed-provider': {'pause': 'upstream_failure', 'pending': 'f' * 32,
+                                 'dispatched': True},
+        }))
+        guard = AccessGuard(self.path, interval=0)
+        guard.check('qwen')
+        with guard._state() as state:
+            self.assertEqual(set(state), {'qwen'})
+
     def test_pacing_can_be_cancelled_without_starting_another_attempt(self):
         guard = AccessGuard(path=None, interval=60)
         guard.wait("qwen")
