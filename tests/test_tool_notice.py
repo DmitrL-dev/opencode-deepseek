@@ -215,7 +215,7 @@ class ToolNoticeTests(unittest.TestCase):
         self.assertEqual(
             chat.call_args.args[0],
             f"Tool result (ask_user_question id=\"{calls[0]['id']}\"): {answer}")
-        self.assertEqual(chat.call_args.args[1].conversation_id, 'grok:1')
+        self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
 
     def test_results_of_one_tool_keep_the_identifier_mapping(self):
         two = block([{"name": "read_file", "arguments": {"path": "a"}},
