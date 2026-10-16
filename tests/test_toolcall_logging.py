@@ -64,6 +64,8 @@ class ToolcallLoggingTests(unittest.TestCase):
                 ("to_provider", "prompt\nexact"),
                 ("from_provider", "reply"),
                 ("to_agent", '{"choices": []}'),
+                ("to_agent", {"choices": [], "content": "Привет"}),
+                ("to_agent", type("Response", (), {"body": b'{"error":{"message":"nope"}}'})()),
                 ("to_agent", 'data: {"id":"chunk-1","choices":[{"delta":{"content":"hello"}}]}\\n\\n'),
                 ("to_agent", 'data: {"id":"chunk-2","choices":[{"delta":{"content":"```tool_calls id=\\"c1\\"\\n[{\\"name\\":\\"read\\",\\"arguments\\":{\\"file_path\\":\\"a.py\\"}}]\\n```"},"finish_reason":null}]}'),
                 ("to_agent", 'data: {"id":"chunk-3","choices":[{"delta":{"content":"real\\nline"}}]}'),
@@ -75,6 +77,8 @@ class ToolcallLoggingTests(unittest.TestCase):
         self.assertIn("prompt\nexact\n", text)
         self.assertIn('{\n  "messages": []\n}', text)
         self.assertIn('{\n  "choices": []\n}', text)
+        self.assertIn('{\n  "choices": [],\n  "content": "Привет"\n}', text)
+        self.assertIn('{\n  "error": {\n    "message": "nope"\n  }\n}', text)
         self.assertIn('data: {\n  "id": "chunk-1",\n  "choices": [\n    {\n      "delta": {\n        "content": "hello"\n      }\n    }\n  ]\n}', text)
         self.assertIn('data: {\n  "id": "chunk-2",\n  "choices": [', text)
         self.assertIn('```tool_calls id=\\"c1\\"\\n[{\\"name\\":\\"read\\",\\"arguments\\":{\\"file_path\\":\\"a.py\\"}}]\\n```', text)

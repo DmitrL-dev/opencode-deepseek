@@ -129,18 +129,31 @@ def _format_payload(text: str) -> str:
     return text
 
 
+def _payload_text(content) -> str:
+    """Normalize boundary payloads into text without Python repr for JSON objects."""
+    if isinstance(content, bytes):
+        return content.decode("utf-8", errors="replace")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=False)
+
+    # Starlette responses (JSONResponse, etc.) carry their serialized wire body.
+    body = getattr(content, "body", None)
+    if isinstance(body, bytes):
+        return body.decode("utf-8", errors="replace")
+    if isinstance(body, str):
+        return body
+    return str(content)
+
+
 def record(path: Path | str | None, direction: str, content) -> None:
     """Append one exact boundary payload, with JSON prettified for readability."""
     if path is None:
         return
     if direction not in SEPARATOR:
         raise ValueError("Unknown tool-call trace direction")
-    if isinstance(content, bytes):
-        text = content.decode("utf-8", errors="replace")
-    elif isinstance(content, str):
-        text = content
-    else:
-        text = str(content)
+    text = _payload_text(content)
     text = _format_payload(text)
     block = f"{SEPARATOR[direction]}\n{text}"
     if not block.endswith("\n"):

@@ -1048,7 +1048,7 @@ async def _chat_completions(req: ChatCompletionRequest):
     record_toolcall_log(trace, "from_agent", req.model_dump_json(exclude_none=True))
     if not req.messages:
         response = _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
 
     try:
@@ -1056,7 +1056,7 @@ async def _chat_completions(req: ChatCompletionRequest):
     except ValueError as exc:
         record_toolcall_error(trace, "from_agent", exc)
         response = _error(str(exc), status=400, err_type="invalid_request_error")
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
 
     if not is_known_model(req.model):
@@ -1066,7 +1066,7 @@ async def _chat_completions(req: ChatCompletionRequest):
             f"{', '.join(advertised_model_ids())}",
             status=404, err_type="model_not_found",
         )
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
 
     try:
@@ -1076,12 +1076,12 @@ async def _chat_completions(req: ChatCompletionRequest):
     except ProviderRejected as exc:
         record_toolcall_error(trace, "from_provider", exc)
         response = _provider_rejected_response(exc, req.model)
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
     except Exception as exc:
         record_toolcall_error(trace, "from_provider", exc)
         response = _error(_completion_failure_message(exc), status=500)
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
 
     if req.conversation_id:
@@ -1096,7 +1096,7 @@ async def _chat_completions(req: ChatCompletionRequest):
         except ValueError as exc:
             record_toolcall_error(trace, "from_agent", exc)
             response = _error(str(exc), status=400, err_type="invalid_request_error")
-            record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+            record_toolcall_log(trace, "to_agent", response)
             return response
 
     try:
@@ -1107,7 +1107,7 @@ async def _chat_completions(req: ChatCompletionRequest):
     except ValueError as exc:
         record_toolcall_error(trace, "from_agent", exc)
         response = _error(str(exc), status=400, err_type="invalid_request_error")
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
 
     # A thread's model is fixed when it's created, so on resume we ignore `model`
@@ -1134,22 +1134,22 @@ async def _chat_completions(req: ChatCompletionRequest):
     except LoginRequired as e:
         record_toolcall_error(trace, "from_provider", e)
         response = _error(str(e), status=401, err_type="login_required")
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
     except ToolCallError as e:
         record_toolcall_error(trace, "from_provider", e)
         response = _error(str(e), status=400, err_type="invalid_tool_response")
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
     except ProviderRejected as e:
         record_toolcall_error(trace, "from_provider", e)
         response = _provider_rejected_response(e, req.model)
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
     except Exception as e:
         record_toolcall_error(trace, "from_provider", e)
         response = _error(_completion_failure_message(e), status=400)
-        record_toolcall_log(trace, "to_agent", response.body.decode("utf-8", errors="replace"))
+        record_toolcall_log(trace, "to_agent", response)
         return response
 
     result = completion_response(
@@ -1161,5 +1161,6 @@ async def _chat_completions(req: ChatCompletionRequest):
         conversation_cache.remember_trace(reply.conversation_id, trace)
     elif trace is not None and req.conversation_id:
         conversation_cache.remember_trace(req.conversation_id, trace)
-    record_toolcall_log(trace, "to_agent", result.body.decode("utf-8", errors="replace"))
+
+    record_toolcall_log(trace, "to_agent", result)
     return result
