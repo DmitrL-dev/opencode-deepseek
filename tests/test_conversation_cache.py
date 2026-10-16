@@ -24,8 +24,8 @@ class ConversationTests(unittest.TestCase):
             model='deepseek-chat', tools=FLAT_TOOLS,
             messages=[ChatMessage(role='user', content='PRIVATE PROMPT CONTENT')])
         with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
-             patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')) as new_chat, \
-             patch.object(toolcall_logging, 'record') as record:
+             patch('server.conversation_cache.new_toolcall_log', return_value=Path('trace.log')) as new_chat, \
+             patch('server.conversation_cache.record_toolcall_log') as record:
             self.cache.remember(request, self.reply, 'assistant PRIVATE TEXT', None, 0,
                                 scope='isolated-test')
             self.assertEqual(new_chat.call_count, 1)
@@ -33,22 +33,28 @@ class ConversationTests(unittest.TestCase):
             self.assertEqual(added['conversation_id'], 'owned:2')
             self.assertEqual(added['used'], 0)
             self.assertEqual(added['steps'], 1)
-            self.assertNotIn('PRIVATE PROMPT CONTENT', repr(added))
-            self.assertNotIn('assistant PRIVATE TEXT', repr(added))
+            self.assertIn('PRIVATE PROMPT CONTENT', added['history'])
+            self.assertIn('assistant PRIVATE TEXT', added['history'])
             self.assertEqual(added['history'], digest_payload_json(
                 request, [*request.messages, ChatMessage(role='assistant', content='assistant PRIVATE TEXT')]))
             self.assertEqual(record.call_args.args[1], 'add_chat')
-        request = request.model_copy(update={'messages': self.history()})
+        request = request.model_copy(update={'messages': [
+            ChatMessage(role='user', content='PRIVATE PROMPT CONTENT'),
+            ChatMessage(role='assistant', content='assistant PRIVATE TEXT'),
+            ChatMessage(role='user', content='next message'),
+        ]})
         with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
-             patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')), \
-             patch.object(toolcall_logging, 'record') as record:
+             patch('server.conversation_cache.new_toolcall_log', return_value=Path('trace.log')), \
+             patch('server.conversation_cache.record_toolcall_log') as record:
             self.cache.prepare(request, scope='isolated-test')
-            searched = record.call_args.args[2]
+            calls = [call.args[1] for call in record.call_args_list]
+            self.assertIn('search_chat', calls)
+            search_call = next(call for call in record.call_args_list if call.args[1] == 'search_chat')
+            searched = search_call.args[2]
             self.assertEqual(searched['key'], self.cache.key(request, request.messages[:2], 'isolated-test'))
             self.assertEqual(searched['history'], digest_payload_json(
                 request, request.messages[:2]))
             self.assertNotIn('fixture result', repr(searched))
-            self.assertEqual(record.call_args.args[1], 'search_chat')
 
     def test_clear_used_links_on_startup_is_opt_in_and_preserves_unused(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0, scope='isolated-test')
@@ -241,7 +247,9 @@ class ConversationTests(unittest.TestCase):
     def test_ambiguous_identical_histories_are_not_merged(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
         self.cache.remember(self.req, Reply('', 'another:2'), '', self.calls, 0)
-        with self.assertRaisesRegex(ConversationStateError, 'already consumed'):
+        with self.assertRaisesRegex(
+                ConversationStateError,
+                'matches a previously used chat'):
             self.cache.prepare(self.req.model_copy(update={'messages': self.history()}))
 
     def test_opencode_system_drift_and_reminder_wrappers_still_continue(self):

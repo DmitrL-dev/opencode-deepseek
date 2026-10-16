@@ -182,6 +182,18 @@ class ConversationCache:
             raise ConversationStateError('Ambiguous continuation; no new chat was created.')
         calls = {call.get('id'): call for call in (req.messages[end - 1].tool_calls or [])}
         result_ids = [m.tool_call_id for m in tail if m.role == 'tool']
+        # OpenAI-compatible clients may omit tool_call_id when there was only
+        # one delivered tool call. Bind that single result to the only call.
+        if result_ids == [None] and len(calls) == 1:
+            bound_id = next(iter(calls))
+            result_ids = [bound_id]
+            normalized_messages = [
+                m.model_copy(update={'tool_call_id': bound_id})
+                if m.role == 'tool' and m.tool_call_id is None else m
+                for m in req.messages
+            ]
+            req = req.model_copy(update={'messages': normalized_messages})
+            tail = req.messages[end:]
         if len(set(result_ids)) != len(result_ids) or set(result_ids) != set(calls):
             raise ConversationStateError('Tool results do not match the delivered calls.')
         key = self.key(req, req.messages[:end], scope)
