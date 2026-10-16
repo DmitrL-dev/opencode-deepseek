@@ -589,6 +589,14 @@ the tab, not to an authenticated answer source. DeepSeek/Qwen streams stop after
 300 seconds total or 15 seconds without bytes; such a stop pauses the provider
 and is not replayed. A first request (no assistant message yet) has no history
 link, so resending it can open a second chat; continuations are one-use.
+Set `CONVERSATION_CLEAR_USED_ON_STARTUP=1` in the bridge process environment to
+delete consumed/closed history links at startup; the default `0` preserves them.
+A repeated first request with exactly identical history otherwise has the same
+cache key, so the bridge will not open another provider chat for it while the link
+is retained. It may reuse an unused link or reject an already-consumed one. Deleting
+used links allows a repeat to start another upstream chat,
+but a later continuation may bind to the wrong chat and fail. Links with
+`used=0` are not deleted.
 
 ## OpenCode demonstrations
 
@@ -600,6 +608,18 @@ These are **not Harness screenshots** or proof of current account availability.
 | ![OpenCode Qwen Flash](docs/media/qwen-flash-opencode.png) | ![OpenCode Qwen Max](docs/media/qwen-max-opencode.png) |
 
 [GLM/Kimi captures and recording method](docs/media/README.md).
+
+A repeated initial request with **exactly identical history** has the same cache key.
+While its link is retained, the bridge does not open a new provider chat for that
+history: it may reuse a still-unused link or reject a repeat whose link was already
+consumed. By default consumed/closed links are retained to avoid binding a repeat to
+another provider chat. With `CONVERSATION_CLEAR_USED_ON_STARTUP=1`, startup deletes
+only consumed links (`used=1`), so a repeated prompt may create a new upstream chat;
+a later continuation may then bind to the wrong chat. For a complete manual
+cleanup, run `python -m server.conversation_admin -clear`: it deletes all `links`,
+associated log-path mappings (`trace_links`), and migration records (`rollovers`)
+from `session/deepseek-conversations.sqlite3`. It does not delete log files or chats
+at the provider. This operation is destructive.
 
 ## Documentation and development
 

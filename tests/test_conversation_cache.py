@@ -50,6 +50,27 @@ class ConversationTests(unittest.TestCase):
             self.assertNotIn('fixture result', repr(searched))
             self.assertEqual(record.call_args.args[1], 'search_chat')
 
+    def test_clear_used_links_on_startup_is_opt_in_and_preserves_unused(self):
+        self.cache.remember(self.req, self.reply, '', self.calls, 0, scope='isolated-test')
+        req = self.req.model_copy(update={'messages': self.history()})
+        self.cache.prepare(req, scope='isolated-test')
+        with self.cache.connection() as db:
+            db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, 0, ?)',
+                       ('unused-key', 'unused:1', 0, 1))
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': '0'}):
+            self.assertEqual(self.cache.clear_used_links_on_startup(), 0)
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': '1'}):
+            self.assertEqual(self.cache.clear_used_links_on_startup(), 1)
+        with self.cache.connection() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM links WHERE used=1').fetchone())
+            self.assertIsNotNone(db.execute('SELECT 1 FROM links WHERE key=?',
+                                           ('unused-key',)).fetchone())
+
+    def test_clear_used_links_on_startup_rejects_invalid_value(self):
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': 'yes'}):
+            with self.assertRaises(ValueError):
+                self.cache.clear_used_links_on_startup()
+
     def test_trace_path_follows_provider_conversation_across_requests(self):
         trace = self.cache.path.parent / 'trace.log'
         self.cache.remember_trace(self.reply.conversation_id, trace)
