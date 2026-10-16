@@ -99,6 +99,18 @@ class ConversationCache:
         self.path = Path(path)
         self.account_file = Path(account_file) if account_file is not None else None
 
+    def clear_used_links_on_startup(self):
+        raw = os.getenv('CONVERSATION_CLEAR_USED_ON_STARTUP', '0').strip()
+        if raw not in ('0', '1'):
+            raise ValueError('CONVERSATION_CLEAR_USED_ON_STARTUP must be 0 or 1')
+        if raw == '0':
+            return 0
+        with self.connection() as db:
+            # This deliberately permits repeating an initial prompt in a new chat,
+            # but identical histories can then be matched to the wrong upstream chat.
+            cursor = db.execute('DELETE FROM links WHERE used=1')
+            return cursor.rowcount
+
     def account_identity(self):
         scope = 'isolated'
         if self.account_file is not None:
@@ -202,7 +214,7 @@ class ConversationCache:
                     'History is unknown; automatic replay and new-chat fallback are disabled.')
             if row[1]:
                 raise ConversationStateError(
-                    'History is already consumed; automatic replay and new-chat fallback are disabled.')
+                    'This message history matches a previously used chat, so the request was matched to that older chat and cannot be replayed. To start a new chat, change the initial message so its history is unique. Automatic replay and new-chat fallback are disabled.')
             if row[2] >= self.max_replies and not (allow_local_rollover and claim is not None):
                 raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.

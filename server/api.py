@@ -975,6 +975,10 @@ async def lifespan(app: FastAPI):
     _provider_request_gates = {name: asyncio.Lock() for name in PROVIDERS}
     _stop_refresh = threading.Event()
     stop_event = _stop_refresh
+    # CONVERSATION_CLEAR_USED_ON_STARTUP=1 removes consumed cache links. This
+    # allows repeating an initial prompt in a new chat, but a repeated history
+    # can be matched to the wrong upstream chat and fail during continuation.
+    conversation_cache.clear_used_links_on_startup()
     # Background browser recapture is retired, including existing .env opt-ins.
     try:
         yield
