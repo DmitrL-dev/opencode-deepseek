@@ -29,14 +29,14 @@ content context and keeps its local pairing key out of page JavaScript.
 2. Install Userscripts and add the two exported `.user.js` files to its scripts
    directory. Grant access only to `chat.z.ai`, `grok.com`, `chat.mistral.ai`,
    `www.kimi.com` (or `www.kimi.ai`), `chat.qwen.ai`, `chatgpt.com` (and
-   `chat.openai.com` if still used), `claude.ai`, `gemini.google.com`, and
-   `www.google.com`; the bridge does not need access to Google Account settings
-   pages beyond the chat UI.
+   `chat.openai.com` if still used), `claude.ai`, `chat.chatgbot.ai`,
+   `gemini.google.com`, and `www.google.com`; the bridge does not need access to
+   Google Account settings pages beyond the chat UI.
    After adding or replacing files, open the Userscripts toolbar popup and wait
    until both script names appear. The extension must rescan externally edited
    files before the next page load, as described in its linked README.
    After upgrading the bridge, export and replace the scripts again. The current
-   controller is 0.3.34 and observer is 0.3.17 (Claude thinking streamDone).
+   controller is 0.3.35 and observer is 0.3.18 (ChatGBot Claude `/en/chat`).
    On a failed job the badge shows `ERROR: …` with the reason (hover for full text).
    Older loaded scripts do not include all lease checks.
 3. Keep the API bound to `127.0.0.1:8000`. Set `BROWSER_BRIDGE_ENABLED=1` and enable
@@ -138,14 +138,17 @@ account quotas, captchas and Sentinel challenges still apply per session.
 ## Claude
 
 Claude is browser-only (`CLAUDE_ENABLED=1`, no transport flag). Pair a signed-in
-tab on `https://claude.ai/`, use model id `claude-web`, and select the model in
-the site UI. The controller fills the ProseMirror composer
-(`[data-testid="chat-input"]`) and clicks Send. The observer captures only
+tab on [ChatGBot](https://chat.chatgbot.ai/en/chat) (preferred) or
+`https://claude.ai/`, use model id `claude-web`, and select the model in the
+site UI. The controller fills the ProseMirror composer
+(`[data-testid="chat-input"]`) and clicks Send. On ChatGBot the empty chat is
+`/en/chat` and threads are `/en/chat/<id>`; bridge tokens stay `/chat/<id>`.
+The observer captures only
 `/api/organizations/.../chat_conversations/<id>/completion` SSE for the active
 job (line-oriented `content_block_delta` / `message_stop`; thinking frames with
 `"stop_reason": null` are not treated as done). An incomplete wire body is
-rejected; visible DOM text cannot substitute for a terminal network response. Conversation tokens use
-`/chat/<id>`. Do not point OpenCode `small_model` / session-title at `claude-web`
+rejected; visible DOM text cannot substitute for a terminal network response.
+Do not point OpenCode `small_model` / session-title at `claude-web`
 while a long turn is running — use another provider or disable title LLM
 (Harness already disables `session-title-llm`). Captchas and plan limits must be
 resolved in the normal tab. Live browser-adapter checks for this provider have

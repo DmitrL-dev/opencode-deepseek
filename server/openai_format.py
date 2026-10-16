@@ -23,8 +23,8 @@ from .schemas import ChatMessage
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
 
 # Only the complete, explicitly requested protocol may produce actions.
-_TOOL_BLOCK_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n(.*?)\r?\n```[ \t]*\Z", re.DOTALL)
-_TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
+_TOOL_BLOCK_RE = re.compile(r"\A```tool_calls(?:[ \t]+[^\r\n]*)?\r?\n(.*?)\r?\n```[ \t]*\Z", re.DOTALL)
+_TOOL_START_RE = re.compile(r"\A```tool_calls(?:[ \t]+[^\r\n]*)?\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
 _TOOL_MARKUP_RE = re.compile(
     r"(?m)^[ \t]*```(?:tool_calls|calls)[ \t]*\r?$"
@@ -39,9 +39,52 @@ _CLOSING_ARTIFACTS_RE = re.compile(r"\A(?:\}|</｜｜DSML｜｜tool_calls>|(?:\}
 class ToolCallError(RuntimeError):
     """The model emitted an invalid or disallowed explicit tool reply."""
 
-    def __init__(self, message, *, repair_hint=None):
+    def __init__(self, message, *, repair_hint=None, guidance=None, kind=None, tool=None):
         super().__init__(message)
         self.repair_hint = repair_hint
+        # Model-facing, value-free explanation (tool name + expected argument
+        # shape); never contains argument values or reply text.
+        self.guidance = guidance
+        # Browser providers: "syntax" (broken JSON), "no_name" (no tool name),
+        # "unknown_tool", "schema"/"format" (known tool, wrong structure),
+        # "repeat" (call repeats the one just executed). `tool` is the sanitized
+        # tool name when one is known.
+        self.kind = kind
+        self.tool = tool
+        # The provider Reply that failed validation (set by the API layer).
+        self.reply = None
+
+
+def find_tool_blocks(text: str):
+    """Top-level fenced ```tool_calls blocks as (start, end, body, closed) spans.
+
+    Fences are tracked line by line, so a tool_calls fence inside another code
+    fence (a quoted example) is not a block. A final block left unclosed at the
+    end of the text is returned with closed=False.
+    """
+    blocks = []
+    pos = 0
+    label = start = body_start = None
+    for line in (text or "").splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        if label is None:
+            opened = re.fullmatch(r"[ \t]*```([A-Za-z0-9_-]*)(?:[ \t]+[^\r\n]*)?", bare)
+            if opened:
+                label, start, body_start = opened.group(1), pos, pos + len(line)
+        elif re.fullmatch(r"[ \t]*```[ \t]*", bare):
+            if label == "tool_calls":
+                blocks.append((start, pos + len(line), text[body_start:pos], True))
+            label = None
+        pos += len(line)
+    if label == "tool_calls":
+        blocks.append((start, len(text), text[body_start:], False))
+    return blocks
+
+
+def tool_catalog(tools: List[dict]) -> str:
+    """Every advertised tool with its full argument shape (`?` = optional); never shortened."""
+    return "\n".join(f"- {spec['name']}: {_schema_sketch(spec['parameters'])}"
+                      for spec in _tool_specs(tools))
 
 
 def has_tool_call_markup(text: str, allowed_names=None) -> bool:
@@ -287,17 +330,54 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
     return instructions
 
 
-def _tool_reminder(tools: List[dict], tool_choice=None) -> str:
-    """Short follow-up block when tool-instructions mode is light."""
+def _schema_sketch(schema, depth: int = 0) -> str:
+    """Compact argument shape: `{a: string, b?: [{x: number}]}`; `?` = optional.
+
+    Only structure (names, types, enums); descriptions and values are omitted.
+    """
+    if not isinstance(schema, dict) or depth > 7:
+        return "any"
+    if isinstance(schema.get("enum"), list) and schema["enum"]:
+        return "|".join(json.dumps(v, ensure_ascii=False) for v in schema["enum"][:8])
+    for key in ("anyOf", "oneOf"):
+        if isinstance(schema.get(key), list) and schema[key]:
+            return "|".join(_schema_sketch(s, depth + 1) for s in schema[key][:4])
+    kind = schema.get("type")
+    if isinstance(kind, list):
+        kind = "|".join(str(k) for k in kind)
+    props = schema.get("properties")
+    if (kind in (None, "object")) and isinstance(props, dict) and props:
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        parts = [f"{name}{'' if name in required else '?'}: {_schema_sketch(sub, depth + 1)}"
+                 for name, sub in list(props.items())[:24]]
+        return "{" + ", ".join(parts) + "}"
+    if kind == "array":
+        return "[" + _schema_sketch(schema.get("items"), depth + 1) + "]"
+    return str(kind) if kind else "any"
+
+
+def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False) -> str:
+    """Short follow-up block: `light` (names only) or `medium` (+ argument shapes)."""
     specs = _tool_specs(tools)
     if not specs:
         return ""
     names = ", ".join(spec["name"] for spec in specs)
+    shape_block = ""
+    if shapes:
+        lines = []
+        for spec in specs:
+            sketch = _schema_sketch(spec["parameters"])
+            if len(sketch) > 700:
+                sketch = sketch[:700] + "…"
+            lines.append(f"- {spec['name']}: {sketch}")
+        shape_block = ("Argument shapes (`?` = optional; use exactly these field names and "
+                       "nesting):\n" + "\n".join(lines) + "\n")
     example = json.dumps([{"name": "<advertised_tool_name>",
                            "arguments": {"<argument_name>": "<argument_value>"}}])
     text = (
         "Tools remain available from earlier in this chat: "
         f"{names}.\n"
+        + shape_block +
         "Next reply: either a single fenced tool_calls block as the WHOLE reply "
         "(exact tool names; arguments matching those schemas):\n\n"
         "```tool_calls\n"
@@ -309,7 +389,7 @@ def _tool_reminder(tools: List[dict], tool_choice=None) -> str:
     return text + _tool_choice_suffix(tool_choice)
 
 
-def _render_message(m: ChatMessage, call_names: dict) -> str:
+def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = False) -> str:
     content = _text_of(m.content)
     if m.role == "assistant" and m.tool_calls:
         calls = []
@@ -331,6 +411,10 @@ def _render_message(m: ChatMessage, call_names: dict) -> str:
         return f"Assistant: {content}"
     if m.role == "tool":
         label = m.name or call_names.get(m.tool_call_id, "tool")
+        if compact_results:
+            # Preserve the request's tool_call_id so the provider can bind this result.
+            call_id = f' id="{m.tool_call_id}"' if m.tool_call_id else ""
+            return f"Tool result ({label}{call_id}): {content}"
         return f"Tool ({label}, call_id={m.tool_call_id or 'unknown'}): {content}"
     label = _ROLE_LABELS.get(m.role, m.role.capitalize())
     return f"{label}: {content}"
@@ -339,7 +423,7 @@ def _render_message(m: ChatMessage, call_names: dict) -> str:
 def messages_to_prompt(
     messages: List[ChatMessage], tools: List[dict] = None, tool_choice=None,
     *, tools_continuation: bool = False, provider: str = None,
-    tool_instructions: str = None,
+    tool_instructions: str = None, tool_results_compact: bool = False,
 ) -> str:
     """Flatten a chat history into a single prompt DeepSeek can answer.
 
@@ -352,12 +436,17 @@ def messages_to_prompt(
     `tools_continuation=True` means this turn resumes an existing provider chat.
     Mode comes from `tool_instructions`, else TOOL_INSTRUCTIONS_BROWSER/HTTP via
     `provider` (defaults to full when neither is set). full → complete schemas
-    every turn; light → short reminder on continuations; none → no tools block
+    every turn; medium → short reminder plus each tool's argument shape on
+    continuations; light → short reminder (names only); none → no tools block
     on continuations (first turn still gets the full block).
+
+    `tool_results_compact` (browser providers): a continuation that carries tool
+    results gets no tools reminder, and a single unambiguous result is sent as
+    just `Tool result (name): <content>` (no call_id, no echoed call).
     """
     from .config import tool_instructions_for_provider
 
-    if tool_instructions in ("full", "light", "none"):
+    if tool_instructions in ("full", "medium", "light", "none"):
         mode = tool_instructions
     elif provider:
         mode = tool_instructions_for_provider(provider)
@@ -372,12 +461,19 @@ def messages_to_prompt(
         else:
             convo.append(m)
 
+    compact = bool(tool_results_compact and tools_continuation
+                   and any(m.role == "tool" for m in convo))
+    # Without a re-listed call block (see ConversationCache.prepare) the
+    # results are unambiguous and are sent bare.
+    bare_results = compact and not any(m.role == "assistant" and m.tool_calls for m in convo)
     tool_instr = ""
     if tools:
-        if mode == "none" and tools_continuation:
+        if compact:
             tool_instr = ""
-        elif mode == "light" and tools_continuation:
-            tool_instr = _tool_reminder(tools, tool_choice)
+        elif mode == "none" and tools_continuation:
+            tool_instr = ""
+        elif mode in ("light", "medium") and tools_continuation:
+            tool_instr = _tool_reminder(tools, tool_choice, shapes=mode == "medium")
         else:
             tool_instr = _tool_instructions(tools, tool_choice)
 
@@ -394,10 +490,13 @@ def messages_to_prompt(
             fn = call.get("function") or {}
             if isinstance(fn, dict) and call.get("id"):
                 call_names[call["id"]] = fn.get("name", "tool")
-    lines.extend(_render_message(m, call_names) for m in convo)
+    lines.extend(_render_message(m, call_names, bare_results) for m in convo)
     if tool_instr:
-        lines.append(tool_instr)
-    lines.append("Assistant:")
+        # Mark the injected tool block as a developer instruction at the point
+        # it is actually included; do not change empty/other instruction paths.
+        lines.append("Developer: " + tool_instr)
+    if not bare_results:
+        lines.append("Assistant:")
     return "\n\n".join(lines)
 
 
@@ -645,7 +744,8 @@ def parse_tool_calls(
             try:
                 data = _tool_json(payload.rstrip() + "]")
             except (ValueError, TypeError):
-                raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
+                raise _json_tool_error("The tool_calls block contains invalid JSON", exc,
+                                       kind="syntax") from exc
         elif (allow_closing_artifacts
                 and exc.msg == "Extra data"
                 and _CLOSING_ARTIFACTS_RE.fullmatch(payload[exc.pos:].strip())):
@@ -655,25 +755,42 @@ def parse_tool_calls(
             # or tolerate any other suffix. Markdown framing is independent.
             data = _tool_json(payload[:exc.pos])
         else:
-            raise _json_tool_error("The tool_calls block contains invalid JSON", exc) from exc
+            raise _json_tool_error("The tool_calls block contains invalid JSON", exc,
+                                   kind="syntax") from exc
     except ValueError as exc:
-        raise ToolCallError("The tool_calls block contains invalid JSON") from exc
+        raise ToolCallError("The tool_calls block contains invalid JSON", kind="syntax") from exc
     if not isinstance(data, list) or not data:
-        raise ToolCallError("tool_calls must be a non-empty JSON array")
+        single = data.get("name") if isinstance(data, dict) else None
+        named = isinstance(single, str) and bool(single)
+        raise ToolCallError(
+            "tool_calls must be a non-empty JSON array",
+            kind="format" if named else "no_name",
+            tool=_safe_tool_name(single),
+            guidance=(f"The call to `{_safe_tool_name(single)}` was not executed: tool_calls must be "
+                      "a JSON array of {\"name\": ..., \"arguments\": {...}} entries.") if named else None)
     names = set(allowed_names) if allowed_names is not None else None
     calls = []
     for item in data:
         if not isinstance(item, dict):
-            raise ToolCallError("Each tool call must be an object")
+            raise ToolCallError("Each tool call must be an object", kind="no_name")
         fn = item.get("function") if isinstance(item.get("function"), dict) else item
         if fn is not item:
             if set(item) - {"id", "type", "function"} or set(fn) - {"name", "arguments"}:
-                raise ToolCallError("Tool call contains ambiguous envelope fields")
+                raise ToolCallError("Tool call contains ambiguous envelope fields", kind="format",
+                                    tool=_safe_tool_name(fn.get("name")))
         elif "arguments" in item and set(item) - {"id", "type", "name", "arguments"}:
-            raise ToolCallError("Tool call contains ambiguous envelope fields")
+            raise ToolCallError("Tool call contains ambiguous envelope fields", kind="format",
+                                tool=_safe_tool_name(item.get("name")))
         name = fn.get("name")
-        if not isinstance(name, str) or not name or (names is not None and name not in names):
-            raise ToolCallError("The model called an unadvertised tool")
+        if not isinstance(name, str) or not name:
+            raise ToolCallError("The model called an unadvertised tool", kind="no_name")
+        if names is not None and name not in names:
+            shown = _safe_tool_name(name)
+            available = ", ".join(sorted(str(n) for n in names)[:40])
+            raise ToolCallError(
+                "The model called an unadvertised tool", kind="unknown_tool", tool=shown,
+                guidance=f"`{shown}` is not an available tool."
+                + (f" Available tools: {available}." if available else ""))
         args = fn.get("arguments")
         if "arguments" not in fn and fn is item:
             args = _flat_tool_arguments(item, flat_argument_tools)
@@ -681,21 +798,27 @@ def parse_tool_calls(
             try:
                 args = _tool_json(args)
             except json.JSONDecodeError as exc:
-                raise _json_tool_error("Tool arguments contain invalid JSON", exc) from exc
+                raise _json_tool_error("Tool arguments contain invalid JSON", exc,
+                                       kind="format", tool=name,
+                                       guidance=_shape_guidance(name, flat_argument_tools)) from exc
             except ValueError as exc:
-                raise ToolCallError("Tool arguments contain invalid JSON") from exc
+                raise ToolCallError("Tool arguments contain invalid JSON", kind="format",
+                                    tool=name, guidance=_shape_guidance(name, flat_argument_tools)) from exc
         if not isinstance(args, dict):
-            raise ToolCallError("Tool arguments must be a JSON object")
+            raise ToolCallError("Tool arguments must be a JSON object", kind="format", tool=name,
+                                guidance=_shape_guidance(name, flat_argument_tools))
         try:
             arguments = json.dumps(args, ensure_ascii=False, allow_nan=False)
         except ValueError as exc:
-            raise ToolCallError("Tool arguments contain non-finite numbers") from exc
+            raise ToolCallError("Tool arguments contain non-finite numbers", kind="format",
+                                tool=name) from exc
         if flat_argument_tools is not None:
             from .tool_schema import validate_arguments
             try:
                 validate_arguments(name, args, flat_argument_tools)
             except ValueError as exc:
-                raise ToolCallError(str(exc)) from None
+                raise ToolCallError(str(exc), kind="schema", tool=name,
+                                    guidance=_shape_guidance(name, flat_argument_tools)) from None
         calls.append({
             "id": f"call_{uuid.uuid4().hex[:24]}",
             "type": "function",
@@ -704,7 +827,24 @@ def parse_tool_calls(
     return "", calls
 
 
-def _json_tool_error(message: str, exc: json.JSONDecodeError) -> ToolCallError:
+def _safe_tool_name(name) -> str:
+    return re.sub(r"[^\w.\-]", "", name)[:60] if isinstance(name, str) else ""
+
+
+def _shape_guidance(name: str, tools) -> Optional[str]:
+    """Value-free reminder of one tool's argument shape (`?` = optional)."""
+    spec = next((s for s in _tool_specs(tools or []) if s["name"] == name), None)
+    shape = _schema_sketch(spec["parameters"]) if spec else ""
+    if not shape:
+        return None
+    if len(shape) > 1500:
+        shape = shape[:1500] + "…"
+    return (f"The call to `{name}` was not executed: its arguments do not match the advertised "
+            f"schema. Expected arguments for `{name}` (`?` = optional): {shape}")
+
+
+def _json_tool_error(message: str, exc: json.JSONDecodeError, *, kind=None, tool=None,
+                     guidance=None) -> ToolCallError:
     # Only fixed categories and numeric positions leave the parser. Decoder
     # messages/documents can contain command text or secrets; never echo them.
     if exc.msg.startswith("Invalid control character"):
@@ -721,14 +861,20 @@ def _json_tool_error(message: str, exc: json.JSONDecodeError) -> ToolCallError:
         repair_hint=(f"JSON validation failed: {reason}, line {exc.lineno}, column {exc.colno} "
                      "within the JSON payload (not the Markdown fence). "
                      "Regenerate the whole valid block, not a patch or suffix. "
-                     "Check commas, quoted keys, and escaping of quotes and backslashes inside strings.")
+                     "Check commas, quoted keys, and escaping of quotes and backslashes inside strings."),
+        kind=kind, tool=tool, guidance=guidance,
     )
 
 
 def looks_truncated(text: str, allowed_names: Optional[Iterable[str]] = None) -> bool:
-    """Continue only an explicitly started tool block missing its closing fence."""
-    stripped = (text or "").strip()
-    return bool(_TOOL_START_RE.match(stripped)) and not _CLOSING_TOOL_FENCE_RE.search(stripped)
+    """Continue when a top-level tool_calls fence was opened and not closed.
+
+    The block may sit anywhere in the reply (browser mid-message prose + fence).
+    Nested/quoted fences are ignored the same way as ``find_tool_blocks``.
+    ``allowed_names`` is kept for call-site compatibility; truncation is
+    fence-shaped only.
+    """
+    return any(not closed for _start, _end, _body, closed in find_tool_blocks(text or ""))
 
 
 # --- OpenAI response shapes -----------------------------------------------
@@ -749,11 +895,13 @@ def _est_tokens(text: str) -> int:
 
 def completion_response(model: str, content: str, prompt: str,
                         conversation_id: str = None, tool_calls: List[dict] = None,
-                        finish_reason: str = "stop") -> dict:
+                        finish_reason: str = "stop", bridge_notice: dict = None) -> dict:
     """A full (non-streaming) OpenAI chat.completion object.
 
     `conversation_id` is an extra top-level field (outside OpenAI's schema) you
-    send back to resume the conversation.
+    send back to resume the conversation. When `bridge_notice` is set (invalid
+    tool under TOOLCALL_INVALID_MODE=text), the message also carries OpenAI
+    `refusal` and a top-level `bridge_notice` for agent-side step failure.
     """
     pt, ct = _est_tokens(prompt), _est_tokens(content or "")
     message: dict = {"role": "assistant", "content": content or ""}
@@ -762,7 +910,10 @@ def completion_response(model: str, content: str, prompt: str,
         message["tool_calls"] = tool_calls
         message["content"] = content or None
         finish = "tool_calls"
-    return {
+    if bridge_notice:
+        # OpenAI refusal: agents that honor it treat the turn as a failed step.
+        message["refusal"] = bridge_notice.get("message") or bridge_notice.get("code")
+    obj = {
         "id": _id(),
         "object": "chat.completion",
         "created": _now(),
@@ -781,11 +932,14 @@ def completion_response(model: str, content: str, prompt: str,
             "total_tokens": pt + ct,
         },
     }
+    if bridge_notice:
+        obj["bridge_notice"] = bridge_notice
+    return obj
 
 
 def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
                conversation_id: str = None, cid: str = None, created: int = None,
-               finish_reason: str = "stop") -> Iterable[str]:
+               finish_reason: str = "stop", bridge_notice: dict = None) -> Iterable[str]:
     """Yield OpenAI SSE frames for an already-computed reply.
 
     Used when the caller has a full result (e.g. it ran a non-streaming request
@@ -815,16 +969,25 @@ def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
                 "type": "function",
                 "function": call["function"],
             }]})
-        yield frame({}, finish="tool_calls", extra={"conversation_id": conversation_id})
+        extra = {"conversation_id": conversation_id}
+        if bridge_notice:
+            extra["bridge_notice"] = bridge_notice
+        yield frame({}, finish="tool_calls", extra=extra)
     else:
         if content:
             yield frame({"content": content})
-        yield frame({}, finish=finish_reason, extra={"conversation_id": conversation_id})
+        if bridge_notice:
+            yield frame({"refusal": bridge_notice.get("message") or bridge_notice.get("code")})
+        extra = {"conversation_id": conversation_id}
+        if bridge_notice:
+            extra["bridge_notice"] = bridge_notice
+        yield frame({}, finish=finish_reason, extra=extra)
     yield "data: [DONE]\n\n"
 
 
 def stream_chunks(model: str, stream: Iterable[str], tool_supported: bool = False,
-                  iterator: Iterable[str] = None) -> Iterable[str]:
+                  iterator: Iterable[str] = None, *, include_role: bool = True,
+                  include_final: bool = True) -> Iterable[str]:
     """Yield OpenAI SSE lines (`data: {...}\\n\\n`) for a streamed completion.
 
     `stream` is the client's stream object; after it's consumed we read its
@@ -860,12 +1023,15 @@ def stream_chunks(model: str, stream: Iterable[str], tool_supported: bool = Fals
                               finish_reason=getattr(stream, "finish_reason", "stop"))
         return
 
-    # First frame announces the assistant role.
-    yield frame({"role": "assistant", "content": ""})
+    # First frame announces the assistant role unless already sent by a caller
+    # that streams provider chunks incrementally.
+    if include_role:
+        yield frame({"role": "assistant", "content": ""})
     for d in it:
         if d:
             yield frame({"content": d})
-    conversation_id = getattr(stream, "conversation_id", None)
-    yield frame({}, finish=getattr(stream, "finish_reason", "stop"),
-                extra={"conversation_id": conversation_id})
-    yield "data: [DONE]\n\n"
+    if include_final:
+        conversation_id = getattr(stream, "conversation_id", None)
+        yield frame({}, finish=getattr(stream, "finish_reason", "stop"),
+                    extra={"conversation_id": conversation_id})
+        yield "data: [DONE]\n\n"

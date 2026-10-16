@@ -17,6 +17,77 @@ from tests.test_tools import block, FLAT_TOOLS
 
 
 class ConversationTests(unittest.TestCase):
+    def test_add_and_search_events_log_fields_without_message_text(self):
+        from server import toolcall_logging
+        from server.conversation_cache import digest_payload_json
+        request = ChatCompletionRequest(
+            model='deepseek-chat', tools=FLAT_TOOLS,
+            messages=[ChatMessage(role='user', content='PRIVATE PROMPT CONTENT')])
+        with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
+             patch('server.conversation_cache.new_toolcall_log', return_value=Path('trace.log')) as new_chat, \
+             patch('server.conversation_cache.record_toolcall_log') as record:
+            self.cache.remember(request, self.reply, 'assistant PRIVATE TEXT', None, 0,
+                                scope='isolated-test')
+            self.assertEqual(new_chat.call_count, 1)
+            added = record.call_args.args[2]
+            self.assertEqual(added['conversation_id'], 'owned:2')
+            self.assertEqual(added['used'], 0)
+            self.assertEqual(added['steps'], 1)
+            self.assertIn('PRIVATE PROMPT CONTENT', added['history'])
+            self.assertIn('assistant PRIVATE TEXT', added['history'])
+            self.assertEqual(added['history'], digest_payload_json(
+                request, [*request.messages, ChatMessage(role='assistant', content='assistant PRIVATE TEXT')]))
+            self.assertEqual(record.call_args.args[1], 'add_chat')
+        request = request.model_copy(update={'messages': [
+            ChatMessage(role='user', content='PRIVATE PROMPT CONTENT'),
+            ChatMessage(role='assistant', content='assistant PRIVATE TEXT'),
+            ChatMessage(role='user', content='next message'),
+        ]})
+        with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
+             patch('server.conversation_cache.new_toolcall_log', return_value=Path('trace.log')), \
+             patch('server.conversation_cache.record_toolcall_log') as record:
+            self.cache.prepare(request, scope='isolated-test')
+            calls = [call.args[1] for call in record.call_args_list]
+            self.assertIn('search_chat', calls)
+            search_call = next(call for call in record.call_args_list if call.args[1] == 'search_chat')
+            searched = search_call.args[2]
+            self.assertEqual(searched['key'], self.cache.key(request, request.messages[:2], 'isolated-test'))
+            self.assertEqual(searched['history'], digest_payload_json(
+                request, request.messages[:2]))
+            self.assertNotIn('fixture result', repr(searched))
+
+    def test_clear_used_links_on_startup_is_opt_in_and_preserves_unused(self):
+        self.cache.remember(self.req, self.reply, '', self.calls, 0, scope='isolated-test')
+        req = self.req.model_copy(update={'messages': self.history()})
+        self.cache.prepare(req, scope='isolated-test')
+        with self.cache.connection() as db:
+            db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, ?, ?)',
+                       ('unused-key', 'unused:1', 0, 1))
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': '0'}):
+            self.assertEqual(self.cache.clear_used_links_on_startup(), 0)
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': '1'}):
+            self.assertEqual(self.cache.clear_used_links_on_startup(), 1)
+        with self.cache.connection() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM links WHERE used=1').fetchone())
+            self.assertIsNotNone(db.execute('SELECT 1 FROM links WHERE key=?',
+                                           ('unused-key',)).fetchone())
+
+    def test_clear_used_links_on_startup_rejects_invalid_value(self):
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': 'yes'}):
+            with self.assertRaises(ValueError):
+                self.cache.clear_used_links_on_startup()
+
+    def test_trace_path_follows_provider_conversation_across_requests(self):
+        trace = self.cache.path.parent / 'trace.log'
+        self.cache.remember_trace(self.reply.conversation_id, trace)
+        self.assertEqual(self.cache.trace_path(self.reply.conversation_id), str(trace))
+        self.assertIsNone(self.cache.trace_path('unknown:2'))
+
+    def test_trace_path_survives_conversation_cache_restart(self):
+        trace = self.cache.path.parent / 'trace.log'
+        self.cache.remember_trace(self.reply.conversation_id, trace)
+        restarted = ConversationCache(self.cache.path)
+        self.assertEqual(restarted.trace_path(self.reply.conversation_id), str(trace))
     def test_local_stop_preserves_original_results_and_single_use_claim(self):
         from server.recovery_status import RECOVERY_STOP_TEXT
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
@@ -176,8 +247,37 @@ class ConversationTests(unittest.TestCase):
     def test_ambiguous_identical_histories_are_not_merged(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
         self.cache.remember(self.req, Reply('', 'another:2'), '', self.calls, 0)
-        with self.assertRaises(ConversationStateError):
+        with self.assertRaisesRegex(
+                ConversationStateError,
+                'matches a previously used chat'):
             self.cache.prepare(self.req.model_copy(update={'messages': self.history()}))
+
+    def test_opencode_system_drift_and_reminder_wrappers_still_continue(self):
+        """OpenCode mutates system prompts and may wrap user text between turns."""
+        from server.conversation_cache import digest
+        first = self.req.model_copy(update={'messages': [
+            ChatMessage(role='system', content='env day-1\nAGENTS.md v1'),
+            ChatMessage(role='user', content='Explore owned fixture'),
+        ]})
+        self.cache.remember(first, self.reply, '', self.calls, 0)
+        wrapped = (
+            "<system-reminder>\nThe user sent the following message:\n"
+            "Explore owned fixture\n\n"
+            "Please address this message and continue with your tasks.\n"
+            "</system-reminder>"
+        )
+        follow = first.model_copy(update={'messages': [
+            ChatMessage(role='system', content='env day-2\nAGENTS.md v2'),
+            ChatMessage(role='user', content=wrapped),
+            ChatMessage(role='assistant', tool_calls=self.calls),
+            ChatMessage(role='tool', tool_call_id='call_owned', content='fixture result'),
+        ]})
+        self.assertEqual(digest(first, first.messages + [
+            ChatMessage(role='assistant', tool_calls=self.calls)]),
+            digest(follow, follow.messages[:-1]))
+        continued, steps = self.cache.prepare(follow)
+        self.assertEqual(continued.conversation_id, 'owned:2')
+        self.assertEqual(steps, 1)
 
     def test_transport_creates_one_chat_for_two_agent_steps(self):
         from deepseek.client import DeepSeekClient

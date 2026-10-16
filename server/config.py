@@ -4,6 +4,7 @@ import os
 import json
 import re
 
+from providers.access import PROVIDERS
 from settings import load_environment
 from providers.kimi_http import direct_enabled
 from providers.kimi_models import PUBLIC_MODELS as KIMI_MODELS
@@ -23,13 +24,15 @@ def _transport(name, default, allowed):
 
 def _tool_instructions_mode(name, default):
     value = os.getenv(name, default).strip().lower() or default
-    if value not in ("full", "light", "none"):
-        raise ValueError(f"{name} must be full, light, or none")
+    if value not in ("full", "medium", "light", "none"):
+        raise ValueError(f"{name} must be full, medium, light, or none")
     return value
 
 
 # How OpenAI `tools` are flattened into provider prompts.
 # full  — complete schemas + rules on every turn.
+# medium — like light, but the reminder also lists each tool's argument shape
+#         (field names, nesting; no descriptions).
 # light — full block on the first provider-chat turn; short reminder afterward
 #         (recommended for browser tabs).
 # none  — like light on the first turn; no tools block on continuations.
@@ -204,8 +207,19 @@ def canonical_model(name: str):
 
 
 def model_provider(name: str) -> str:
+    """Resolve a model's provider; preserve known provider IDs when disabled."""
     bare = canonical_model(name)
-    return _bare_owner(bare if bare is not None else name)
+    if bare is not None:
+        return _bare_owner(bare)
+    if isinstance(name, str) and "/" in name:
+        owner, _, bare = name.partition("/")
+        if bare in MODEL_MAP and _bare_owner(bare) == owner:
+            return owner
+    if isinstance(name, str) and name.endswith("-web"):
+        provider = name[:-4]
+        if provider in PROVIDERS:
+            return provider
+    return _bare_owner(name)
 
 
 def is_known_model(name: str) -> bool:
