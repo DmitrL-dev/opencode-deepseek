@@ -184,6 +184,10 @@ class ConversationCache:
         result_ids = [m.tool_call_id for m in tail if m.role == 'tool']
         # OpenAI-compatible clients may omit tool_call_id when there was only
         # one delivered tool call. Bind that single result to the only call.
+        # TODO: We intentionally canonicalize the single-call case where
+        # tool_call_id is omitted. Histories that differ only by that ID are
+        # treated as the same continuation because real provider chats are not
+        # expected to diverge only on a synthetic tool identifier.
         if result_ids == [None] and len(calls) == 1:
             bound_id = next(iter(calls))
             result_ids = [bound_id]

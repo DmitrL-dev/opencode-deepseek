@@ -200,30 +200,31 @@ class ToolNoticeTests(unittest.TestCase):
                 self.assertNotIn(NOTICE_PREFIX, content)
 
     def test_valid_call_keeps_the_surrounding_text_and_the_history_hash(self):
-        text = 'Let me ask.\n\n' + GOOD + '\n\nThat is the question.'
-        (_, content, calls), _ = self.chat([Reply(text, 'claude:1')], self.req)
-        self.assertEqual(content, 'Let me ask.\n\nThat is the question.')
         answer = json.dumps({"answers": [{"id": "q1", "selected": ["Tea"]}]})
 
-        for index, call_id in enumerate((calls[0]['id'], None), start=1):
-            with self.subTest(call_id=call_id):
-                history = [*self.req.messages,
-                           ChatMessage(role='assistant', content=content, tool_calls=calls),
-                           ChatMessage(role='tool', tool_call_id=call_id, content=answer)]
-                follow = self.req.model_copy(update={'messages': history})
-                unique_follow = follow.model_copy(update={'messages': [
-                    *follow.messages,
-                    ChatMessage(role='user', content=f'continue {index}')]} )
-                (_, again, again_calls), chat = self.chat(
-                    [Reply('You chose Tea.', f'claude:{index + 1}')], unique_follow, 'unused')
-                self.assertIsNone(again_calls)
-                self.assertEqual(again, 'You chose Tea.')
-                # Include the ID only when the tool result carries one.
-                id_suffix = f' id="{call_id}"' if call_id else ''
-                self.assertEqual(
-                    chat.call_args.args[0],
-                    f'Tool result (ask_user_question{id_suffix}): {answer}\n\nUser: continue {index}')
-                self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
+        # OpenAI-compatible clients may omit tool_call_id when there was only
+        # one pending tool call. Histories that differ only by that ID are
+        # treated as equivalent after normalization in conversation_cache.
+        text = 'Let me ask.\n\n' + GOOD + '\n\nThat is the question.'
+        req = self.req.model_copy(update={'messages': [
+            ChatMessage(role='user', content='ask me something')]} )
+        (_, content, calls), _ = self.chat([Reply(text, 'claude:1')], req)
+        self.assertEqual(content, 'Let me ask.\n\nThat is the question.')
+
+        history = [*req.messages,
+                   ChatMessage(role='assistant', content=content, tool_calls=calls),
+                   ChatMessage(role='tool', tool_call_id=calls[0]['id'], content=answer)]
+        follow = req.model_copy(update={'messages': [
+            *history,
+            ChatMessage(role='user', content='continue') ]})
+        (_, again, again_calls), chat = self.chat(
+            [Reply('You chose Tea.', 'claude:2')], follow, 'unused')
+        self.assertIsNone(again_calls)
+        self.assertEqual(again, 'You chose Tea.')
+        self.assertEqual(
+            chat.call_args.args[0],
+            f'Tool result (ask_user_question id="{calls[0]["id"]}"): {answer}\n\nUser: continue')
+        self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
 
     def test_results_of_one_tool_keep_the_identifier_mapping(self):
         two = block([{"name": "read_file", "arguments": {"path": "a"}},

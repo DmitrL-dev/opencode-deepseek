@@ -61,7 +61,7 @@ class ConversationTests(unittest.TestCase):
         req = self.req.model_copy(update={'messages': self.history()})
         self.cache.prepare(req, scope='isolated-test')
         with self.cache.connection() as db:
-            db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, 0, ?)',
+            db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, ?, ?)',
                        ('unused-key', 'unused:1', 0, 1))
         with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': '0'}):
             self.assertEqual(self.cache.clear_used_links_on_startup(), 0)
