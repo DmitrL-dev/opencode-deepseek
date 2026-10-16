@@ -17,6 +17,37 @@ from tests.test_tools import block, FLAT_TOOLS
 
 
 class ConversationTests(unittest.TestCase):
+    def test_add_and_search_events_log_fields_without_message_text(self):
+        from server import toolcall_logging
+        from server.conversation_cache import digest_payload_json
+        request = ChatCompletionRequest(
+            model='deepseek-chat', tools=FLAT_TOOLS,
+            messages=[ChatMessage(role='user', content='PRIVATE PROMPT CONTENT')])
+        with patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')) as new_chat, \
+             patch.object(toolcall_logging, 'record') as record:
+            self.cache.remember(request, self.reply, 'assistant PRIVATE TEXT', None, 0,
+                                scope='isolated-test')
+            self.assertEqual(new_chat.call_count, 1)
+            added = record.call_args.args[2]
+            self.assertEqual(added['conversation_id'], 'owned:2')
+            self.assertEqual(added['used'], 0)
+            self.assertEqual(added['steps'], 1)
+            self.assertNotIn('PRIVATE PROMPT CONTENT', repr(added))
+            self.assertNotIn('assistant PRIVATE TEXT', repr(added))
+            self.assertEqual(added['history'], digest_payload_json(
+                request, [*request.messages, ChatMessage(role='assistant', content='assistant PRIVATE TEXT')]))
+            self.assertEqual(record.call_args.args[1], 'add_chat')
+        request = request.model_copy(update={'messages': self.history()})
+        with patch.object(toolcall_logging, 'new_chat', return_value=Path('trace.log')), \
+             patch.object(toolcall_logging, 'record') as record:
+            self.cache.prepare(request, scope='isolated-test')
+            searched = record.call_args.args[2]
+            self.assertEqual(searched['key'], self.cache.key(request, request.messages[:2], 'isolated-test'))
+            self.assertEqual(searched['history'], digest_payload_json(
+                request, request.messages[:2]))
+            self.assertNotIn('fixture result', repr(searched))
+            self.assertEqual(record.call_args.args[1], 'search_chat')
+
     def test_trace_path_follows_provider_conversation_across_requests(self):
         trace = self.cache.path.parent / 'trace.log'
         self.cache.remember_trace(self.reply.conversation_id, trace)

@@ -20,6 +20,9 @@ SEPARATOR = {
     "to_provider": "------------ to provider---------------",
     "from_provider": "------------ from provider---------------",
     "to_agent": "------------ to agent---------------",
+    "add_chat": "-----------------------------add chat -------------------",
+    "search_chat": "-----------------------Search chat--------------------------",
+    "consume_chat": "-----------------------Consume chat--------------------------",
 }
 _lock = threading.RLock()
 
@@ -149,10 +152,14 @@ def _payload_text(content) -> str:
 
 def record(path: Path | str | None, direction: str, content) -> None:
     """Append one exact boundary payload, with JSON prettified for readability."""
-    if path is None:
+    if not enabled():
         return
     if direction not in SEPARATOR:
         raise ValueError("Unknown tool-call trace direction")
+    if path is None:
+        path = new_chat("conversation-cache")
+        if path is None:
+            return
     text = _payload_text(content)
     text = _format_payload(text)
     block = f"{SEPARATOR[direction]}\n{text}"

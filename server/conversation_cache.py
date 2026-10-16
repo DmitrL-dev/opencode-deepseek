@@ -13,11 +13,14 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from settings import ROOT
-from .config import canonical_model
+from .config import canonical_model, model_provider
 from .schemas import ChatMessage
 from .openai_format import _text_of
 from .recovery_status import RECOVERY_STOP_TEXT
 from .tool_notice import notice_of, provider_tool_error_followup
+from .toolcall_logging import (enabled as toolcall_logging_enabled,
+                               new_chat as new_toolcall_log,
+                               record as record_toolcall_log)
 
 # OpenCode (and similar agents) inject ephemeral <system-reminder> wrappers into
 # user text around tool loops. Those wrappers are not part of the delivered
@@ -70,16 +73,21 @@ def _message_role(message):
     return message.get('role') if isinstance(message, dict) else getattr(message, 'role', None)
 
 
-def digest(req, messages):
-    # Owner-prefixed aliases (deepseek/deepseek-expert) must share history with
-    # the bare public id used when the link was stored.
-    # Client-owned system prompts (OpenCode env/date/AGENTS.md) change between
-    # turns and are never forwarded on browser continuations — omit them.
+def _digest_payload(req, messages):
+    """Return the exact canonical data whose serialization digest() hashes."""
     model = canonical_model(req.model) or req.model
     stable = [normalized(m) for m in messages if _message_role(m) != 'system']
-    payload = [model, req.user, req.thinking, req.search, req.tools, stable]
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
-                                    separators=(',', ':')).encode()).hexdigest()
+    return [model, req.user, req.thinking, req.search, req.tools, stable]
+
+
+def digest_payload_json(req, messages):
+    """Exact canonical JSON input to digest(), shared with safe diagnostic logging."""
+    return json.dumps(_digest_payload(req, messages), sort_keys=True, ensure_ascii=False,
+                      separators=(',', ':'))
+
+
+def digest(req, messages):
+    return hashlib.sha256(digest_payload_json(req, messages).encode()).hexdigest()
 
 
 class ConversationCache:
@@ -128,7 +136,7 @@ class ConversationCache:
                 db.close()
 
     def prepare(self, req, *, scope=None, claim=None, compact_results=False,
-                legacy_scopes=(), allow_local_rollover=False):
+                legacy_scopes=(), allow_local_rollover=False, trace_path=None):
         # Explicit protocol clients already own their conversation identity.
         if req.conversation_id:
             return req, 0
@@ -165,12 +173,26 @@ class ConversationCache:
         if len(set(result_ids)) != len(result_ids) or set(result_ids) != set(calls):
             raise ConversationStateError('Tool results do not match the delivered calls.')
         key = self.key(req, req.messages[:end], scope)
+        search = {
+            'key': key,
+            'scope': scope if scope is not None else self.account_identity(),
+            'history': self._history_metadata(req, req.messages[:end]),
+        }
+        if trace_path is None and toolcall_logging_enabled():
+            trace_path = new_toolcall_log(model_provider(req.model))
         with self.connection() as db:
+            record_toolcall_log(trace_path, 'search_chat', search)
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
             # A namespace upgrade must not orphan histories stored before it.
             # The legacy link is claimed exactly like a current one.
             for legacy in () if row else legacy_scopes:
                 legacy_key = self.key(req, req.messages[:end], legacy)
+                legacy_search = {
+                    'key': legacy_key,
+                    'scope': legacy,
+                    'history': self._history_metadata(req, req.messages[:end]),
+                }
+                record_toolcall_log(trace_path, 'search_chat', legacy_search)
                 row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (legacy_key,)).fetchone()
                 if row:
                     key = legacy_key
@@ -185,6 +207,19 @@ class ConversationCache:
                 raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.
             reservation = uuid.uuid4().hex
+            consume_event = {
+                'key': key,
+                'conversation_id': row[0],
+                'previous_used': row[1],
+                'used': 1,
+                'previous_steps': row[2],
+                'reservation': reservation,
+                'reason': 'continuation_claimed_before_provider_dispatch_to_prevent_replay_after_uncertain_response',
+                'history': self._history_metadata(req, req.messages[:end]),
+            }
+            # Keep the claim update parameterized so the database mutation and its
+            # audit event stay adjacent under the same immediate transaction.
+            record_toolcall_log(trace_path, 'consume_chat', consume_event)
             db.execute('UPDATE links SET used=1, reservation=? WHERE key=?', (reservation, key))
         if claim is not None:
             claim.update(key=key, reservation=reservation)
@@ -233,13 +268,47 @@ class ConversationCache:
             db.execute('INSERT INTO rollovers VALUES (?, ?, ?)',
                        (claim['key'], previous_cid, str(archive)))
 
+    @staticmethod
+    def _history_metadata(req, messages):
+        """Return exactly the canonical JSON hashed by digest()."""
+        return digest_payload_json(req, messages)
+
     def remember(self, original, reply, content, calls, steps, *, scope=None):
         if original.conversation_id or not reply.conversation_id:
             return
         assistant = ChatMessage(role='assistant', content=content, tool_calls=calls)
-        key = self.key(original, [*original.messages, assistant], scope)
+        messages = [*original.messages, assistant]
+        key = self.key(original, messages, scope)
+        entry = {
+            'key': key,
+            'conversation_id': reply.conversation_id,
+            'used': 0,
+            'steps': steps + 1,
+            'scope': scope if scope is not None else self.account_identity(),
+            'history': self._history_metadata(original, messages),
+        }
+        trace = new_toolcall_log(model_provider(original.model))
+        record_toolcall_log(trace, 'add_chat', entry)
         with self.connection() as db:
-            db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, 0, ?) ON CONFLICT(key) DO UPDATE SET used=1, reservation=NULL', (key, reply.conversation_id, steps + 1))
+            existing = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
+            if existing:
+                # A pre-existing key is updated and consumed to avoid reusing the old link.
+                record_toolcall_log(trace, 'consume_chat', {
+                    'key': key,
+                    'conversation_id': existing[0],
+                    'previous_used': existing[1],
+                    'used': 1,
+                    'previous_steps': existing[2],
+                    'reservation': None,
+                    'reason': 'remember_insert_conflict_updates_existing_link',
+                    'history': self._history_metadata(original, messages),
+                })
+                db.execute(
+                    'UPDATE links SET cid=?, used=1, steps=?, reservation=NULL WHERE key=?',
+                    (reply.conversation_id, steps + 1, key))
+            else:
+                db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, 0, ?)',
+                           (key, reply.conversation_id, steps + 1))
 
     def trace_path(self, conversation_id):
         if not conversation_id:

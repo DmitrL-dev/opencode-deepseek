@@ -494,7 +494,8 @@ def _conversation_tool_chat(prompt, req, model_type):
             req, scope=scope, claim=claim, compact_results=browser,
             legacy_scopes=legacy,
             allow_local_rollover=(provider == 'deepseek' and
-                os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') == '1'))
+                os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') == '1'),
+            trace_path=original._toolcall_log_path)
         if claim and steps >= conversation_cache.max_replies:
             # Migrate before dispatch: the capped conversation receives no request.
             # A failure in the new conversation cannot enter the refusal-retry path.
