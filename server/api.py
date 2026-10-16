@@ -847,15 +847,19 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
         stream = _open_stream(client, prompt, req, model_type)
         stream.access_attempt = attempt
         iterator = iter(stream)
+        first = next(iterator, _MISSING)
+
+        def remaining():
+            if first is not _MISSING:
+                yield first
+            yield from iterator
+            # Verify and clear the journal before yielding final SSE frames.
+            attempt.complete()
+
         trace = req._toolcall_log_path
         reply_chunks = []
         first_frame = True
-        while True:
-            chunk = next(iterator, _MISSING)
-            if chunk is _MISSING:
-                # Verify and clear the journal before emitting final SSE.
-                attempt.complete()
-                break
+        for chunk in remaining():
             if not chunk:
                 continue
             reply_chunks.append(chunk)
