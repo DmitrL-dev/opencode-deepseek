@@ -278,8 +278,11 @@ remaining block must be valid: broken JSON (including a known tool name), an unk
 name with no prose, or arguments off-schema stop the whole message (repair /
 `TOOLCALL_INVALID_MODE`); there is no silent validate pass. When every block is
 valid, all calls run in order: the agent receives them as `tool_calls` and the rest
-of the message, with the call blocks cut out, as ordinary content.
-`tool_choice: none` never turns text into an error. Verified offline.
+of the message, with the call blocks cut out, as ordinary content. With
+`stream: true` text and calls arrive as separate frames in the original order
+(`text1`, `call1`, `text2`, `call2`, `text3`); `stream: false` still returns one
+`content` and one `tool_calls` array. `tool_choice: none` never turns text into
+an error. Verified offline.
 
 With `TOOLCALL_FORMAT_REPAIR=1` (off by default), under `LEGACY=0` an erroneous call
 gets one pointed correction in the same chat (one extra generation): for an unknown
@@ -610,6 +613,10 @@ These are **not Harness screenshots** or proof of current account availability.
 [GLM/Kimi captures and recording method](docs/media/README.md).
 
 A repeated initial request with **exactly identical history** has the same cache key.
+For an assistant message with `tool_calls`, the key is bound to the calls themselves
+(ID, name, arguments) and the prior history, not to the text around them: a client
+may reassemble streamed text differently (without `\n\n`, or with no text at all).
+This does not weaken the binding — call IDs are unique.
 While its link is retained, the bridge does not open a new provider chat for that
 history: it may reuse a still-unused link or reject a repeat whose link was already
 consumed. By default consumed/closed links are retained to avoid binding a repeat to

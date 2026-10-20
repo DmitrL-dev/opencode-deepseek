@@ -116,6 +116,7 @@ def tool_chat_with_retry(prompt, req, model_type):
         if demoted is not None:
             print('[toolcalls] mistagged tool_calls demoted to text', flush=True)
             demoted_reply = Reply(demoted, reply.conversation_id, reply.finish_reason)
+            demoted_reply.parts = [{"type": "text", "text": demoted}]
             return demoted_reply, demoted, None
     try:
         return validate_tool_reply(reply, req)
@@ -162,11 +163,13 @@ def validate_tool_reply(reply: Reply, req, *, allow_continuation=True):
                         and looks_truncated(reply.text, names))
         if not can_continue:
             try:
-                content, tool_calls = validate_reply(
+                content, tool_calls, parts = validate_reply(
                     reply.text, req.tools, req.tool_choice,
                     finish_reason=reply.finish_reason,
                     provider=api.model_provider(req.model),
+                    with_parts=True,
                 )
+                reply.parts = parts
             except ToolCallError as exc:
                 exc.reply = reply
                 save_tool_failure(reply, req)

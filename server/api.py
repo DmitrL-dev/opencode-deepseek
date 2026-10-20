@@ -821,7 +821,8 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
             conversation_cache.remember_trace(reply.conversation_id, trace)
         frames = sse_frames(req.model, content, tool_calls, reply.conversation_id,
                             finish_reason=reply.finish_reason,
-                            bridge_notice=getattr(reply, "bridge_notice", None))
+                            bridge_notice=getattr(reply, "bridge_notice", None),
+                            parts=getattr(reply, "parts", None))
         for frame in frames:
             record_toolcall_log(trace, "to_agent", frame)
             yield frame

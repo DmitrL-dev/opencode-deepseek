@@ -128,6 +128,25 @@ class ConversationTests(unittest.TestCase):
         return [*self.req.messages, ChatMessage(role='assistant', tool_calls=self.calls),
                 ChatMessage(role='tool', tool_call_id='call_owned', content='fixture result')]
 
+    def test_tool_commentary_does_not_break_continuation_key(self):
+        # The agent reassembles streamed text itself; its content can differ
+        # from the delivered text while the call IDs stay exact.
+        self.cache.remember(self.req, self.reply, 'Текст1\n\nТекст2', self.calls, 0)
+        history = self.history()
+        history[-2] = ChatMessage(
+            role='assistant', content='Текст1Текст2', tool_calls=self.calls)
+        continuation, steps = self.cache.prepare(
+            self.req.model_copy(update={'messages': history}))
+        self.assertEqual(continuation.conversation_id, 'owned:2')
+        self.assertEqual(steps, 1)
+
+    def test_tool_reply_without_client_content_still_matches(self):
+        self.cache.remember(self.req, self.reply, 'Текст1', self.calls, 0)
+        continuation, steps = self.cache.prepare(
+            self.req.model_copy(update={'messages': self.history()}))
+        self.assertEqual(continuation.conversation_id, 'owned:2')
+        self.assertEqual(steps, 1)
+
     def test_restart_reuses_chat_and_only_new_messages_once(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
         req = self.req.model_copy(update={'messages': self.history()})

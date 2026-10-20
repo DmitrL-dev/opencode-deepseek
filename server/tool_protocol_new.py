@@ -98,7 +98,8 @@ def demote_mistagged_tool_reply(text, tools) -> Optional[str]:
     return _rewrite_tool_calls_fences_to_text(text, blocks)
 
 
-def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provider="deepseek"):
+def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provider="deepseek",
+                   with_parts=False):
     """LEGACY=0 validate: same multi-block contract for every provider.
 
     Only a top-level fenced ```tool_calls block can be a call; arrays without that
@@ -108,6 +109,10 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
     fail the whole message. ``tool_choice=none`` never turns a block into an
     error. When every block is valid, all calls run in order and the text around
     them, with the call blocks cut out, is returned as content.
+
+    With ``with_parts`` the reply also carries the original order as a list of
+    ``{"type": "text", ...}`` / ``{"type": "tool_call", ...}`` items, so SSE can
+    emit text and calls as separate frames instead of one flattened content.
 
     ``provider`` is kept for call-site compatibility; the path does not fork on it.
     """
@@ -131,17 +136,29 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
                 continue
             raise
         calls.extend(block_calls)
-        spans.append((start, end))
+        spans.append((start, end, block_calls))
     if not calls:
         if not text.strip():
             raise ToolCallError("Provider returned no answer text or tool calls; no actions were returned")
         enforce_tool_choice(tool_choice, None)
+        if with_parts:
+            return text, None, [{"type": "text", "text": text}]
         return text, None
     enforce_tool_choice(tool_choice, calls)
-    pieces, at = [], 0
-    for start, end in spans:
-        pieces.append(text[at:start])
+    pieces, parts, at = [], [], 0
+    for start, end, block_calls in spans:
+        piece = text[at:start]
+        pieces.append(piece)
+        if piece.strip():
+            parts.append({"type": "text", "text": piece.strip("\r\n")})
+        for call in block_calls:
+            parts.append({"type": "tool_call", "call": call})
         at = end
-    pieces.append(text[at:])
+    piece = text[at:]
+    pieces.append(piece)
+    if piece.strip():
+        parts.append({"type": "text", "text": piece.strip("\r\n")})
     content = "\n\n".join(piece.strip("\r\n") for piece in pieces if piece.strip())
+    if with_parts:
+        return content, calls, parts
     return content, calls

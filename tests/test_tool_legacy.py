@@ -76,6 +76,19 @@ class ToolLegacyApiTests(unittest.TestCase):
         self.assertIn('```text', content)
         self.assertNotIn('```tool_calls', content)
 
+    def test_new_path_exposes_ordered_parts_for_streaming(self):
+        first = block([{"name": "write", "arguments": {"file_path": "/a", "content": "a"}}])
+        second = block([{"name": "write", "arguments": {"file_path": "/b", "content": "b"}}])
+        text = 'text1\n' + first + '\ntext2\n' + second + '\ntext3'
+        (reply, content, calls), chat = self.chat([Reply(text, 'claude:1')], legacy=False)
+        self.assertEqual(chat.call_count, 1)
+        self.assertEqual(content, 'text1\n\ntext2\n\ntext3')
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([part['type'] for part in reply.parts],
+                         ['text', 'tool_call', 'text', 'tool_call', 'text'])
+        self.assertEqual([part['text'] for part in reply.parts if part['type'] == 'text'],
+                         ['text1', 'text2', 'text3'])
+
     def test_new_path_demotes_on_deepseek_too(self):
         advice = ('How to prompt:\n```tool_calls\n'
                   '[{"arguments": {"file_path": "/x"}}]\n```\nDone.')

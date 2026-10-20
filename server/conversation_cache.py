@@ -1,6 +1,8 @@
 """Private, durable one-use continuation links for stateless OpenAI clients.
 
 Only hashes of the exact delivered history are retained, never source text.
+Assistant commentary around tool calls is excluded from the hash: the client
+reassembles streamed text on its side, so only the call IDs stay authoritative.
 Unknown or already consumed histories fail closed instead of creating chats.
 """
 import hashlib
@@ -59,6 +61,12 @@ def normalized(message):
     value['content'] = _stable_text(content)
     if not value.get('tool_calls'):
         value.pop('tool_calls', None)
+    else:
+        # A stateless agent reassembles streamed text on its side. Its content
+        # may differ from the delivered content (missing separators, dropped
+        # text, or a null body), while the call IDs and arguments are exact.
+        # Bind the one-use link to the calls, not to client-assembled prose.
+        value['content'] = ''
     for call in value.get('tool_calls', []):
         fn = call.get('function', {})
         if isinstance(fn.get('arguments'), str):

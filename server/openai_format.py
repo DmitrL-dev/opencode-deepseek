@@ -939,7 +939,8 @@ def completion_response(model: str, content: str, prompt: str,
 
 def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
                conversation_id: str = None, cid: str = None, created: int = None,
-               finish_reason: str = "stop", bridge_notice: dict = None) -> Iterable[str]:
+               finish_reason: str = "stop", bridge_notice: dict = None,
+               parts: List[dict] = None) -> Iterable[str]:
     """Yield OpenAI SSE frames for an already-computed reply.
 
     Used when the caller has a full result (e.g. it ran a non-streaming request
@@ -961,7 +962,39 @@ def sse_frames(model: str, content: str, tool_calls: List[dict] = None,
         return f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
 
     yield frame({"role": "assistant", "content": None})
-    if tool_calls:
+    if parts is not None:
+        index, has_calls = 0, False
+        texts_left = sum(1 for part in parts
+                         if part.get("type") == "text" and part.get("text"))
+        for part in parts:
+            kind = part.get("type")
+            if kind == "text":
+                text = part.get("text") or ""
+                if text:
+                    texts_left -= 1
+                    # Match the non-streaming content exactly: pieces are
+                    # joined with a blank line, and clients concatenate deltas
+                    # verbatim.
+                    if texts_left:
+                        text += "\n\n"
+                    yield frame({"content": text})
+            elif kind == "tool_call":
+                call = part.get("call") or {}
+                yield frame({"tool_calls": [{
+                    "index": index,
+                    "id": call["id"],
+                    "type": "function",
+                    "function": call["function"],
+                }]})
+                index += 1
+                has_calls = True
+        if bridge_notice and not has_calls:
+            yield frame({"refusal": bridge_notice.get("message") or bridge_notice.get("code")})
+        extra = {"conversation_id": conversation_id}
+        if bridge_notice:
+            extra["bridge_notice"] = bridge_notice
+        yield frame({}, finish="tool_calls" if has_calls else finish_reason, extra=extra)
+    elif tool_calls:
         for i, call in enumerate(tool_calls):
             yield frame({"tool_calls": [{
                 "index": i,

@@ -11,6 +11,8 @@ class Reply:
     finish_reason: str = "stop"
     # Optional structured notice for TOOLCALL_INVALID_MODE=text (agent-visible).
     bridge_notice: Optional[dict] = None
+    # Ordered text/tool_call parts for streaming; None keeps the legacy framing.
+    parts: Optional[list] = None
 
     def __str__(self) -> str:
         return self.text

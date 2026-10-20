@@ -246,6 +246,7 @@ req.tools?
                      │
                      ├─ tool_protocol_new.validate_reply (все провайдеры)
                      │     ├─ все валидные блоки → tool_calls + content вокруг
+                     │     │     (в SSE — упорядоченные части text / tool_call)
                      │     └─ syntax / no_name / unknown_tool / schema / format
                      │           → ToolCallError (advice уже срезан demote выше)
                      │     (tool_choice=none → блоки как текст, без ошибки)
@@ -274,6 +275,20 @@ req.tools?
   TOOLCALL_DIAGNOSTICS / TOOLCALL_DEBUG
   TOOL_INSTRUCTIONS_BROWSER=medium — длиннее reminder на продолжениях (не repair)
 ```
+
+### Порядок текста и вызовов в SSE (`LEGACY=0`)
+
+`validate_reply(..., with_parts=True)` сохраняет исходный порядок частей:
+`text → tool_call → text → tool_call → text`. `api_new` кладёт этот список в
+`Reply.parts`, а `sse_frames` отправляет каждую часть отдельным кадром:
+`delta.content` для текста и `delta.tool_calls` для вызова. `index` считается
+только по вызовам, поэтому несколько текстовых частей не сдвигают нумерацию.
+Финальный кадр получает `finish_reason: tool_calls`, если в списке есть вызовы.
+
+Обычный ответ (`stream: false`) не меняется: один `content`, куски текста
+склеены через пустую строку, и один массив `tool_calls`. Клиент всё равно
+собирает SSE в такое же плоское сообщение; порядок частей виден только в
+потоке кадров, но не в следующем запросе к провайдеру.
 
 ### Краткая схема repair + invalid mode
 

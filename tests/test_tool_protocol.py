@@ -61,6 +61,35 @@ class ProtocolCorpusTests(unittest.TestCase):
                 self.assertEqual(content, 'First.\n\nSecond.')
                 self.assertEqual(calls[0]['function']['name'], 'write')
 
+    def test_rework_preserves_ordered_parts_for_streaming_frames(self):
+        call = '[{"name":"write","arguments":{"file_path":"/x","content":"y"}}]'
+        text = 'text1\n' + fence(call) + '\ntext2\n' + fence(call) + '\ntext3'
+        content, calls, parts = validate_reply(text, [tool('write')], with_parts=True)
+        self.assertEqual(content, 'text1\n\ntext2\n\ntext3')
+        self.assertEqual([part['type'] for part in parts],
+                         ['text', 'tool_call', 'text', 'tool_call', 'text'])
+        self.assertEqual([part['text'] for part in parts if part['type'] == 'text'],
+                         ['text1', 'text2', 'text3'])
+        frames = list(sse_frames('deepseek-chat', content, calls, None, parts=parts))
+        events = []
+        for frame in frames:
+            if not frame.startswith('data: {'):
+                continue
+            delta = json.loads(frame[6:])['choices'][0]['delta']
+            if delta.get('content'):
+                events.append(('text', delta['content']))
+            elif delta.get('tool_calls'):
+                events.append(('call', delta['tool_calls'][0]['index']))
+        self.assertEqual(events, [
+            ('text', 'text1\n\n'), ('call', 0), ('text', 'text2\n\n'),
+            ('call', 1), ('text', 'text3')])
+        # The client concatenates deltas verbatim; the result must equal the
+        # same content the cache/non-streaming path uses.
+        assembled = ''.join(value for kind, value in events if kind == 'text')
+        self.assertEqual(assembled, content)
+        final = json.loads(frames[-2][6:])
+        self.assertEqual(final['choices'][0]['finish_reason'], 'tool_calls')
+
     def test_invalid_arguments_or_fabricated_receipts_never_return_partial_batch(self):
         good = json.dumps({'name': 'edit', 'arguments': {'file_path': '/x', 'content': 'x'}})
         invalid = [
