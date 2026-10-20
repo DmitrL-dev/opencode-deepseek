@@ -35,7 +35,7 @@ from chat_protocol import Reply, sse_events as _sse_events
 from providers.access import ProviderRejected, rejection, guard, current_attempt
 
 from .auth import Session, get_session
-from .pow import DeepSeekPow
+from .pow import DeepSeekPow, PowHeader
 from .stream_diagnostics import StreamCapture
 from . import refusals
 
@@ -182,6 +182,7 @@ class DeepSeekClient:
         self._diagnostic_phase, self._diagnostic_status = "challenge", None
         if access_attempt is not None:
             access_attempt.dispatch()
+        requested_at = time.monotonic()
         r = self._http.post(
             "/api/v0/chat/create_pow_challenge", json={"target_path": target_path}
         )
@@ -190,7 +191,7 @@ class DeepSeekClient:
         challenge = self._pre_generation_biz(r, access_attempt, "challenge")["challenge"]
         self._diagnostic_phase = "solve_challenge"
         with self._pow_lock:
-            return self._pow.make_header(challenge)
+            return self._pow.make_header(challenge, requested_at=requested_at)
 
     @staticmethod
     def _pre_generation_biz(response, access_attempt, phase="challenge"):
@@ -307,9 +308,11 @@ class _Stream:
                     attempt.abort(exc)
                 raise
 
-    def _dispatch(self):
+    def _dispatch(self, validate=None):
         if self.access_attempt is not None:
-            self.access_attempt.dispatch(kind="generation")
+            self.access_attempt.dispatch(kind="generation", validate=validate)
+        elif validate is not None:
+            validate()
 
     def _generate(self) -> Iterator[str]:
         if self.access_attempt is not None:
@@ -330,10 +333,11 @@ class _Stream:
         if self._model is not None:
             body["model_type"] = self._model
         # PoW challenges are short-lived, so solve right before the request.
-        headers = {"x-ds-pow-response": self._client._pow_header(access_attempt=self.access_attempt)}
+        pow_header = self._client._pow_header(access_attempt=self.access_attempt)
+        headers = {"x-ds-pow-response": pow_header}
         meta: dict = {}
         self._client._diagnostic_phase, self._client._diagnostic_status = "completion", None
-        self._dispatch()
+        self._dispatch(pow_header.validate if isinstance(pow_header, PowHeader) else None)
         stream_started = time.monotonic()
         with self._client._http.stream(
             "POST", COMPLETION_PATH, json=body, headers=headers, timeout=httpx.Timeout(READ_TIMEOUT)

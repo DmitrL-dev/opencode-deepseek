@@ -34,6 +34,33 @@ not tested against live accounts in Harness, OpenCode or a browser.
 > restricted repeatedly, with the exact cause undetermined. A passing test does
 > not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
+## DeepSeek review, October 21, 2026
+
+DeepSeek [updated its website, app and API to V4.1-Flash-1017](https://api-docs.deepseek.com/news/news261017/).
+The bridge sends `default` (`deepseek-chat`) or `expert` (`deepseek-expert`),
+not a weight revision: the service updates the selected mode. This does not
+prove a particular response version or automatically add a new model ID.
+DeepSeek recommends Harness `0.2.1-rc.1` or newer for the new model; compatibility
+of an upgraded Harness with the plugins needs separate verification.
+
+The offline review reproduced insufficient spacing between generations and a
+missing PoW expiry check after solving/waiting. The fixes add an
+independent generation deadline that survives restart, sign-in and budget reset.
+Challenge request latency and solving time count against PoW lifetime, which is
+checked again before sending. Expiry stops the request without automatically
+fetching another challenge or generating again. These fixes are included in `main`.
+The installed Harness upgrade from `0.2.0-rc.2` to `0.2.1-rc.2` was checked with
+the profile and history preserved.
+
+313 unit tests and 9 real CLI scenarios passed on Harness `0.2.1-rc.2`, using a
+synthetic provider and outbound network isolation: read/write, refusal handling,
+shell pipelines and no retry on HTTP 503. Live generation with the upgraded
+version was not tested. Thirty seconds is a local setting, not a provider-approved
+safe quota. The exact cause of previous temporary restrictions remains unknown:
+the original server codes were not retained. An elapsed restriction period does
+not clear a local pause or establish the outcome of a pending request.
+[Evidence and remaining unknowns](docs/RECHECK.2026-10-21.md).
+
 ## Quick start
 
 You need **Python 3.9+** (3.12 recommended), Git, an account with your selected

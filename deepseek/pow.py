@@ -20,13 +20,30 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import struct
+import time
 from pathlib import Path
 from typing import Optional
 
 import wasmtime
+from providers.access import ProviderRejected
 
 WASM_PATH = Path(__file__).resolve().parent / "sha3_wasm_bg.wasm"
+
+
+class PowHeader(str):
+    """One locally bounded answer, validated again at the transport boundary."""
+    def __new__(cls, value, deadline):
+        instance = super().__new__(cls, value)
+        instance.deadline = deadline
+        return instance
+
+    def validate(self):
+        if time.monotonic() >= self.deadline:
+            error = ProviderRejected('local_pow_expired', source='local_limit')
+            error.before_dispatch = True
+            raise error
 
 
 class DeepSeekPow:
@@ -74,12 +91,23 @@ class DeepSeekPow:
             return None
         return int(value)
 
-    def make_header(self, challenge: dict) -> str:
+    def make_header(self, challenge: dict, *, requested_at=None) -> str:
         """Build the base64 `x-ds-pow-response` header value from a challenge dict."""
+        lifetime = challenge.get('expire_after')
+        if type(lifetime) not in (int, float) or not math.isfinite(lifetime) or lifetime <= 0:
+            raise ValueError('Invalid PoW lifetime')
+        # The site's expire_after is a duration in milliseconds, compared with
+        # Date.now(). Starting before the HTTP request also charges its latency.
+        deadline = (time.monotonic() if requested_at is None else requested_at) + lifetime / 1000
+        if not math.isfinite(deadline):
+            raise ValueError('Invalid PoW deadline')
+        validity = PowHeader('', deadline)
+        validity.validate()
         prefix = f"{challenge['salt']}_{challenge['expire_at']}_"
         answer = self.solve(challenge["challenge"], prefix, challenge["difficulty"])
         if answer is None:
             raise RuntimeError("PoW solver returned no answer (challenge expired?)")
+        validity.validate()
         payload = {
             "algorithm": challenge["algorithm"],
             "challenge": challenge["challenge"],
@@ -89,4 +117,4 @@ class DeepSeekPow:
             "target_path": challenge["target_path"],
         }
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        return base64.b64encode(raw).decode("utf-8")
+        return PowHeader(base64.b64encode(raw).decode("utf-8"), deadline)

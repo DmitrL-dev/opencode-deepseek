@@ -389,3 +389,14 @@ during migration never authorize a replay; those require separate local
 diagnostic review. Offline checks:
 `python -m unittest tests.test_context_rollover tests.test_deepseek_protocol`.
 No live accounts were used.
+
+
+### Upgrade verification — October 21, 2026
+
+Harness `0.2.1-rc.2`: 9 real CLI scenarios passed with a synthetic provider,
+isolated HOME/DSH_HOME and no outbound network except loopback. Coverage: text,
+read/write, refusal/pause, no retry on HTTP 503, pipeline failure, canceled batch,
+and optional grep preserving producer failures. macOS rejects nested sandbox-exec;
+shell fixtures use an unconfined inner mode under the external file/network
+sandbox. The installed desktop profile keeps its original protection settings.
+These results do not qualify live provider access.

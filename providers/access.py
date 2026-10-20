@@ -26,6 +26,7 @@ MAX_BUDGET = 2000
 
 PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini', 'chatgpt', 'claude'))
 MESSAGES = {
+    'local_pow_expired': 'The proof of work expired locally before sending. No automatic refresh or replay.',
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
     'local_prompt_too_large': 'The prompt exceeds the local per-request size limit (128 KiB). Shorten the context; waiting or resetting budgets does not help.',
     'account_muted': 'DeepSeek temporarily disabled sending for this account. Signing in again does not clear this restriction.',
@@ -302,7 +303,7 @@ class AccessGuard:
             # Upgrade the initial flat pause format without losing restrictions.
             if isinstance(item, str) and item in MESSAGES:
                 item = {'pause': item}
-            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at', 'next_http_at', 'usage', 'recoverable_auth'}:
+            if not isinstance(item, dict) or set(item) - {'pause', 'pending', 'dispatched', 'next_at', 'next_http_at', 'next_generation_at', 'usage', 'recoverable_auth'}:
                 raise ValueError('Invalid provider record')
             if 'recoverable_auth' in item and (item['recoverable_auth'] is not True
                     or provider != 'deepseek' or item.get('pause') != 'session_expired'
@@ -321,6 +322,10 @@ class AccessGuard:
             if (isinstance(next_http_at, bool) or not isinstance(next_http_at, (int, float))
                     or not math.isfinite(next_http_at) or next_http_at < 0):
                 raise ValueError('Invalid HTTP pacing state')
+            next_generation_at = item.get('next_generation_at', 0)
+            if (isinstance(next_generation_at, bool) or not isinstance(next_generation_at, (int, float))
+                    or not math.isfinite(next_generation_at) or next_generation_at < 0):
+                raise ValueError('Invalid generation pacing state')
             usage = item.get('usage', [])
             if (not isinstance(usage, list) or len(usage) > MAX_BUDGET
                     or any(not isinstance(entry, list) or len(entry) != 2
@@ -544,6 +549,13 @@ def _budget_usage(record, kind, now, http_cost=1, limits=None):
     return usage
 
 
+def _next_generation(record, interval):
+    # Older journals lack the dedicated deadline. Derive it conservatively from
+    # their existing dispatch ledger without rewriting counters during a read.
+    previous = max((t for t, kind in record.get('usage', []) if kind == 'generation'), default=None)
+    return max(record.get('next_generation_at', 0), previous + interval if previous is not None else 0)
+
+
 class Attempt:
     def __init__(self, guard, provider, cancelled):
         self.guard, self.provider, self.cancelled = guard, provider, cancelled
@@ -570,13 +582,20 @@ class Attempt:
 
     def preflight_generation(self, new_chat):
         """Check the whole HTTP sequence before creating a chat or challenge."""
-        self.check()
-        if self.provider == 'deepseek':
+        while True:
+            self.check()
+            if self.provider != 'deepseek':
+                return
             with self.guard._state() as state:
                 record = state[self.provider]
                 _budget_usage(record, 'generation', time.time(), 3 if new_chat else 2, self.guard.budget_limits)
                 if new_chat:
                     _budget_usage(record, 'chat', time.time(), 3, self.guard.budget_limits)
+                delay = _next_generation(record, self.guard.interval) - time.time()
+            if delay <= 0:
+                return
+            # Wait before acquiring a short-lived PoW, without charging a send.
+            time.sleep(min(delay, 0.1))
 
     def dispatch(self, validate=None, kind="http"):
         if kind not in ('http', 'chat', 'generation'):
@@ -595,16 +614,20 @@ class Attempt:
                 delay = 0 if self.dispatched else record.get('next_at', 0) - time.time()
                 if self.provider == 'deepseek':
                     delay = max(delay, record.get('next_http_at', 0) - time.time())
+                    if kind == 'generation':
+                        delay = max(delay, _next_generation(record, self.guard.interval) - time.time())
                 if delay <= 0:
                     entry = None
                     first = not self.dispatched
-                    restore = {key: record[key] for key in ('next_at', 'next_http_at') if key in record}
+                    restore = {key: record[key] for key in ('next_at', 'next_http_at', 'next_generation_at') if key in record}
                     if self.provider == 'deepseek':
                         now = time.time()
                         usage = _budget_usage(record, kind, now, limits=self.guard.budget_limits)
                         entry = [now, kind]
                         record['usage'] = [*usage, entry]
                         record['next_http_at'] = now + min(self.guard.interval, 3)
+                        if kind == 'generation':
+                            record['next_generation_at'] = now + self.guard.interval
                     if validate is not None:
                         validate()
                     if first:
@@ -643,10 +666,10 @@ class Attempt:
                         if usage[index] == entry:
                             del usage[index]
                             break
-                    for key in ('next_at', 'next_http_at'):
+                    for key in ('next_at', 'next_http_at', 'next_generation_at'):
                         if key in restore:
                             record[key] = restore[key]
-                        elif key == 'next_http_at':
+                        elif key in ('next_http_at', 'next_generation_at'):
                             record.pop(key, None)
                 if first:
                     record['dispatched'] = False
