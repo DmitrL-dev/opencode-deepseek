@@ -620,7 +620,8 @@ class ExportedScriptsUsePort(unittest.TestCase):
                     "b.install = lambda home, profile, token, base: print(base)\n"
                     "sys.argv = ['x', '--token-file', 't']\n"
                     "b.main()\n")
-            env = {key: value for key, value in os.environ.items() if key != 'PORT'}
+            env = {key: value for key, value in os.environ.items()
+                   if key not in ('PORT', 'BRIDGE_SKIP_DOTENV')}
             env['PYTHONPATH'] = str(root)
             result = subprocess.run([sys.executable, '-c', code], cwd=root, env=env,
                                     capture_output=True, text=True, timeout=60)

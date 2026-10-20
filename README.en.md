@@ -630,7 +630,9 @@ at the provider. This operation is destructive.
 - [Standalone DeepSeek terminal chat](docs/TERMINAL_CHAT.md)
 
 CI covers Python 3.9/3.12, PoW WASM, shell/JavaScript and isolated browser fixtures.
-Locally: `python -m unittest discover -s tests -t . -v`.
+Locally: `python -m unittest discover -s tests -t . -v`. The run is hermetic: `.env`
+and exported provider flags are ignored, so results match CI. Outside the suite the
+same mode is `BRIDGE_SKIP_DOTENV=1`.
 [Real Harness CLI fixtures with mocked providers](docs/HARNESS.en.md#offline-verification).
 
 ### Browser exchange safety

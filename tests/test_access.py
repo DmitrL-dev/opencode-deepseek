@@ -225,7 +225,7 @@ class AccessTests(unittest.TestCase):
             login.assert_not_called()
 
     def test_clean_install_has_no_implicitly_enabled_provider(self):
-        env = {**os.environ, "DEEPSEEK_ENABLED": "0", "QWEN_ENABLED": "0", **{name + "_ENABLED": "0" for name in ("GROK", "MISTRAL", "KIMI", "GLM", "GEMINI", "CHATGPT")}}
+        env = {**os.environ, "DEEPSEEK_ENABLED": "0", "QWEN_ENABLED": "0", **{name + "_ENABLED": "0" for name in ("GROK", "MISTRAL", "KIMI", "GLM", "GEMINI", "CHATGPT", "CLAUDE")}}
         result = subprocess.run([sys.executable, "-c", "from server.config import MODEL_MAP; print(MODEL_MAP)"], env=env, capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), "{}")
 
