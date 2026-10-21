@@ -51,6 +51,29 @@ class AccessTests(unittest.TestCase):
         restarted.resume("deepseek")
         guard.check("deepseek")
 
+    def test_access_pause_opt_out_skips_latch_and_all_shared_blocking(self):
+        guard = AccessGuard(self.path, interval=0)
+        # Simulate state latched by a previous server run with the default on.
+        guard.reject("deepseek", ProviderRejected("account_restricted"))
+        with patch.dict(os.environ, {'PROVIDER_ACCESS_PAUSE': '0'}):
+            # The opt-out means callers need not run `resume` to clear either a
+            # stored pause or an unresolved pending owner.
+            guard.check("deepseek")
+            attempt = guard.begin("deepseek")
+            attempt.dispatch()
+            attempt.complete()
+            error = guard.reject("deepseek", ProviderRejected("quota_exceeded"))
+            self.assertEqual(error.code, "quota_exceeded")
+            self.assertEqual(guard.status(), {})
+        # Default on: a newly latched pause still blocks until resume.
+        with self.assertLogs("providers.access", level="WARNING"):
+            guard.resume("deepseek")
+            guard.reject("deepseek", ProviderRejected("quota_exceeded"))
+        with self.assertRaises(ProviderRejected):
+            AccessGuard(self.path, interval=0).check("deepseek")
+        with patch.dict(os.environ, {'PROVIDER_ACCESS_PAUSE': '0'}):
+            AccessGuard(self.path, interval=0).check("deepseek")
+
     def test_new_pause_logs_sanitized_http_shape_not_payload_text(self):
         request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
         response = httpx.Response(
@@ -159,6 +182,17 @@ class AccessTests(unittest.TestCase):
         with self.assertRaises(ProviderRejected):
             guard.check("qwen")
 
+    def test_removed_provider_records_are_ignored(self):
+        self.path.write_text(json.dumps({
+            'qwen': {'next_at': 10},
+            'removed-provider': {'pause': 'upstream_failure', 'pending': 'f' * 32,
+                                 'dispatched': True},
+        }))
+        guard = AccessGuard(self.path, interval=0)
+        guard.check('qwen')
+        with guard._state() as state:
+            self.assertEqual(set(state), {'qwen'})
+
     def test_pacing_can_be_cancelled_without_starting_another_attempt(self):
         guard = AccessGuard(path=None, interval=60)
         guard.wait("qwen")
@@ -191,7 +225,7 @@ class AccessTests(unittest.TestCase):
             login.assert_not_called()
 
     def test_clean_install_has_no_implicitly_enabled_provider(self):
-        env = {**os.environ, "DEEPSEEK_ENABLED": "0", "QWEN_ENABLED": "0", **{name + "_ENABLED": "0" for name in ("GROK", "MISTRAL", "KIMI", "GLM", "GEMINI", "CHATGPT")}}
+        env = {**os.environ, "DEEPSEEK_ENABLED": "0", "QWEN_ENABLED": "0", **{name + "_ENABLED": "0" for name in ("GROK", "MISTRAL", "KIMI", "GLM", "GEMINI", "CHATGPT", "CLAUDE")}}
         result = subprocess.run([sys.executable, "-c", "from server.config import MODEL_MAP; print(MODEL_MAP)"], env=env, capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), "{}")
 

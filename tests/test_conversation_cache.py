@@ -17,6 +17,77 @@ from tests.test_tools import block, FLAT_TOOLS
 
 
 class ConversationTests(unittest.TestCase):
+    def test_add_and_search_events_log_fields_without_message_text(self):
+        from server import toolcall_logging
+        from server.conversation_cache import digest_payload_json
+        request = ChatCompletionRequest(
+            model='deepseek-chat', tools=FLAT_TOOLS,
+            messages=[ChatMessage(role='user', content='PRIVATE PROMPT CONTENT')])
+        with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
+             patch('server.conversation_cache.new_toolcall_log', return_value=Path('trace.log')) as new_chat, \
+             patch('server.conversation_cache.record_toolcall_log') as record:
+            self.cache.remember(request, self.reply, 'assistant PRIVATE TEXT', None, 0,
+                                scope='isolated-test')
+            self.assertEqual(new_chat.call_count, 1)
+            added = record.call_args.args[2]
+            self.assertEqual(added['conversation_id'], 'owned:2')
+            self.assertEqual(added['used'], 0)
+            self.assertEqual(added['steps'], 1)
+            self.assertIn('PRIVATE PROMPT CONTENT', added['history'])
+            self.assertIn('assistant PRIVATE TEXT', added['history'])
+            self.assertEqual(added['history'], digest_payload_json(
+                request, [*request.messages, ChatMessage(role='assistant', content='assistant PRIVATE TEXT')]))
+            self.assertEqual(record.call_args.args[1], 'add_chat')
+        request = request.model_copy(update={'messages': [
+            ChatMessage(role='user', content='PRIVATE PROMPT CONTENT'),
+            ChatMessage(role='assistant', content='assistant PRIVATE TEXT'),
+            ChatMessage(role='user', content='next message'),
+        ]})
+        with patch.dict('os.environ', {'TOOLCALL_LOG': '1'}), \
+             patch('server.conversation_cache.new_toolcall_log', return_value=Path('trace.log')), \
+             patch('server.conversation_cache.record_toolcall_log') as record:
+            self.cache.prepare(request, scope='isolated-test')
+            calls = [call.args[1] for call in record.call_args_list]
+            self.assertIn('search_chat', calls)
+            search_call = next(call for call in record.call_args_list if call.args[1] == 'search_chat')
+            searched = search_call.args[2]
+            self.assertEqual(searched['key'], self.cache.key(request, request.messages[:2], 'isolated-test'))
+            self.assertEqual(searched['history'], digest_payload_json(
+                request, request.messages[:2]))
+            self.assertNotIn('fixture result', repr(searched))
+
+    def test_clear_used_links_on_startup_is_opt_in_and_preserves_unused(self):
+        self.cache.remember(self.req, self.reply, '', self.calls, 0, scope='isolated-test')
+        req = self.req.model_copy(update={'messages': self.history()})
+        self.cache.prepare(req, scope='isolated-test')
+        with self.cache.connection() as db:
+            db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, ?, ?)',
+                       ('unused-key', 'unused:1', 0, 1))
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': '0'}):
+            self.assertEqual(self.cache.clear_used_links_on_startup(), 0)
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': '1'}):
+            self.assertEqual(self.cache.clear_used_links_on_startup(), 1)
+        with self.cache.connection() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM links WHERE used=1').fetchone())
+            self.assertIsNotNone(db.execute('SELECT 1 FROM links WHERE key=?',
+                                           ('unused-key',)).fetchone())
+
+    def test_clear_used_links_on_startup_rejects_invalid_value(self):
+        with patch.dict('os.environ', {'CONVERSATION_CLEAR_USED_ON_STARTUP': 'yes'}):
+            with self.assertRaises(ValueError):
+                self.cache.clear_used_links_on_startup()
+
+    def test_trace_path_follows_provider_conversation_across_requests(self):
+        trace = self.cache.path.parent / 'trace.log'
+        self.cache.remember_trace(self.reply.conversation_id, trace)
+        self.assertEqual(self.cache.trace_path(self.reply.conversation_id), str(trace))
+        self.assertIsNone(self.cache.trace_path('unknown:2'))
+
+    def test_trace_path_survives_conversation_cache_restart(self):
+        trace = self.cache.path.parent / 'trace.log'
+        self.cache.remember_trace(self.reply.conversation_id, trace)
+        restarted = ConversationCache(self.cache.path)
+        self.assertEqual(restarted.trace_path(self.reply.conversation_id), str(trace))
     def test_local_stop_preserves_original_results_and_single_use_claim(self):
         from server.recovery_status import RECOVERY_STOP_TEXT
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
@@ -56,6 +127,22 @@ class ConversationTests(unittest.TestCase):
     def history(self):
         return [*self.req.messages, ChatMessage(role='assistant', tool_calls=self.calls),
                 ChatMessage(role='tool', tool_call_id='call_owned', content='fixture result')]
+
+    def test_tool_commentary_is_part_of_the_exact_history(self):
+        self.cache.remember(self.req, self.reply, 'Текст1\n\nТекст2', self.calls, 0)
+        history = self.history()
+        history[-2] = ChatMessage(
+            role='assistant', content='Текст1Текст2', tool_calls=self.calls)
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(self.req.model_copy(update={'messages': history}))
+        history[-2].content = 'Текст1\n\nТекст2'
+        self.assertEqual(self.cache.prepare(
+            self.req.model_copy(update={'messages': history}))[0].conversation_id, 'owned:2')
+
+    def test_tool_reply_without_delivered_content_is_not_a_matching_history(self):
+        self.cache.remember(self.req, self.reply, 'Текст1', self.calls, 0)
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(self.req.model_copy(update={'messages': self.history()}))
 
     def test_restart_reuses_chat_and_only_new_messages_once(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
@@ -176,8 +263,72 @@ class ConversationTests(unittest.TestCase):
     def test_ambiguous_identical_histories_are_not_merged(self):
         self.cache.remember(self.req, self.reply, '', self.calls, 0)
         self.cache.remember(self.req, Reply('', 'another:2'), '', self.calls, 0)
-        with self.assertRaises(ConversationStateError):
+        with self.assertRaisesRegex(
+                ConversationStateError,
+                'previously used chat'):
             self.cache.prepare(self.req.model_copy(update={'messages': self.history()}))
+
+    def test_system_drift_and_reminder_wrappers_require_explicit_compatibility(self):
+        from server.conversation_cache import digest
+        first = self.req.model_copy(update={'messages': [
+            ChatMessage(role='system', content='env day-1\nAGENTS.md v1'),
+            ChatMessage(role='user', content='Explore owned fixture'),
+        ]})
+        self.cache.remember(first, self.reply, '', self.calls, 0)
+        wrapped = (
+            "<system-reminder>\nThe user sent the following message:\n"
+            "Explore owned fixture\n\n"
+            "Please address this message and continue with your tasks.\n"
+            "</system-reminder>"
+        )
+        follow = first.model_copy(update={'messages': [
+            ChatMessage(role='system', content='env day-2\nAGENTS.md v2'),
+            ChatMessage(role='user', content=wrapped),
+            ChatMessage(role='assistant', tool_calls=self.calls),
+            ChatMessage(role='tool', tool_call_id='call_owned', content='fixture result'),
+        ]})
+        self.assertNotEqual(digest(first, first.messages + [
+            ChatMessage(role='assistant', tool_calls=self.calls)]),
+            digest(follow, follow.messages[:-1]))
+        with self.assertRaises(ConversationStateError):
+            self.cache.prepare(follow)
+
+    def test_pre_rework_database_keys_continue_without_rewriting_or_resetting(self):
+        # Fixed keys were produced by 525b266e, not by the implementation under
+        # test. They also match main before this PR; no live session is needed.
+        call = {'id': 'call_golden', 'type': 'function', 'function': {
+            'name': 'read', 'arguments': '{"file_path":"fixture"}'}}
+        cases = [
+            ('984f0c096b65e0cc8f7203fb0059587a766a4270f540d52ba5fb095bd3df7710', [
+                ChatMessage(role='system', content='Golden system'),
+                ChatMessage(role='user', content='Golden user'),
+                ChatMessage(role='assistant', content='Golden answer')]),
+            ('197e1d16af256bffb84d446110f7694ce2ebcedbe8d6356b63251d9fee85f1be', [
+                ChatMessage(role='user', content='Golden user'),
+                ChatMessage(role='assistant', content='Golden commentary', tool_calls=[call])]),
+            ('29d47b8601893da36296bf080b0d8694945a940bbe43d6ea63c2159892c0b556', [
+                ChatMessage(role='user', content='\n Golden user \n'),
+                ChatMessage(role='assistant', content='\n Golden answer \n')]),
+        ]
+        self.cache.max_replies = 200
+        for key, messages in cases:
+            tail = ([ChatMessage(role='tool', tool_call_id='call_golden', content='Completed')]
+                    if messages[-1].tool_calls else [ChatMessage(role='user', content='Continue')])
+            request = ChatCompletionRequest(model='deepseek-chat', messages=[*messages, *tail])
+            with self.subTest(key=key):
+                with self.cache.connection() as db:
+                    db.execute('INSERT INTO links (key,cid,used,steps) VALUES (?, ?, 0, 199)',
+                               (key, 'golden:398'))
+                claim = {}
+                prepared, steps = self.cache.prepare(request, claim=claim)
+                self.assertEqual((prepared.conversation_id, steps, claim['key']),
+                                 ('golden:398', 199, key))
+                with self.cache.connection() as db:
+                    self.assertEqual(db.execute('SELECT cid,used,steps,reservation FROM links WHERE key=?',
+                                                (key,)).fetchone(),
+                                     ('golden:398', 1, 199, claim['reservation']))
+                with self.assertRaises(ConversationStateError):
+                    self.cache.prepare(request, claim={})
 
     def test_transport_creates_one_chat_for_two_agent_steps(self):
         from deepseek.client import DeepSeekClient

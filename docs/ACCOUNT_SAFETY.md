@@ -77,6 +77,12 @@ reason (never a raw upstream body), states that this bridge enabled a durable
 Later requests hit that local pause before any browser job or CLI process is
 created and return HTTP `400` (same allowlisted `code`, `retryable: false`) with
 an explicit “manual providers.access pause” message and the same resume command.
+
+`PROVIDER_ACCESS_PAUSE` (default `1`) controls that durable latch. With `0` the
+bridge neither writes nor enforces those pauses (this request still fails). That
+opt-out is for local testing only, at your own risk: it can keep sending traffic
+to a restricted account and worsen blocks. Pending one-use attempts and local
+budgets are unchanged.
 Using `400` here avoids clients that rewrite every `403` into a generic “API key”
 warning. If streaming headers are already sent, the first failure is a terminal
 SSE error with the same wording. Invalid local tool responses use HTTP `400`,
@@ -138,18 +144,21 @@ local refusal behavior, not that live website automation is permitted or safe.
 ## DeepSeek load containment and conversation reuse
 
 The October 10 account restriction showed that bounded task success did not
-establish account safety. Keep `TOOLCALL_FORMAT_REPAIR=0` and
-`TOOLCALL_MAX_CONTINUATIONS=0`: format errors stop locally, with no additional
-model generation. The following changes are qualified using offline transports
-and an isolated Harness CLI, not by further requests to the restricted account.
+establish account safety. Keep `TOOLCALL_FORMAT_REPAIR=0`,
+`TOOLCALL_MAX_CONTINUATIONS=0`, and `TOOLCALL_INVALID_MODE=error`: format errors
+stop locally, with no additional model generation and no soft notice path. The
+following changes are qualified using offline transports and an isolated Harness
+CLI, not by further requests to the restricted account.
 
 Stateless OpenAI clients continue a saved provider conversation when their
-history exactly matches a delivered reply. This applies to DeepSeek and to
+non-system history matches a delivered reply. This applies to DeepSeek and to
 opt-in web providers (including Qwen browser tab bridge): only new tool
 results/user messages and current tool instructions are sent, so the browser
 tab resumes `/c/<id>` instead of opening another chat with the full system
-prompt. A private SQLite file in `session/` stores history hashes and provider
-conversation IDs, never message bodies.
+prompt. Client `system` messages and ephemeral OpenCode `<system-reminder>`
+wrappers are omitted from the history hash (they change between agent turns and
+are not forwarded on continuation). A private SQLite file in `session/` stores
+history hashes and provider conversation IDs, never message bodies.
 Links are reserved atomically before dispatch. A reservation is released only
 when the current request fails with a proven absence of HTTP dispatch. Once any
 HTTP request was dispatched, or after a process crash, the link stays consumed. Unknown, edited, compacted,

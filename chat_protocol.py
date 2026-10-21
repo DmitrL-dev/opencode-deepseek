@@ -1,6 +1,7 @@
 """Common transport types and SSE framing for the web-chat providers."""
 
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass
@@ -8,6 +9,10 @@ class Reply:
     text: str
     conversation_id: str
     finish_reason: str = "stop"
+    # Optional structured notice for TOOLCALL_INVALID_MODE=text (agent-visible).
+    bridge_notice: Optional[dict] = None
+    # Ordered text/tool_call parts for streaming; None keeps the legacy framing.
+    parts: Optional[list] = None
 
     def __str__(self) -> str:
         return self.text

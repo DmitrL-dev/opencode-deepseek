@@ -27,13 +27,14 @@ Streaming failures emit a terminal error and stop subsequent reconnects.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import asynccontextmanager
-import hashlib
 from contextvars import ContextVar
 
 import anyio
@@ -54,6 +55,12 @@ from providers.common import ProviderUnavailable
 from .tool_protocol import validate_reply
 from .tool_history import validate_tool_history
 from .diagnostics import save_tool_failure
+from .toolcall_logging import (
+    enabled as toolcall_logging_enabled,
+    new_chat as new_toolcall_log,
+    record as record_toolcall_log,
+    record_error as record_toolcall_error,
+)
 from .conversation_cache import conversation_cache, ConversationStateError
 
 from .config import (
@@ -69,11 +76,11 @@ from .config import (
     is_known_model,
     resolve_model_type,
     model_provider,
+    provider_uses_browser,
     qwen_uses_browser,
 )
 from .openai_format import (
     completion_response,
-    looks_truncated,
     messages_to_prompt,
     sse_frames,
     stream_chunks,
@@ -85,6 +92,18 @@ from .browser_routes import router as browser_router
 from .schemas import ChatCompletionRequest, ChatMessage
 
 _log = logging.getLogger(__name__)
+
+# Main-era continuation probe (as in openai_format at 60f860a). openai_format.looks_truncated
+# is now mid-message for TOOLCALL_LEGACY=0 / api_new; keep start-of-reply here for LEGACY=1.
+_TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
+_CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
+
+
+def looks_truncated(text: str, allowed_names=None) -> bool:
+    """Continue only an explicitly started tool block missing its closing fence."""
+    del allowed_names
+    stripped = (text or "").strip()
+    return bool(_TOOL_START_RE.match(stripped)) and not _CLOSING_TOOL_FENCE_RE.search(stripped)
 
 # One shared client (and its signed-in session) built lazily on first use.
 _client: DeepSeekClient | None = None
@@ -286,9 +305,13 @@ def _invalidate_client(provider, client=None):
 
 def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
     """One durable attempt; cancellation cannot erase an uncertain dispatch."""
+    trace = req._toolcall_log_path
     provider = model_provider(req.model)
     if provider == 'deepseek' and len(prompt.encode('utf-8')) > 131072:
-        raise ProviderRejected('local_prompt_too_large', source='local_limit')
+        record_toolcall_log(trace, "to_provider", prompt)
+        error = ProviderRejected('local_prompt_too_large', source='local_limit')
+        record_toolcall_error(trace, "from_provider", error)
+        raise error
     client = None
     attempt = None
     try:
@@ -310,8 +333,12 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
                 raise QwenLoginRequired('The Qwen session belongs to a different account than this history; '
                                         'no request was sent.')
             attempt.check()  # Recheck a pause that happened while building a client.
-            return client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
-    except LoginRequired:
+            record_toolcall_log(trace, "to_provider", prompt)
+            reply = client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
+            record_toolcall_log(trace, "from_provider", reply.text)
+            return reply
+    except LoginRequired as exc:
+        record_toolcall_error(trace, "from_provider", exc)
         _invalidate_client(provider, client)
         raise
     except Exception as exc:
@@ -319,6 +346,7 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
         if attempt is not None:
             _invalidate_client(provider, client)
         error = exc if isinstance(exc, ProviderRejected) else rejection(exc)
+        record_toolcall_error(trace, "from_provider", error)
         raise error from exc
 
 
@@ -331,7 +359,13 @@ if _MAX_CONTINUATIONS < 0:
 # One opt-in format correction in the same DeepSeek conversation. This is
 # separate from transport retries and output-limit continuation; neither a
 # rejection nor an uncertain/truncated generation qualifies.
+# With TOOLCALL_LEGACY=0, repair uses api_new.browser_repair_prompt for every provider.
 _FORMAT_REPAIR = os.getenv("TOOLCALL_FORMAT_REPAIR", "0") == "1"
+
+# Temporary switch: 1 = main-era path in this file + tool_protocol.py (default);
+# 0 = tool-rework in api_new.py + tool_protocol_new.py. Will be removed.
+_LEGACY = os.getenv("TOOLCALL_LEGACY", "1") == "1"
+
 _FORMAT_REPAIR_PROMPT = (
     "No tools were executed from your previous reply: it was empty or its tool-call format was invalid. "
     "Choose the next response using the task and tool schemas already provided. "
@@ -455,10 +489,13 @@ def _conversation_tool_chat(prompt, req, model_type):
         else:
             scope = _conversation_scope(provider)
             conversation_token = _bound_conversation.set(binding)
-        req, steps = conversation_cache.prepare(req, scope=scope, claim=claim,
-                                                legacy_scopes=legacy,
-                                                allow_local_rollover=(provider == 'deepseek' and
-                                                    os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') == '1'))
+        browser = provider != "deepseek" and provider_uses_browser(provider)
+        req, steps = conversation_cache.prepare(
+            req, scope=scope, claim=claim, compact_results=browser,
+            legacy_scopes=legacy,
+            allow_local_rollover=(provider == 'deepseek' and
+                os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') == '1'),
+            trace_path=original._toolcall_log_path)
         if claim and steps >= conversation_cache.max_replies:
             # Migrate before dispatch: the capped conversation receives no request.
             # A failure in the new conversation cannot enter the refusal-retry path.
@@ -477,8 +514,14 @@ def _conversation_tool_chat(prompt, req, model_type):
             conversation_cache.claim_rollover(claim, req.conversation_id, archive)
             _check_cancelled()
             reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
-            result = (_validate_tool_reply(reply, migrated, allow_continuation=False) if migrated.tools else
-                      (reply, reply.text, None))
+            if not migrated.tools:
+                result = (reply, reply.text, None)
+            elif not _LEGACY:
+                from . import api_new
+                result = api_new.validate_tool_reply(
+                    reply, migrated, allow_continuation=False)
+            else:
+                result = _validate_tool_reply(reply, migrated, allow_continuation=False)
             # Only the new conversation starts at one reply. Old rows and all
             # provider usage journals remain intact.
             conversation_cache.remember(original, *result, 0, scope=scope)
@@ -488,11 +531,18 @@ def _conversation_tool_chat(prompt, req, model_type):
             # Continuation of a saved provider chat: browser light mode may shorten tools.
             prompt = messages_to_prompt(
                 req.messages, req.tools, req.tool_choice,
-                tools_continuation=True, provider=provider)
+                tools_continuation=True, provider=provider, tool_results_compact=browser)
             model_type = None
         try:
-            result = (_tool_chat_with_retry(prompt, req, model_type) if req.tools else
-                      _plain_conversation_reply(prompt, req, model_type))
+            if not req.tools:
+                result = _plain_conversation_reply(prompt, req, model_type)
+            elif not _LEGACY:
+                from . import api_new
+                result = api_new.tool_chat_or_notice(
+                    prompt, req, model_type, provider,
+                    api_new.executed_calls(original.messages))
+            else:
+                result = _tool_chat_with_retry(prompt, req, model_type)
         except ProviderRejected as exc:
             # One opt-in migration, never a transport retry or a format repair.
             # Existing pauses cannot enter here: only this request's first,
@@ -521,8 +571,14 @@ def _conversation_tool_chat(prompt, req, model_type):
             # No format-repair or output continuation on the migration request.
             # Any new failure stops with the new attempt still consumed.
             migrated_reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
-            result = (_validate_tool_reply(migrated_reply, migrated, allow_continuation=False) if migrated.tools else
-                      (migrated_reply, migrated_reply.text, None))
+            if not migrated.tools:
+                result = (migrated_reply, migrated_reply.text, None)
+            elif not _LEGACY:
+                from . import api_new
+                result = api_new.validate_tool_reply(
+                    migrated_reply, migrated, allow_continuation=False)
+            else:
+                result = _validate_tool_reply(migrated_reply, migrated, allow_continuation=False)
         conversation_cache.remember(original, *result, steps, scope=scope)
         succeeded = True
         return result
@@ -545,6 +601,7 @@ def _conversation_tool_chat(prompt, req, model_type):
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
+    """Main-era path (TOOLCALL_LEGACY=1): DeepSeek-only format repair; always raise."""
     reply = _chat_with_retry(prompt, req, model_type)
     try:
         return _validate_tool_reply(reply, req)
@@ -643,6 +700,7 @@ def _sse_error(message: str, err_type: str = "server_error") -> str:
 def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
     """Client-facing pause text. Never includes upstream bodies or secrets."""
     provider = model_provider(model)
+    pause_enabled = os.getenv('PROVIDER_ACCESS_PAUSE', '1') == '1'
     resume = f"python -m providers.access resume {provider}"
     if exc.code in ('account_restricted', 'account_muted', 'account_banned',
                     'ip_restricted', 'gateway_challenge', 'pow_rejected'):
@@ -666,6 +724,13 @@ def _provider_pause_message(exc: ProviderRejected, model: str) -> str:
             f"(pause={exc.code}): {exc} "
             f"No request was sent to the upstream provider. "
             f"Inspect the normal website, then clear the pause with: `{resume}`"
+        )
+    if not pause_enabled:
+        return (
+            f"Upstream provider `{provider}` refused this request "
+            f"(mapped={exc.code}): {exc} "
+            "Provider blocking is disabled (`PROVIDER_ACCESS_PAUSE=0`); "
+            "no manual pause reset is required."
         )
     # Fresh allowlisted upstream refusal that just latched a durable pause.
     return (
@@ -710,6 +775,13 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
     can take minutes for a large write/edit. We run that work as a task and emit
     SSE keep-alive comments while it runs so the client's idle timer never fires.
     """
+    trace = req._toolcall_log_path
+    if trace is None and req.conversation_id and toolcall_logging_enabled():
+        trace = conversation_cache.trace_path(req.conversation_id)
+        req._toolcall_log_path = trace
+    if trace is None and toolcall_logging_enabled() and not req.conversation_id:
+        trace = new_toolcall_log(model_provider(req.model))
+        req._toolcall_log_path = trace
     task = asyncio.ensure_future(_run_tool_chat(prompt, req, model_type))
     try:
         while True:
@@ -721,20 +793,38 @@ async def _tool_stream(req: ChatCompletionRequest, prompt: str, model_type):
         try:
             reply, content, tool_calls = task.result()
         except LoginRequired as e:
-            yield _sse_error(str(e), "login_required")
+            record_toolcall_error(trace, "from_provider", e)
+            frame = _sse_error(str(e), "login_required")
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
             return
         except ToolCallError as e:
-            yield _sse_error(str(e), "invalid_tool_response")
+            record_toolcall_error(trace, "from_provider", e)
+            frame = _sse_error(str(e), "invalid_tool_response")
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
             return
         except ProviderRejected as e:
-            yield _sse_error(_provider_pause_message(e, req.model), e.code)
+            record_toolcall_error(trace, "from_provider", e)
+            frame = _sse_error(_provider_pause_message(e, req.model), e.code)
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
             return
         except Exception as e:
-            yield _sse_error(_completion_failure_message(e))
+            record_toolcall_error(trace, "from_provider", e)
+            frame = _sse_error(_completion_failure_message(e))
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
             return
 
-        for frame in sse_frames(req.model, content, tool_calls, reply.conversation_id,
-                                finish_reason=reply.finish_reason):
+        if trace is not None and reply.conversation_id:
+            conversation_cache.remember_trace(reply.conversation_id, trace)
+        frames = sse_frames(req.model, content, tool_calls, reply.conversation_id,
+                            finish_reason=reply.finish_reason,
+                            bridge_notice=getattr(reply, "bridge_notice", None),
+                            parts=getattr(reply, "parts", None))
+        for frame in frames:
+            record_toolcall_log(trace, "to_agent", frame)
             yield frame
     finally:
         if not task.done():
@@ -754,6 +844,7 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             with attempt.bind():
                 client = _request_client(req)
         attempt.check()
+        record_toolcall_log(req._toolcall_log_path, "to_provider", prompt)
         stream = _open_stream(client, prompt, req, model_type)
         stream.access_attempt = attempt
         iterator = iter(stream)
@@ -766,16 +857,44 @@ def _stream_with_retry(client: DeepSeekClient, prompt: str,
             # Verify and clear the journal before yielding final SSE frames.
             attempt.complete()
 
-        yield from stream_chunks(req.model, stream, iterator=remaining())
+        trace = req._toolcall_log_path
+        reply_chunks = []
+        first_frame = True
+        for chunk in remaining():
+            if not chunk:
+                continue
+            reply_chunks.append(chunk)
+            record_toolcall_log(trace, "from_provider", chunk)
+            for frame in stream_chunks(
+                    req.model, stream,
+                    iterator=([chunk] if first_frame else ()),
+                    include_role=first_frame, include_final=False):
+                record_toolcall_log(trace, "to_agent", frame)
+                yield frame
+            first_frame = False
+        record_toolcall_log(trace, "from_provider", "".join(reply_chunks))
+        for frame in stream_chunks(req.model, stream, iterator=(),
+                                   include_role=first_frame, include_final=True):
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
+
     except LoginRequired as exc:
         _invalidate_client(model_provider(req.model), client)
-        yield _sse_error(str(exc), "login_required")
+        trace = req._toolcall_log_path
+        record_toolcall_error(trace, "from_provider", exc)
+        frame = _sse_error(str(exc), "login_required")
+        record_toolcall_log(trace, "to_agent", frame)
+        yield frame
     except Exception as exc:
         if attempt is not None:
             attempt.abort(exc)
             _invalidate_client(model_provider(req.model), client)
         error = exc if isinstance(exc, ProviderRejected) else rejection(exc)
-        yield _sse_error(_provider_pause_message(error, req.model), error.code)
+        trace = req._toolcall_log_path
+        record_toolcall_error(trace, "from_provider", error)
+        frame = _sse_error(_provider_pause_message(error, req.model), error.code)
+        record_toolcall_log(trace, "to_agent", frame)
+        yield frame
     finally:
         if iterator is not None and hasattr(iterator, "close"):
             iterator.close()
@@ -793,6 +912,7 @@ async def _plain_stream(client, prompt, req, model_type):
                 frame = await _run_worker(next, generator, _MISSING)
                 if frame is _MISSING:
                     break
+                record_toolcall_log(req._toolcall_log_path, "to_agent", frame)
                 yield frame
         finally:
             with anyio.CancelScope(shield=True):
@@ -801,6 +921,13 @@ async def _plain_stream(client, prompt, req, model_type):
 
 async def _buffered_plain_stream(req, prompt, model_type):
     """Keep the connection alive while optional transports validate an answer."""
+    trace = req._toolcall_log_path
+    if trace is None and req.conversation_id and toolcall_logging_enabled():
+        trace = conversation_cache.trace_path(req.conversation_id)
+        req._toolcall_log_path = trace
+    if trace is None and toolcall_logging_enabled() and not req.conversation_id:
+        trace = new_toolcall_log(model_provider(req.model))
+        req._toolcall_log_path = trace
     task = asyncio.ensure_future(_run_chat_with_retry(prompt, req, model_type))
     try:
         while True:
@@ -811,16 +938,29 @@ async def _buffered_plain_stream(req, prompt, model_type):
         try:
             reply = task.result()
         except LoginRequired as exc:
-            yield _sse_error(str(exc), "login_required")
+            record_toolcall_error(trace, "from_provider", exc)
+            frame = _sse_error(str(exc), "login_required")
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
             return
         except ProviderRejected as exc:
-            yield _sse_error(_provider_pause_message(exc, req.model), exc.code)
+            record_toolcall_error(trace, "from_provider", exc)
+            frame = _sse_error(_provider_pause_message(exc, req.model), exc.code)
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
             return
         except Exception as exc:
-            yield _sse_error(_completion_failure_message(exc))
+            record_toolcall_error(trace, "from_provider", exc)
+            frame = _sse_error(_completion_failure_message(exc))
+            record_toolcall_log(trace, "to_agent", frame)
+            yield frame
             return
-        for frame in sse_frames(req.model, reply.text, None, reply.conversation_id,
-                                finish_reason=reply.finish_reason):
+        if trace is not None and reply.conversation_id:
+            conversation_cache.remember_trace(reply.conversation_id, trace)
+        frames = sse_frames(req.model, reply.text, None, reply.conversation_id,
+                            finish_reason=reply.finish_reason)
+        for frame in frames:
+            record_toolcall_log(trace, "to_agent", frame)
             yield frame
     finally:
         if not task.done():
@@ -836,6 +976,10 @@ async def lifespan(app: FastAPI):
     _provider_request_gates = {name: asyncio.Lock() for name in PROVIDERS}
     _stop_refresh = threading.Event()
     stop_event = _stop_refresh
+    # CONVERSATION_CLEAR_USED_ON_STARTUP=1 removes consumed cache links. This
+    # allows repeating an initial prompt in a new chat, but a repeated history
+    # can be matched to the wrong upstream chat and fail during continuation.
+    conversation_cache.clear_used_links_on_startup()
     # Background browser recapture is retired, including existing .env opt-ins.
     try:
         yield
@@ -915,27 +1059,51 @@ async def chat_completions(req: ChatCompletionRequest, request: Request = None):
 
 
 async def _chat_completions(req: ChatCompletionRequest):
+    trace = req._toolcall_log_path
+    if trace is None and toolcall_logging_enabled():
+        if req.conversation_id:
+            trace = conversation_cache.trace_path(req.conversation_id)
+        if trace is None:
+            trace = new_toolcall_log(model_provider(req.model) if is_known_model(req.model) else req.model)
+        req._toolcall_log_path = trace
+    record_toolcall_log(trace, "from_agent", req.model_dump_json(exclude_none=True))
     if not req.messages:
-        return _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
+        response = _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
+        record_toolcall_log(trace, "to_agent", response)
+        return response
 
     try:
         validate_tool_history(req.messages)
     except ValueError as exc:
-        return _error(str(exc), status=400, err_type="invalid_request_error")
+        record_toolcall_error(trace, "from_agent", exc)
+        response = _error(str(exc), status=400, err_type="invalid_request_error")
+        record_toolcall_log(trace, "to_agent", response)
+        return response
 
     if not is_known_model(req.model):
-        return _error(
+        record_toolcall_log(trace, "from_provider", f"UnknownModel: {req.model}")
+        response = _error(
             f"The model `{req.model}` does not exist. Available models: "
             f"{', '.join(advertised_model_ids())}",
             status=404, err_type="model_not_found",
         )
+        record_toolcall_log(trace, "to_agent", response)
+        return response
 
     try:
         # A live request in this process may be queued behind; abandoned or
         # external attempts and real pauses must still fail before any factory.
         await _run_worker(guard.check, model_provider(req.model), None, True)
     except ProviderRejected as exc:
-        return _provider_rejected_response(exc, req.model)
+        record_toolcall_error(trace, "from_provider", exc)
+        response = _provider_rejected_response(exc, req.model)
+        record_toolcall_log(trace, "to_agent", response)
+        return response
+    except Exception as exc:
+        record_toolcall_error(trace, "from_provider", exc)
+        response = _error(_completion_failure_message(exc), status=500)
+        record_toolcall_log(trace, "to_agent", response)
+        return response
 
     if req.conversation_id:
         try:
@@ -947,7 +1115,10 @@ async def _chat_completions(req: ChatCompletionRequest):
             else:
                 decode_deepseek_cid(req.conversation_id)
         except ValueError as exc:
-            return _error(str(exc), status=400, err_type="invalid_request_error")
+            record_toolcall_error(trace, "from_agent", exc)
+            response = _error(str(exc), status=400, err_type="invalid_request_error")
+            record_toolcall_log(trace, "to_agent", response)
+            return response
 
     try:
         names = _tool_names(req.tools)
@@ -955,7 +1126,10 @@ async def _chat_completions(req: ChatCompletionRequest):
             raise ValueError("Tools must have distinct, non-empty function names")
         validate_tool_choice(req.tool_choice, names)
     except ValueError as exc:
-        return _error(str(exc), status=400, err_type="invalid_request_error")
+        record_toolcall_error(trace, "from_agent", exc)
+        response = _error(str(exc), status=400, err_type="invalid_request_error")
+        record_toolcall_log(trace, "to_agent", response)
+        return response
 
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
@@ -975,18 +1149,39 @@ async def _chat_completions(req: ChatCompletionRequest):
             _tool_stream(req, prompt, model_type),
             media_type="text/event-stream",
         )
+    record_toolcall_log(trace, "to_provider", prompt)
     try:
         reply, content, tool_calls = await _run_tool_chat(prompt, req, model_type)
     except LoginRequired as e:
-        return _error(str(e), status=401, err_type="login_required")
+        record_toolcall_error(trace, "from_provider", e)
+        response = _error(str(e), status=401, err_type="login_required")
+        record_toolcall_log(trace, "to_agent", response)
+        return response
     except ToolCallError as e:
-        return _error(str(e), status=400, err_type="invalid_tool_response")
+        record_toolcall_error(trace, "from_provider", e)
+        response = _error(str(e), status=400, err_type="invalid_tool_response")
+        record_toolcall_log(trace, "to_agent", response)
+        return response
     except ProviderRejected as e:
-        return _provider_rejected_response(e, req.model)
+        record_toolcall_error(trace, "from_provider", e)
+        response = _provider_rejected_response(e, req.model)
+        record_toolcall_log(trace, "to_agent", response)
+        return response
     except Exception as e:
-        return _error(_completion_failure_message(e), status=400)
+        record_toolcall_error(trace, "from_provider", e)
+        response = _error(_completion_failure_message(e), status=400)
+        record_toolcall_log(trace, "to_agent", response)
+        return response
 
-    return completion_response(
+    result = completion_response(
         req.model, content, prompt, reply.conversation_id, tool_calls,
         finish_reason=reply.finish_reason,
+        bridge_notice=getattr(reply, 'bridge_notice', None),
     )
+    if trace is not None and reply.conversation_id:
+        conversation_cache.remember_trace(reply.conversation_id, trace)
+    elif trace is not None and req.conversation_id:
+        conversation_cache.remember_trace(req.conversation_id, trace)
+
+    record_toolcall_log(trace, "to_agent", result)
+    return result

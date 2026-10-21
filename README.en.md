@@ -275,7 +275,103 @@ its context. It is not a local budget or expired session; resetting counters or
 signing in again will not fix it. The bridge preserves history and stops, without
 creating a new chat. Migrating the goal requires a separate manual decision.
 
-Disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
+Optional `TOOLCALL_LOG=1` enables detailed conversation traces in `logs/` (default
+`0`, disabled). Each conversation gets one file named `MMDDHHmmss-<provider>.log`;
+it accumulates agent requests, assembled provider prompts, raw provider replies,
+final JSON/SSE responses to the agent, and errors, separated by `from agent`, `to provider`,
+`from provider`, and `to agent` markers. Logs can contain source code, secrets and
+tool results; enable only for local diagnosis and do not publish them. Git ignores
+the directory. Implementation checks are offline; live-account exchanges were not
+verified. Continuations are associated via the persisted conversation ID; if a
+provider returns no ID, a later request cannot be linked to this trace.
+
+New mode `TOOL_INSTRUCTIONS_BROWSER=medium` (the default stays `light`, unchanged:
+tool names only). On chat continuations the reminder also includes each tool's
+argument shape (field names, nesting, `?` = optional; no descriptions) so the model
+does not guess arguments from memory; the first turn still gets the full block, as
+in `light`. Continuation prompts are longer. A reply like `{"question": ..., "options": [...]}` instead of `{"questions": [...]}`
+is rejected with "Tool arguments do not satisfy the advertised schema". No extra
+generation.
+
+Temporary switch `TOOLCALL_LEGACY` (default `1`): `1` — main-era contract for
+**every** provider (`server/api.py` + `server/tool_protocol.py`: one block,
+DeepSeek-only repair, always `invalid_tool_response`; will be removed); `0` — one
+tool-rework path in `server/api_new.py` + `server/tool_protocol_new.py` for **every**
+provider, including DeepSeek (demote, multi-block, pointed repair,
+`TOOLCALL_INVALID_MODE`). Summary in
+[SETUP §5](docs/SETUP.en.md#5-why-the-model-doesnt-make-edits-emulated-tool-calling);
+longer notes (Russian):
+[`docs/toolcall-format-repair-legacy.md`](docs/toolcall-format-repair-legacy.md)
+(`LEGACY=1`) and
+[`docs/toolcall-format-repair.md`](docs/toolcall-format-repair.md) (`LEGACY=0`).
+In both modes, a complete native DeepSeek DSML reply retains the shared schema,
+finish and `tool_choice` checks, without an extra generation.
+With `TOOLCALL_LEGACY=0`, tool calls are handled like in any agent. Only a top-level
+fenced `tool_calls` block is a call, wherever it stands in the message. Prose, text
+after the block, several blocks, arrays without that fence (also inside a
+```` ```json ```` block) and quoted blocks are plain text. This includes examples
+inside `~~~`, fences of four or more backticks, and code indented by four spaces
+or a tab: their tools are never executed. Verified offline; no live account was
+used for these checks. Before validate/repair the
+bridge may demote advice mistagged as a call: if a block has no call-level `name`
+(JSON whole or broken) or the name is unknown and there is accompanying prose, the
+opening fence is relabeled from `tool_calls` to `text` and the agent gets ordinary
+successful `content` — no repair and no `TOOLCALL_INVALID_MODE`. Otherwise every
+remaining block must be valid: broken JSON (including a known tool name), an unknown
+name with no prose, or arguments off-schema stop the whole message (repair /
+`TOOLCALL_INVALID_MODE`); there is no silent validate pass. When every block is
+valid, all calls run in order: the agent receives them as `tool_calls` and the rest
+of the message, with the call blocks cut out, as ordinary content. With
+`stream: true` text and calls arrive as separate frames in the original order
+(`text1`, `call1`, `text2`, `call2`, `text3`); `stream: false` still returns one
+`content` and one `tool_calls` array. `tool_choice: none` never turns text into
+an error. Verified offline.
+
+With `TOOLCALL_FORMAT_REPAIR=1` (off by default), under `LEGACY=0` an erroneous call
+gets one pointed correction in the same chat (one extra generation): for an unknown
+tool the full list of tools with their argument shapes (field names, nesting, `?` =
+optional; not shortened), for wrong arguments that tool's argument shape (no values).
+No second correction is requested. If the corrected reply is valid the agent sees only
+the final call, with no notice. What happens next is `TOOLCALL_INVALID_MODE` (below).
+Under `LEGACY=1`, repair remains DeepSeek-only (main-era prompt). Verified offline.
+
+`TOOLCALL_INVALID_MODE` (default `error`; only when `LEGACY=0`): what to do with an
+invalid call after validation or after one failed correction — for **any** provider,
+including DeepSeek. With `error` the agent gets
+`invalid_tool_response` (fail-closed). With `text` — HTTP success and a live provider
+chat, but an explicit failed tool step for the agent:
+
+- `content`: raw reply plus `Bridge notice: BRIDGE_TOOL_NOT_EXECUTED: …` (tool name at
+  most; no schemas or values);
+- top-level `bridge_notice` (`executed: false`, `code`, `kind`, `tool`, `as_tool_error`
+  shaped like a tool-role error);
+- `message.refusal`: the same notice text (for clients that honor refusal);
+- the next user message is sent to the provider tab as
+  `Tool result (name): <notice>` plus the follow-up — as if the tool returned an error.
+
+Executable `tool_calls` are not invented on reject (the agent would run them). Even with
+`text`, these still error: `tool_choice` required/specific tool, a reply without a
+conversation id, and an unfinished reply. Mistagged advice (no call-level name, or
+unknown name with prose) is demoted to a `text` fence before this path.
+Verified offline.
+
+A call that repeats, with identical arguments, the call whose result the request
+carries (the model answers a tool result with the same call again) is not executed a
+second time: with `TOOLCALL_INVALID_MODE=text` the agent gets the same kind of message
+(raw reply plus a line saying the call repeats the one just executed); with `error` it
+raises. A nonempty new user message after the tool result starts a separate action:
+for example, checking CI that was previously `pending` again. An empty message does
+not clear this check. Replaying an already consumed history still fails before any
+provider request. Verified offline.
+
+The tool result the agent returns (for example the option you picked) goes to the
+provider as just `Tool result (name): <result JSON>`. It carries no tools reminder
+(`TOOL_INSTRUCTIONS_BROWSER` still applies to ordinary user messages), no repeated
+question or call and no bridge call id; results of several calls to the same tool keep
+the identifier mapping. Invalid-call outcome follows `TOOLCALL_INVALID_MODE` (above).
+Verified offline.
+
+For DeepSeek, disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
 it does not disable tool-markup validation. Malformed tool blocks stop the step
 instead of being returned as successful plain text.
 After a normal DeepSeek stop, commentary may precede one explicit terminal
@@ -289,9 +385,10 @@ fences and quotations do not become calls. Prose quotations may precede a separa
 top-level `tool_calls` block with a blank line before its opening fence. Quoted,
 nested and ambiguous code blocks are not executed; `>` markers are never stripped
 from code. An explicit `tool_calls` block is an
-action protocol: do not use it for explanatory examples. Remote schemas are never
-fetched; local `$ref` references work. On update, install `requirements.txt`
-(the new dependency is `jsonschema`) and restart the bridge.
+action protocol: do not use it for explanatory examples. Browser providers follow the
+rules above instead. Remote schemas are never fetched; local `$ref` references work.
+On update, install `requirements.txt` (the new dependency is `jsonschema`) and
+restart the bridge.
 
 A normally finished DeepSeek response may also contain **one whole native DSML
 batch** (`calls` → `invoke` → `parameter`). The bridge decodes it locally for any
@@ -498,7 +595,10 @@ DeepSeek defaults are **12/60 generations, 3/6 new chats and 40/200 HTTP request
 per hour/day**, with a shared 20 accepted replies per conversation
 (`CONVERSATION_MAX_REPLIES`) and a 30-second interval. `DEEPSEEK_MAX_*` budget
 ceilings and `CONVERSATION_MAX_REPLIES` belong to the bridge process environment.
-Raising a local ceiling does not raise the website's allowance.
+Raising a local ceiling does not raise the website's allowance. `PROVIDER_ACCESS_PAUSE=0`
+disables provider pause and pending blocks, including persisted ones; it does not
+bypass budgets, provider quotas or conversation-history safeguards, and can allow
+retries after an uncertain outcome.
 [Configuration and error guide](docs/HARNESS.en.md#local-limits-and-errors).
 
 ## Connect OpenCode
@@ -507,6 +607,8 @@ Use the same bridge and account setup above. Put the example
 [`opencode.json`](examples/opencode.json) in your project. For existing configs,
 merge settings while preserving your `provider`, `model` and `small_model`.
 Set `small_model` explicitly: title generation can also consume messages.
+Do not point title/`small_model` at a browser model — that opens a second tab
+chat (Harness disables `session-title-llm` in its profile).
 
 ```bash
 cd /path/to/your-project
@@ -550,7 +652,11 @@ and reset time have not been established.
 **Harness or OpenCode runs tools on your computer.** Prompts and tool-read data
 are sent to the selected provider. The bridge validates responses and
 `tool_calls`, saves conversation state and sends new tool results to the existing
-chat. Unknown history stops instead of silently creating a new chat.
+chat. History keys keep the original `main` format: updating requires no database
+cleanup, sign-in or counter reset. `system` instructions, `<system-reminder>` wrappers
+and assistant commentary are matched exactly; changed Harness instructions or
+schemas need an [explicit local compatibility registration](#if-harness-stops).
+Unknown or already consumed history stops instead of silently creating a new chat.
 
 Refusal pauses survive restart. Client setup, ordinary sign-in and local budget
 reset do not clear them. Safari transfer also preserves the entire pause, pending
@@ -571,6 +677,14 @@ the tab, not to an authenticated answer source. DeepSeek/Qwen streams stop after
 300 seconds total or 15 seconds without bytes; such a stop pauses the provider
 and is not replayed. A first request (no assistant message yet) has no history
 link, so resending it can open a second chat; continuations are one-use.
+Set `CONVERSATION_CLEAR_USED_ON_STARTUP=1` in the bridge process environment to
+delete consumed/closed history links at startup; the default `0` preserves them.
+A repeated first request with exactly identical history otherwise has the same
+cache key, so the bridge will not open another provider chat for it while the link
+is retained. It may reuse an unused link or reject an already-consumed one. Deleting
+used links allows a repeat to start another upstream chat,
+but a later continuation may bind to the wrong chat and fail. Links with
+`used=0` are not deleted.
 
 ## OpenCode demonstrations
 
@@ -583,6 +697,22 @@ These are **not Harness screenshots** or proof of current account availability.
 
 [GLM/Kimi captures and recording method](docs/media/README.md).
 
+A repeated initial request with **exactly identical history** has the same cache key.
+For an assistant message with `tool_calls`, the key is bound to the calls themselves
+(ID, name, arguments) and the prior history, not to the text around them: a client
+may reassemble streamed text differently (without `\n\n`, or with no text at all).
+This does not weaken the binding — call IDs are unique.
+While its link is retained, the bridge does not open a new provider chat for that
+history: it may reuse a still-unused link or reject a repeat whose link was already
+consumed. By default consumed/closed links are retained to avoid binding a repeat to
+another provider chat. With `CONVERSATION_CLEAR_USED_ON_STARTUP=1`, startup deletes
+only consumed links (`used=1`), so a repeated prompt may create a new upstream chat;
+a later continuation may then bind to the wrong chat. For a complete manual
+cleanup, run `python -m server.conversation_admin -clear`: it deletes all `links`,
+associated log-path mappings (`trace_links`), and migration records (`rollovers`)
+from `session/deepseek-conversations.sqlite3`. It does not delete log files or chats
+at the provider. This operation is destructive.
+
 ## Documentation and development
 
 - [Harness: setup, sessions, budgets, offline verification](docs/HARNESS.en.md)
@@ -592,7 +722,9 @@ These are **not Harness screenshots** or proof of current account availability.
 - [Standalone DeepSeek terminal chat](docs/TERMINAL_CHAT.md)
 
 CI covers Python 3.9/3.12, PoW WASM, shell/JavaScript and isolated browser fixtures.
-Locally: `python -m unittest discover -s tests -t . -v`.
+Locally: `python -m unittest discover -s tests -t . -v`. The run is hermetic: `.env`
+and exported provider flags are ignored, so results match CI. Outside the suite the
+same mode is `BRIDGE_SKIP_DOTENV=1`.
 [Real Harness CLI fixtures with mocked providers](docs/HARNESS.en.md#offline-verification).
 
 ### Browser exchange safety
@@ -602,7 +734,7 @@ Claude requires a network terminal marker; truncated, partial or malformed answe
 not reported as complete. Uncertain dispatched outcomes retain pending state
 and a safety pause across restart. There is no automatic retry.
 Verified offline without live accounts. Re-export and update the userscripts
-to apply the browser changes (controller 0.3.34).
+to apply the browser changes (controller 0.3.35).
 
 Mistral accepts only a request-bound stream with a terminal trailer.
 Harness `--without-browser` excludes browser models and their aliases.

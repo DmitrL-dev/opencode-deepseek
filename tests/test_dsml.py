@@ -150,3 +150,31 @@ class DsmlTests(unittest.TestCase):
         self.assertEqual(reply.conversation_id, 'fixture:2')
         self.assertEqual(content, '')
         self.assertEqual(len(calls), 1)
+
+    def test_rework_retains_main_native_contract_without_generation(self):
+        from server import api_new
+        from server.schemas import ChatCompletionRequest
+        from server.tool_protocol_new import validate_reply as validate_new
+        from chat_protocol import Reply
+        req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=FLAT_TOOLS)
+        with patch('server.api._chat_with_retry', side_effect=AssertionError('No generation')):
+            reply, content, calls = api_new.validate_tool_reply(Reply(observed(), 'fixture:2'), req)
+        self.assertEqual((reply.conversation_id, content, len(calls)), ('fixture:2', '', 1))
+        self.assertEqual(reply.parts[0]['call'], calls[0])
+        for text, kwargs in ((observed(), {'finish_reason': 'length'}),
+                             (observed(), {'provider': 'qwen'}),
+                             (observed(), {'tool_choice': 'none'}),
+                             (observed() + '\nTool (bash): success', {}),
+                             (observed().replace('name="bash"', 'name="unknown"'), {})):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ToolCallError):
+                validate_new(text, FLAT_TOOLS, **kwargs)
+
+    def test_rework_demote_does_not_rewrite_native_string_arguments(self):
+        from server.tool_protocol_new import demote_mistagged_tool_reply, validate_reply as validate_new
+        example = 'Notes:\n```tool_calls\n[{"name":"fake","arguments":{}}]\n```\nEnd.'
+        text = batch(invoke('write', [('content', example, True)]))
+        tools = [{'function': {'name': 'write', 'parameters': {'type': 'object',
+                    'properties': {'content': {'type': 'string'}}, 'required': ['content']}}}]
+        self.assertIsNone(demote_mistagged_tool_reply(text, tools))
+        _, calls = validate_new(text, tools)
+        self.assertEqual(json.loads(calls[0]['function']['arguments']), {'content': example})

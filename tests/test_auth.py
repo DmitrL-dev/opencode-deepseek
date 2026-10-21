@@ -213,7 +213,9 @@ with patch("dotenv.load_dotenv",load):
  import deepseek.auth as auth
  print(json.dumps([api.RATE_LIMIT_PER_MINUTE,api.SERVER_INTERACTIVE_LOGIN,str(auth.DEFAULT_PROFILE_DIR)]))
 '''
-        output = subprocess.check_output([sys.executable,"-c",code],cwd=auth.ROOT,text=True)
+        # This test owns dotenv loading, so opt back into the real loader.
+        env = {key:value for key,value in os.environ.items() if key != "BRIDGE_SKIP_DOTENV"}
+        output = subprocess.check_output([sys.executable,"-c",code],cwd=auth.ROOT,text=True,env=env)
         self.assertEqual(json.loads(output),[7,False,"/tmp/audit-profile"])
 
 

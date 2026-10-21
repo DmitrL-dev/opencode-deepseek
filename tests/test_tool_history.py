@@ -55,7 +55,7 @@ class ToolHistoryTests(unittest.TestCase):
                 self.assertIn(value, sent)
             self.assertNotIn('Inspect two files', sent)
             duplicate = asyncio.run(exchange(continuation))
-            self.assertIn('already consumed', duplicate)
+            self.assertIn('previously used chat', duplicate)
             self.assertEqual(fake.chat.call_count, 2)
             with api.conversation_cache.connection() as db:
                 self.assertEqual(db.execute('SELECT steps, used FROM links ORDER BY steps').fetchall(),

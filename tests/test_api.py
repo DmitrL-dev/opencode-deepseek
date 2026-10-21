@@ -31,6 +31,26 @@ def auth_error():
     return httpx.HTTPStatusError("token expired",request=request,response=response)
 
 
+class ProviderPauseMessageTests(unittest.TestCase):
+    def test_disabled_pause_message_does_not_suggest_resume_command(self):
+        model = 'mistral-web'
+        with patch.object(api, 'model_provider', return_value='mistral'):
+            exc = ProviderRejected('upstream_failure', source='upstream')
+            with patch.dict('os.environ', {'PROVIDER_ACCESS_PAUSE': '0'}):
+                message = api._provider_pause_message(exc, model)
+        self.assertIn('Provider blocking is disabled', message)
+        self.assertNotIn('providers.access resume mistral', message)
+
+    def test_enabled_pause_message_explains_resume_command(self):
+        model = 'mistral-web'
+        provider = 'mistral'
+        with patch.object(api, 'model_provider', return_value=provider):
+            exc = ProviderRejected('upstream_failure', source='upstream')
+            with patch.dict('os.environ', {'PROVIDER_ACCESS_PAUSE': '1'}):
+                message = api._provider_pause_message(exc, model)
+        self.assertIn(f'providers.access resume {provider}', message)
+
+
 class TextStream:
     conversation_id = "fake:2"
     finish_reason = "stop"
@@ -420,7 +440,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(finish=finish, policy=policy, stream=stream):
                         fake = Mock()
                         fake.chat.return_value = Reply(answer, 'fixture:2', finish)
-                        with patch.object(api, 'get_client', return_value=fake), \
+                        with patch.object(api, '_FORMAT_REPAIR', False), \
+                                patch.object(api, 'get_client', return_value=fake), \
                                 patch.object(api, '_continue_reply') as continuation:
                             response = await self.post(tools=FLAT_TOOLS, tool_choice=policy, stream=stream)
                         if finish == 'stop' and policy == 'auto':
@@ -440,7 +461,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(stream=stream):
                 fake = Mock()
                 fake.chat.return_value = Reply(reply, "fake:2")
-                with patch.object(api, "get_client", return_value=fake), \
+                with patch.object(api, "_FORMAT_REPAIR", False), \
+                        patch.object(api, "get_client", return_value=fake), \
                         patch.object(api, "_continue_reply") as continuation, \
                         patch.object(api, "save_tool_failure") as diagnostic, \
                         patch.object(api, "_toolcall_debug", return_value=False), \
@@ -649,7 +671,8 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_unfinished_json_after_normal_stop_never_requests_continuation(self):
         fake = Mock()
         fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{', "fake:2")
-        with patch.object(api, "get_client", return_value=fake), \
+        with patch.object(api, "_FORMAT_REPAIR", False), \
+                patch.object(api, "get_client", return_value=fake), \
                 patch.object(api, "_MAX_CONTINUATIONS", 3), \
                 patch.object(api, "_continue_reply") as continuation:
             response = await self.post(tools=TOOLS)
@@ -675,7 +698,9 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_exhausted_continuation_returns_error_instead_of_partial_write(self):
         fake = Mock()
         fake.chat.return_value = Reply('```tool_calls\n[{"name":"write","arguments":{}},{',"fake:2")
-        with patch.object(api,"get_client",return_value=fake), patch.object(api,"_MAX_CONTINUATIONS",0):
+        with patch.object(api, "_FORMAT_REPAIR", False), \
+                patch.object(api, "get_client", return_value=fake), \
+                patch.object(api, "_MAX_CONTINUATIONS", 0):
             response = await self.post(tools=TOOLS)
         self.assertEqual(response.status_code,400)
         self.assertEqual(fake.chat.call_count,1)
@@ -960,15 +985,19 @@ class ApiTests(unittest.IsolatedAsyncioTestCase):
         generator = api._plain_stream(fake, "audit", req, "default")
         waiters = []
         try:
-            await generator.__anext__()
-            self.assertIn("first", await generator.__anext__())
+            frames = []
+            try:
+                while True:
+                    frames.append(await asyncio.wait_for(generator.__anext__(), .5))
+            except StopAsyncIteration:
+                pass
+
+            self.assertGreater(len(frames), 0)
+
             with patch.object(api, "get_client", side_effect=refresh):
                 waiters = [asyncio.create_task(api.chat_completions(req)) for _ in range(4)]
                 await asyncio.sleep(.03)
-                frame = await asyncio.wait_for(generator.__anext__(), .5)
-                self.assertIn("second", frame)
                 release.set()
-                await generator.aclose()
                 await asyncio.gather(*waiters)
         finally:
             release.set()

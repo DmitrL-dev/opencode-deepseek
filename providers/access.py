@@ -25,6 +25,17 @@ else:
 MAX_BUDGET = 2000
 
 PROVIDERS = frozenset(('deepseek', 'qwen', 'grok', 'mistral', 'kimi', 'glm', 'gemini', 'chatgpt', 'claude'))
+
+
+def _access_pause_enabled() -> bool:
+    """Whether durable provider errors block future attempts; default on.
+
+    ``PROVIDER_ACCESS_PAUSE=0`` ignores persisted pause/pending blocks and does
+    not latch new provider failures. Provider/account quotas, local budgets,
+    active-attempt ownership, and conversation-history safety checks remain.
+    This opt-out can retry after an uncertain outcome and may duplicate requests.
+    """
+    return os.getenv('PROVIDER_ACCESS_PAUSE', '1') == '1'
 MESSAGES = {
     'local_pow_expired': 'The proof of work expired locally before sending. No automatic refresh or replay.',
     'local_budget_exceeded': 'Local request budget exhausted. No automatic retry; limits survive restart and resume.',
@@ -298,8 +309,11 @@ class AccessGuard:
             raise ValueError('Invalid safety state')
         records = {}
         for provider, item in state.items():
+            # Ignore records for removed providers. Preserve active provider
+            # records, but do not let stale keys make the whole safety file
+            # unavailable after a provider is retired or renamed.
             if provider not in PROVIDERS:
-                raise ValueError('Unknown provider')
+                continue
             # Upgrade the initial flat pause format without losing restrictions.
             if isinstance(item, str) and item in MESSAGES:
                 item = {'pause': item}
@@ -380,12 +394,14 @@ class AccessGuard:
     def check(self, provider, owner=None, queued=False):
         if provider not in PROVIDERS:
             raise ValueError('Unknown provider')
-        if provider in self._failed:
+        if _access_pause_enabled() and provider in self._failed:
             raise ProviderRejected('safety_state_unavailable')
         active = current_attempt(provider)
         owner = owner or (active.id if active is not None and active.guard is self else None)
         with self._state() as state:
             record = state.get(provider, {})
+            if not _access_pause_enabled():
+                return
             if record.get('pause'):
                 raise ProviderRejected(record['pause'], source='local_pause')
             if owner is not None and record.get('pending') != owner:
@@ -399,11 +415,14 @@ class AccessGuard:
         self.check(provider)
         with self._state() as state:
             record = state.setdefault(provider, {})
-            if record.get("pause") or record.get("pending"):
-                raise ProviderRejected(
-                    record.get("pause") or "upstream_failure",
-                    source='local_pause' if record.get("pause") else 'upstream',
-                )
+            if _access_pause_enabled():
+                paused = bool(record.get("pause"))
+                pending = bool(record.get("pending"))
+                if paused or pending:
+                    raise ProviderRejected(
+                        record.get("pause") or "upstream_failure",
+                        source='local_pause' if paused else 'upstream',
+                    )
             record.update(pending=attempt.id, dispatched=False)
             try:
                 self._save(state)  # Write-ahead: failure here prohibits all dispatch.
@@ -452,6 +471,9 @@ class AccessGuard:
     def reject(self, provider, exc, owner=None):
         error = exc if isinstance(exc, ProviderRejected) else rejection(
             exc, status=exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None)
+        if not _access_pause_enabled():
+            # Testing opt-out: fail this request without a durable pause latch.
+            return error
         newly_paused = False
         try:
             with self._state() as state:
@@ -530,6 +552,8 @@ class AccessGuard:
 
     def status(self):
         with self._state() as state:
+            if not _access_pause_enabled():
+                return {}
             return {name: ('safety_state_unavailable' if name in self._failed else record.get('pause') or 'upstream_failure')
                     for name, record in state.items() if name in self._failed or record.get('pause') or record.get('pending')}
 
@@ -606,11 +630,17 @@ class Attempt:
                 validate()
             with self.guard._state() as state:
                 record = state[self.provider]
-                if record.get('pending') != self.id or record.get('pause'):
-                    raise ProviderRejected(
-                        record.get('pause') or 'upstream_failure',
-                        source='local_pause' if record.get('pause') else 'upstream',
-                    )
+                if _access_pause_enabled():
+                    paused = bool(record.get('pause'))
+                    if record.get('pending') != self.id or paused:
+                        raise ProviderRejected(
+                            record.get('pause') or 'upstream_failure',
+                            source='local_pause' if paused else 'upstream',
+                        )
+                elif record.get('pending') != self.id:
+                    # Even with the opt-out, an individual live attempt must
+                    # still own its write-ahead dispatch record.
+                    raise ProviderRejected('upstream_failure')
                 delay = 0 if self.dispatched else record.get('next_at', 0) - time.time()
                 if self.provider == 'deepseek':
                     delay = max(delay, record.get('next_http_at', 0) - time.time())
