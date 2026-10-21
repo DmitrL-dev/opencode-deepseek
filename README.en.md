@@ -165,6 +165,10 @@ token checks (except the transitional `legacy-loopback`) still apply to every `/
 
 1. Install and open [official Harness](https://www.deepseek.com/en/harness/)
    once. During initial setup, you can choose **Add API Key → Set up later**.
+   **Local account bridge** requires neither a Harness account sign-in nor an
+   official DeepSeek API key. If Welcome reappears after restarting, repeat
+   this choice: in Harness 0.2.1-rc.2 it lasts for the current launch only and
+   does not change the provider session stored in the bridge.
 2. In another terminal, enter the bridge directory, activate
    `source venv/bin/activate`, and run this while the server is running:
 

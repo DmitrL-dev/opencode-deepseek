@@ -4,6 +4,12 @@ The bridge connects to the installed [DeepSeek Harness](https://www.deepseek.com
 through its standard `openai-completions` adapter. Website credentials, request
 queues, and durable provider pauses remain in the bridge.
 
+**Local account bridge** requires neither a Harness account sign-in nor an
+official DeepSeek API key. On Welcome, choose **Add API Key → Set up later**
+with the key field empty. In 0.2.1-rc.2 this is the built-in skip for the current
+launch; Welcome may reappear next time. It does not indicate an expired bridge
+session. This path was verified offline in the updated app; existing history opened.
+
 ## Setup
 
 Open the official Harness app once. Its welcome screen offers **Add API Key →
