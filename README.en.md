@@ -453,8 +453,16 @@ not resume a stopped goal, replay an old reply, or reset history or counters.
 | `Local request budget exhausted` | Rolling budgets, conversation reply cap or prompt size. A new chat or restart does not clear rolling usage |
 | `MISSING_CREDENTIAL` for `deepseek-official` | The official API route needs a key. To use the bridge, select **Local account bridge** |
 | `login_required` | Saved authentication expired; sign in to the selected provider again |
+| `History is unknown or already consumed` | The local history binding is missing or already used. After upgrading Harness, check tool-catalog/schema changes: these are hashed into the binding. Signing in or resetting budgets does not repair it; keep replay protection and do not automatically create a new chat |
 | `quota_exceeded`, `user is muted`, security refusal | Stop and inspect the normal website; do not retry automatically |
 | Missing group or model | Check `.env`, the running server and `/v1/models`, then reinstall the catalog |
+
+A check of an existing goal after upgrading Harness from 0.2.0-rc.2 to
+0.2.1-rc.2 found 32 tools instead of 27, with six existing descriptions/schemas
+changed. Offline checks confirmed that this changes the history key. The single
+continuation attempt stopped locally before any DeepSeek request; bindings were
+not rewritten and no retry followed. Cross-version continuation of these goals
+still requires separate investigation.
 
 DeepSeek defaults are **12/60 generations, 3/6 new chats and 40/200 HTTP requests
 per hour/day**, with a shared 20 accepted replies per conversation
