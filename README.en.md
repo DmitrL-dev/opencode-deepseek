@@ -220,7 +220,11 @@ private token; installing the model catalog alone does not install these command
 ### Refresh DeepSeek through Safari
 
 On macOS, select **deepseek-login** in the Harness command menu or enter
-`/deepseek-login`. Safari opens; sign in to the same account if needed. The
+`/deepseek-login`. Safari opens; sign in to the same account if needed. Transfer
+accepts the [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-2.1) Bearer
+alphabet, including `+`, `/` and trailing `=`; whitespace, line breaks, Unicode
+and excess length remain rejected. This fixes local refusals for some tokens
+after successful sign-in; same-account checks and the safety pause remain enforced. The
 session transfers locally without an inspector or copying tokens. Check the
 result with `/deepseek-login-status`. `saved_paused` means the credentials were
 saved while the entire safety pause and pending request remain. Review account
