@@ -4,6 +4,12 @@ The bridge connects to the installed [DeepSeek Harness](https://www.deepseek.com
 through its standard `openai-completions` adapter. Website credentials, request
 queues, and durable provider pauses remain in the bridge.
 
+**Local account bridge** requires neither a Harness account sign-in nor an
+official DeepSeek API key. On Welcome, choose **Add API Key → Set up later**
+with the key field empty. In 0.2.1-rc.2 this is the built-in skip for the current
+launch; Welcome may reappear next time. It does not indicate an expired bridge
+session. This path was verified offline in the updated app; existing history opened.
+
 ## Setup
 
 Open the official Harness app once. Its welcome screen offers **Add API Key →
@@ -21,6 +27,11 @@ configuration, and updates `~/.dsh/profiles/desktop/cordis.patch.yml`. Enabled
 bridge models appear under **Local account bridge**. A requested default absent
 from that catalog fails before writing. Harness reloads the configuration;
 restart the app if necessary. Select a workspace and start a new session.
+
+A bare ID and its `provider/model` alias produce one menu entry using the bare
+ID; a model advertised only as an alias retains that exact ID. Rerun setup with
+your previous options to remove duplicates from an older profile. The API still
+accepts both spellings. Updating the menu does not change history, pauses or budgets.
 Existing sessions may retain their previous model.
 
 Omit `--default-model` to preserve your current default. Use `--install web` for
@@ -390,3 +401,14 @@ during migration never authorize a replay; those require separate local
 diagnostic review. Offline checks:
 `python -m unittest tests.test_context_rollover tests.test_deepseek_protocol`.
 No live accounts were used.
+
+
+### Upgrade verification — October 21, 2026
+
+Harness `0.2.1-rc.2`: 9 real CLI scenarios passed with a synthetic provider,
+isolated HOME/DSH_HOME and no outbound network except loopback. Coverage: text,
+read/write, refusal/pause, no retry on HTTP 503, pipeline failure, canceled batch,
+and optional grep preserving producer failures. macOS rejects nested sandbox-exec;
+shell fixtures use an unconfined inner mode under the external file/network
+sandbox. The installed desktop profile keeps its original protection settings.
+These results do not qualify live provider access.

@@ -13,7 +13,7 @@ from settings import ROOT
 
 DIRECTORY = ROOT / 'session' / 'refusal-diagnostics'
 MAX_FILES = 64
-PHASES = frozenset(('create_chat', 'challenge', 'completion', 'parse_stream', 'before_request'))
+PHASES = frozenset(('create_chat', 'challenge', 'solve_challenge', 'completion', 'parse_stream', 'before_request'))
 GLOBAL_CODES = {40002: 'session_expired', 40003: 'session_expired',
                 40012: 'account_banned', 40029: 'ip_restricted',
                 50006: 'account_muted', 40300: 'pow_rejected', 40301: 'pow_rejected'}

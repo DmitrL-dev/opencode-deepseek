@@ -83,7 +83,7 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
     # Bare ids plus owner/id aliases roughly double the catalog size.
     if not isinstance(rows, list) or not rows or len(rows) > 200:
         raise ValueError("Bridge advertises no models or an invalid catalog; enable a provider first")
-    models, seen = [], set()
+    seen, preferred = set(), {}
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError("Invalid bridge model entry")
@@ -99,18 +99,24 @@ def catalog_models(catalog: dict, without_browser=False) -> list:
         if "/" in model and not model.startswith(owner + "/"):
             raise ValueError("Invalid or duplicate bridge model identity")
         seen.add(model)
+        # One menu entry per provider/model, preferring a bare id when both
+        # forms are advertised. Keep alias-only entries exactly as advertised.
+        # Validate every row before filtering, including redundant aliases.
+        identity = (owner, bare)
+        if identity not in preferred or model == bare:
+            preferred[identity] = row
+    models = []
+    for (owner, bare), row in preferred.items():
+        if without_browser and (bare in BRIDGE_ONLY_MODELS
+                or not (owner in BROWSERLESS_PROVIDERS
+                        or (owner == "kimi" and bare in KIMI_PUBLIC_MODELS))):
+            continue
+        model = row["id"]
         models.append({"id": model, "name": LABELS.get(bare, LABELS.get(model, model + " · bridge")),
                        "input": ["text"], "reasoningEfforts": False,
                        "contextWindow": 32768, "maxTokens": 4096})
-    # Validate the entire advertised catalog before excluding any provider.
-    if without_browser:
-        models = [model for row, model in zip(rows, models)
-                  if row["id"].split("/", 1)[-1] not in BRIDGE_ONLY_MODELS
-                  and (row["owned_by"] in BROWSERLESS_PROVIDERS
-                       or (row["owned_by"] == "kimi"
-                           and row["id"].split("/", 1)[-1] in KIMI_PUBLIC_MODELS))]
-        if not models:
-            raise ValueError("Bridge advertises no browserless models for --without-browser")
+    if without_browser and not models:
+        raise ValueError("Bridge advertises no browserless models for --without-browser")
     return models
 
 

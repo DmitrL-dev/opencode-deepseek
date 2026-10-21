@@ -274,13 +274,42 @@ class ProtocolCorpusTests(unittest.TestCase):
 
     def test_quoted_code_never_becomes_an_action(self):
         action = fence('[{"name":"edit","arguments":{"file_path":"x","content":"x"}}]')
-        # find_tool_blocks only nests under ``` fences (not ~~~).
         for text in ('\n'.join('> ' + s for s in action.splitlines()),
-                     '```markdown\n' + action + '\n```'):
+                     '```markdown\n' + action + '\n```',
+                     '~~~markdown\n' + action + '\n~~~',
+                     '~~~~markdown\n' + action + '\n~~~~',
+                     '````markdown\n' + action + '\n````',
+                     '`````markdown\n' + action + '\n`````',
+                     '\n'.join('    ' + s for s in action.splitlines()),
+                     '\n'.join('\t' + s for s in action.splitlines())):
             with self.subTest(text=text[:24]):
                 content, calls = validate_reply(text, [tool('edit')])
                 self.assertIsNone(calls)
                 self.assertEqual(content, text)
+
+    def test_outer_fence_closes_only_with_its_kind_and_at_least_its_length(self):
+        from server.openai_format import find_tool_blocks, looks_truncated
+        action = fence(self.CALL)
+        for opening, short in (('````markdown', '```'), ('~~~~markdown', '~~~')):
+            for closer in (short, '~~~' if opening.startswith('`') else '```'):
+                text = opening + '\n' + closer + '\n' + action
+                with self.subTest(opening=opening, closer=closer):
+                    self.assertEqual(find_tool_blocks(text), [])
+                    self.assertFalse(looks_truncated(text))
+                    self.assertIsNone(demote_mistagged_tool_reply(text, [tool('write')]))
+
+    def test_real_call_after_a_closed_quoted_example_is_validated_once(self):
+        example = '````markdown\n' + fence(self.CALL) + '\n`````'
+        real = fence(self.CALL)
+        for provider in ('deepseek', 'qwen', 'claude'):
+            with self.subTest(provider=provider):
+                content, calls = validate_reply(example + '\nNow:\n' + real,
+                                                 [tool('write')], provider=provider)
+                self.assertEqual(len(calls), 1)
+                self.assertIn(example, content)
+        with self.assertRaises(ToolCallError):
+            validate_reply(example + '\n' + fence(
+                '[{"name":"write","arguments":{"file_path":"x"}}]'), [tool('write')])
 
     def test_recovery_stop_is_normal_completion_and_never_claims_goal_success(self):
         with patch('socket.socket', side_effect=AssertionError('network forbidden')):

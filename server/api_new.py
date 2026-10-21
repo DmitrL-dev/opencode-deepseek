@@ -12,7 +12,7 @@ import os
 from chat_protocol import Reply
 
 from .diagnostics import save_tool_failure
-from .openai_format import ToolCallError, looks_truncated, tool_catalog
+from .openai_format import ToolCallError, looks_truncated, tool_catalog, _text_of
 from .tool_notice import bridge_notice_payload, tool_failure_message
 from .tool_protocol_new import demote_mistagged_tool_reply, validate_reply
 
@@ -46,7 +46,13 @@ def executed_calls(messages) -> list:
     last = max((i for i, m in enumerate(messages) if m.role == "assistant"), default=None)
     if last is None or not messages[last].tool_calls:
         return []
-    if not any(m.role == "tool" for m in messages[last + 1:]):
+    tail = messages[last + 1:]
+    if not any(m.role == "tool" for m in tail):
+        return []
+    # A new, explicit user instruction is a new action boundary, e.g. checking
+    # a formerly pending CI again. Durable history claims still prohibit replay
+    # of the preceding request; equal arguments alone do not identify a replay.
+    if any(m.role == "user" and _text_of(m.content).strip() for m in tail):
         return []
     out = []
     for call in messages[last].tool_calls:

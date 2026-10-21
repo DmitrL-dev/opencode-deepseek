@@ -28,7 +28,7 @@ _TOOL_START_RE = re.compile(r"\A```tool_calls(?:[ \t]+[^\r\n]*)?\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
 _TOOL_MARKUP_RE = re.compile(
     r"(?m)^[ \t]*```(?:tool_calls|calls)[ \t]*\r?$"
-    r"|^[ \t]*<｜｜DSML｜｜ calls>(?=\s*<｜｜DSML｜｜ invoke\b)"
+    r"|^[ \t]*<｜｜DSML｜｜ (?:calls|invoke)\b"
 )
 # Observed web-model terminators after an otherwise complete JSON array. Only
 # closing syntax is allowed; no opening tag, content, or second call can match.
@@ -58,23 +58,33 @@ class ToolCallError(RuntimeError):
 def find_tool_blocks(text: str):
     """Top-level fenced ```tool_calls blocks as (start, end, body, closed) spans.
 
-    Fences are tracked line by line, so a tool_calls fence inside another code
-    fence (a quoted example) is not a block. A final block left unclosed at the
-    end of the text is returned with closed=False.
+    Track both Markdown fence kinds and their actual lengths. Indented code
+    and nested examples are data, even when their inner text is valid JSON.
+    Only the requested three-backtick tool_calls protocol produces actions.
     """
     blocks = []
     pos = 0
-    label = start = body_start = None
+    marker = label = None
+    width = 0
+    start = body_start = 0
     for line in (text or "").splitlines(keepends=True):
         bare = line.rstrip("\r\n")
-        if label is None:
-            opened = re.fullmatch(r"[ \t]*```([A-Za-z0-9_-]*)(?:[ \t]+[^\r\n]*)?", bare)
+        if marker is None:
+            # Four spaces or a tab introduce an indented code example.
+            opened = re.fullmatch(r" {0,3}(`{3,}|~{3,})([^\r\n]*)", bare)
             if opened:
-                label, start, body_start = opened.group(1), pos, pos + len(line)
-        elif re.fullmatch(r"[ \t]*```[ \t]*", bare):
+                fence, info = opened.groups()
+                if fence[0] == '`' and '`' in info:
+                    pos += len(line)
+                    continue
+                marker, width = fence[0], len(fence)
+                label = ('tool_calls' if fence == '```' and re.fullmatch(
+                    r'tool_calls(?:[ \t]+[^\r\n]*)?', info) else '')
+                start, body_start = pos, pos + len(line)
+        elif re.fullmatch(r" {0,3}" + re.escape(marker) + r"{" + str(width) + r",}[ \t]*", bare):
             if label == "tool_calls":
                 blocks.append((start, pos + len(line), text[body_start:pos], True))
-            label = None
+            marker = label = None
         pos += len(line)
     if label == "tool_calls":
         blocks.append((start, len(text), text[body_start:], False))
@@ -687,11 +697,13 @@ def parse_tool_calls(
     allow_outer_closer_transposition: bool = False,
     allow_missing_call_closer: bool = False,
     allow_calls_fence: bool = False,
+    allow_dsml: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, with explicit narrow tolerances.
 
     All calls and their arguments must validate before any call is returned.
-    Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text.
+    Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text
+    unless the caller opts into a complete native DSML envelope with schemas.
     Optional normal-stop tolerances cover an absent final Markdown fence and
     known closing-only artifacts after a complete array, independently.
     A caller may permit a missing outer array closer only after all objects
@@ -703,6 +715,16 @@ def parse_tool_calls(
     block. Advertised schemas validate every call before the batch is returned.
     """
     stripped = (text or "").strip()
+    if allow_dsml and flat_argument_tools is not None:
+        from .dsml import OPEN, decode
+        if stripped.startswith(OPEN):
+            try:
+                data = decode(stripped, _tool_json)
+                # Reuse the existing whole-batch parser and schema checks.
+                # No second route may return calls without those checks.
+                stripped = '```tool_calls\n' + json.dumps(data, ensure_ascii=False, allow_nan=False) + '\n```'
+            except (ValueError, TypeError, RecursionError):
+                raise ToolCallError('Invalid or incomplete DSML tool envelope; no calls were returned') from None
     if allow_tool_preamble and flat_argument_tools is not None:
         stripped = _tool_block_after_preamble(stripped, allow_calls_fence=allow_calls_fence)
     if allow_calls_fence and flat_argument_tools is not None and re.match(r'\A```calls[ \t]*\r?\n', stripped):

@@ -1,14 +1,13 @@
 """Private, durable one-use continuation links for stateless OpenAI clients.
 
 Only hashes of the exact delivered history are retained, never source text.
-Assistant commentary around tool calls is excluded from the hash: the client
-reassembles streamed text on its side, so only the call IDs stay authoritative.
+Keep the original digest format, including system instructions and assistant
+commentary, so existing links retain their exact one-use ownership.
 Unknown or already consumed histories fail closed instead of creating chats.
 """
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -19,38 +18,15 @@ from .config import canonical_model, model_provider
 from .schemas import ChatMessage
 from .openai_format import _text_of
 from .recovery_status import RECOVERY_STOP_TEXT
+from . import conversation_schemas
 from .tool_notice import notice_of, provider_tool_error_followup
 from .toolcall_logging import (enabled as toolcall_logging_enabled,
                                new_chat as new_toolcall_log,
                                record as record_toolcall_log)
 
-# OpenCode (and similar agents) inject ephemeral <system-reminder> wrappers into
-# user text around tool loops. Those wrappers are not part of the delivered
-# assistant turn and must not break one-use history lookup.
-_SYSTEM_REMINDER_RE = re.compile(
-    r"<system-reminder>\s*The user sent the following message:\s*(.*?)\s*"
-    r"Please address this message and continue with your tasks\.\s*"
-    r"</system-reminder>",
-    re.DOTALL,
-)
-_SYSTEM_REMINDER_ANY_RE = re.compile(r"<system-reminder>.*?</system-reminder>\s*", re.DOTALL)
-
 
 class ConversationStateError(RuntimeError):
     pass
-
-
-def _stable_text(content):
-    text = content or ''
-    if not isinstance(text, str):
-        return text
-    # Unwrap nested queued-follow-up envelopes back to the original user text.
-    previous = None
-    while previous != text:
-        previous = text
-        text = _SYSTEM_REMINDER_RE.sub(r'\1', text).strip()
-    # Drop other ephemeral reminder blocks (plan/build, image notices, …).
-    return _SYSTEM_REMINDER_ANY_RE.sub('', text).strip()
 
 
 def normalized(message):
@@ -58,15 +34,9 @@ def normalized(message):
     content = value.get('content')
     if isinstance(content, list) and all(p.get('type') == 'text' for p in content):
         content = _text_of(content)
-    value['content'] = _stable_text(content)
+    value['content'] = content or ''
     if not value.get('tool_calls'):
         value.pop('tool_calls', None)
-    else:
-        # A stateless agent reassembles streamed text on its side. Its content
-        # may differ from the delivered content (missing separators, dropped
-        # text, or a null body), while the call IDs and arguments are exact.
-        # Bind the one-use link to the calls, not to client-assembled prose.
-        value['content'] = ''
     for call in value.get('tool_calls', []):
         fn = call.get('function', {})
         if isinstance(fn.get('arguments'), str):
@@ -77,14 +47,10 @@ def normalized(message):
     return value
 
 
-def _message_role(message):
-    return message.get('role') if isinstance(message, dict) else getattr(message, 'role', None)
-
-
 def _digest_payload(req, messages):
-    """Return the exact canonical data whose serialization digest() hashes."""
+    """The original persistent digest contract; never silently omit history."""
     model = canonical_model(req.model) or req.model
-    stable = [normalized(m) for m in messages if _message_role(m) != 'system']
+    stable = [normalized(m) for m in messages]
     return [model, req.user, req.thinking, req.search, req.tools, stable]
 
 
@@ -209,6 +175,7 @@ class ConversationCache:
         if len(set(result_ids)) != len(result_ids) or set(result_ids) != set(calls):
             raise ConversationStateError('Tool results do not match the delivered calls.')
         key = self.key(req, req.messages[:end], scope)
+        identity = self.account_identity() if scope is None else scope
         search = {
             'key': key,
             'scope': scope if scope is not None else self.account_identity(),
@@ -233,12 +200,31 @@ class ConversationCache:
                 if row:
                     key = legacy_key
                     break
+            if row is None or not row[1]:
+                # An administrator must register the exact old/current catalogs
+                # locally. A changed leading Harness instruction also requires
+                # an explicit exact pair. Account, model, flags and every other
+                # message/argument/call ID stay identical under the normal
+                # digest. Claim the OLD row, never mint an alias.
+                matches = {key: row} if row is not None else {}
+                try:
+                    for old in conversation_schemas.candidates(db, req, identity):
+                        old_key = self.key(old, old.messages[:end], identity)
+                        old_row = db.execute('SELECT cid, used, steps FROM links WHERE key=?',
+                                             (old_key,)).fetchone()
+                        if old_row is not None:
+                            matches[old_key] = old_row
+                except (ValueError, TypeError) as exc:
+                    raise ConversationStateError('Local schema upgrade unavailable; no request sent.') from exc
+                if len(matches) > 1:
+                    raise ConversationStateError('Ambiguous schema upgrade history; no request sent.')
+                if matches:
+                    key, row = next(iter(matches.items()))
             if not row:
-                raise ConversationStateError(
-                    'History is unknown; automatic replay and new-chat fallback are disabled.')
+                raise ConversationStateError('History is unknown; automatic replay and new-chat fallback are disabled.')
             if row[1]:
                 raise ConversationStateError(
-                    'This message history matches a previously used chat, so the request was matched to that older chat and cannot be replayed. To start a new chat, change the initial message so its history is unique. Automatic replay and new-chat fallback are disabled.')
+                    'History already consumed (previously used chat); automatic replay and new-chat fallback are disabled.')
             if row[2] >= self.max_replies and not (allow_local_rollover and claim is not None):
                 raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.

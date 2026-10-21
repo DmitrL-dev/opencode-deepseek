@@ -168,11 +168,16 @@ class HarnessRuntimeTests(unittest.TestCase):
                 answer = "HARNESS_BRIDGE_OK"
             attempt.complete()
             return Reply(answer, "owned-fixture:2")
-        if self.behavior in ("tools", "calls_alias", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
+        if self.behavior in ("tools", "native_dsml", "calls_alias", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if self.behavior == 'calls_alias':
                 answer = 'Let me read the fixture.\n\n' + answer.replace('```tool_calls', '```calls', 1)
+            if self.behavior == 'native_dsml':
+                answer = ('<｜｜DSML｜｜ calls>\n<｜｜DSML｜｜ invoke name="read">\n'
+                    '<｜｜DSML｜｜ parameter name="file_path" string="true">'
+                    + str(self.workspace / 'fixture.txt')
+                    + '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
             if self.behavior == "tools_without_fence":
                 answer = answer[:-4]
             elif self.behavior == "redundant_closer":
@@ -186,7 +191,7 @@ class HarnessRuntimeTests(unittest.TestCase):
             answer = block([{"name": "write", "arguments": {
                 "file_path": str(self.workspace / "fixture.txt"), "content": FILE_PAYLOAD}}])[:-4]
         else:
-            if self.behavior in ("tools", "tools_without_fence", "redundant_closer", "missing_array_closer"):
+            if self.behavior in ("tools", "native_dsml", "tools_without_fence", "redundant_closer", "missing_array_closer"):
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
             answer = "HARNESS_BRIDGE_OK"
         attempt.complete()
@@ -275,6 +280,18 @@ class HarnessRuntimeTests(unittest.TestCase):
         result = self.run_harness()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(self.calls), 2)
+        results = [m for m in self.calls[1]['messages'] if m['role'] == 'tool']
+        self.assertEqual(len(results), 1)
+        self.assertIn('HARNESS_OWNED_FILE_73', str(results[0]['content']))
+
+    def test_native_dsml_read_executes_once_without_format_regeneration(self):
+        self.behavior = 'native_dsml'
+        with patch.object(api, '_FORMAT_REPAIR', False):
+            result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('HARNESS_BRIDGE_OK', result.stdout)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
         results = [m for m in self.calls[1]['messages'] if m['role'] == 'tool']
         self.assertEqual(len(results), 1)
         self.assertIn('HARNESS_OWNED_FILE_73', str(results[0]['content']))

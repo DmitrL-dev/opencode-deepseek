@@ -129,6 +129,38 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
         self.transfer.capture(ticket['nonce'],self.payload,self.guard)
         self.assertEqual(Session.load(self.path).continuation_scope,self.old.identity())
 
+    async def test_standard_bearer_alphabet_preserves_history_and_safety_state(self):
+        # Synthetic tokens only; opaque website tokens are not necessarily URL-safe.
+        for token in ('a' * 16 + '+/', 'a' * 16 + '+/==', 'a' * 4095 + '='):
+            with self.subTest(token_length=len(token)):
+                self.old.save(self.path)
+                ticket = self.transfer.start(self.guard)
+                before = self.guard.path.read_bytes()
+                r = await self.client.post('/session/deepseek/capture',
+                    json={**self.payload, 'token': token},
+                    headers={'Authorization': 'Bearer ' + ticket['nonce']})
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(r.json()['status'], 'saved_paused')
+                fresh = Session.load(self.path)
+                self.assertEqual(fresh.token, token)
+                self.assertEqual(fresh.continuation_scope, self.old.identity())
+                self.assertEqual(self.guard.path.read_bytes(), before)
+
+    async def test_bearer_alphabet_still_rejects_injection_unicode_and_misplaced_padding(self):
+        ticket = self.transfer.start(self.guard)
+        before = self.path.read_bytes()
+        guard_before = self.guard.path.read_bytes()
+        for token in ('a' * 15, 'a' * 4096 + '=', '=' * 16, 'a' * 16 + '=b',
+                      'a' * 16 + ' ', '\ta' + 'b' * 16, 'a' * 16 + '\r\nX: y',
+                      'a' * 16 + '!', 'a' * 16 + '\u00e9'):
+            with self.subTest(token_length=len(token)):
+                r = await self.client.post('/session/deepseek/capture',
+                    json={**self.payload, 'token': token},
+                    headers={'Authorization': 'Bearer ' + ticket['nonce']})
+                self.assertEqual(r.status_code, 409)
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual(self.guard.path.read_bytes(), guard_before)
+
     async def test_expired_replaced_nonce_unchanged_token_and_mutated_state_fail_closed(self):
         ticket = self.transfer.start(self.guard)
         replacement = self.transfer.start(self.guard)

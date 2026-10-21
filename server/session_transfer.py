@@ -40,7 +40,10 @@ def capture_session(data):
     if not isinstance(data, dict) or set(data) != {'token', 'account_id', 'user_agent', 'cookie', 'same_account'}:
         raise TransferError('Invalid capture')
     token, account, ua, cookie = (data[k] for k in ('token', 'account_id', 'user_agent', 'cookie'))
-    if (not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9._~-]{16,4096}', token)
+    # RFC 6750 b64token permits +, / and trailing = as well as URL-safe
+    # characters. Keep the total bound and reject whitespace/header injection.
+    if (not isinstance(token, str) or not 16 <= len(token) <= 4096
+            or not re.fullmatch(r'[A-Za-z0-9._~+/-]+=*', token)
             or not isinstance(account, str) or not re.fullmatch(r'[!-~]{1,128}', account)
             or not isinstance(ua, str) or not re.fullmatch(r'[ -~]{1,512}', ua)
             or not isinstance(cookie, str) or len(cookie) > 16384

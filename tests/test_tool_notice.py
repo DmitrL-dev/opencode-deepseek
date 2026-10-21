@@ -267,6 +267,33 @@ class ToolNoticeTests(unittest.TestCase):
         (_, _, other_calls), _ = self.chat([Reply(other, 'claude:6')], follow3, 'unused')
         self.assertEqual(other_calls[0]['function']['name'], 'read_file')
 
+    def test_explicit_user_followup_permits_same_arguments_but_not_history_replay(self):
+        for mode in ('error', 'text'):
+            with self.subTest(mode=mode), patch.object(api_new, '_INVALID_MODE', mode):
+                initial = self.req.model_copy(update={'messages': [
+                    ChatMessage(role='user', content='Ask once, mode=' + mode)]})
+                (_, content, calls), _ = self.chat([Reply(GOOD, 'claude:1')], initial)
+                follow = initial.model_copy(update={'messages': [
+                    *initial.messages, ChatMessage(role='assistant', content=content, tool_calls=calls),
+                    ChatMessage(role='tool', tool_call_id=calls[0]['id'], content='{"answers": []}'),
+                    ChatMessage(role='user', content=[{'type': 'text', 'text': 'Ask again now.'}])]})
+                (_, _, next_calls), chat = self.chat([Reply(GOOD, 'claude:3')], follow)
+                self.assertEqual(next_calls[0]['function'], calls[0]['function'])
+                self.assertIn('Ask again now.', chat.call_args.args[0])
+                with patch.object(api, '_chat_with_retry') as replay, self.assertRaises(api.ToolCallError):
+                    api._conversation_tool_chat('replay', follow, None)
+                replay.assert_not_called()
+
+    def test_empty_user_message_does_not_clear_automatic_repeat_detection(self):
+        (_, content, calls), _ = self.chat([Reply(GOOD, 'claude:1')], self.req)
+        follow = self.req.model_copy(update={'messages': [
+            *self.req.messages, ChatMessage(role='assistant', content=content, tool_calls=calls),
+            ChatMessage(role='tool', tool_call_id=calls[0]['id'], content='{"answers": []}'),
+            ChatMessage(role='user', content=' \n ')]})
+        (_, text, next_calls), _ = self.chat([Reply(GOOD, 'claude:3')], follow)
+        self.assertIsNone(next_calls)
+        self.assertIn('repeats the call', text)
+
     def test_every_browser_provider_behaves_the_same(self):
         for model in ('claude-web', 'grok-web', 'mistral-web', 'chatgpt-web', 'glm-web'):
             req = self.req.model_copy(update={'model': model})

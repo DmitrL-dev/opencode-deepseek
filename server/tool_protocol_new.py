@@ -6,6 +6,7 @@ Used only when TOOLCALL_LEGACY=0. Main-era validate lives in tool_protocol.py.
 import re
 from typing import Optional
 
+from .dsml import OPEN as DSML_OPEN
 from .openai_format import (
     ToolCallError, enforce_tool_choice, find_tool_blocks, parse_tool_calls,
 )
@@ -60,6 +61,10 @@ def demote_mistagged_tool_reply(text, tools) -> Optional[str]:
     (real calls, schema/format errors, unknown tool with no prose, …).
     """
     text = text or ""
+    if text.strip().startswith(DSML_OPEN):
+        # A native parameter may itself contain example Markdown. Its bytes
+        # belong to the argument, never to the advice-demotion layer.
+        return None
     blocks = find_tool_blocks(text)
     if not blocks:
         return None
@@ -102,8 +107,9 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
                    with_parts=False):
     """LEGACY=0 validate: same multi-block contract for every provider.
 
-    Only a top-level fenced ```tool_calls block can be a call; arrays without that
-    fence, other fences and prose are plain text, wherever they stand. Advice
+    Apart from main's whole native DeepSeek envelope, only a top-level fenced
+    ```tool_calls block can be a call; arrays without that fence, other fences
+    and prose are plain text, wherever they stand. Advice
     mistagged as tool_calls is demoted in the API layer before this runs. Every
     remaining block must parse: syntax, no_name, unknown tool, or bad arguments
     fail the whole message. ``tool_choice=none`` never turns a block into an
@@ -114,10 +120,17 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
     ``{"type": "text", ...}`` / ``{"type": "tool_call", ...}`` items, so SSE can
     emit text and calls as separate frames instead of one flattened content.
 
-    ``provider`` is kept for call-site compatibility; the path does not fork on it.
+    Whole native DSML replies retain main's strict provider/schema/finish policy.
     """
-    del provider
     text = text or ""
+    if text.strip().startswith(DSML_OPEN):
+        from .tool_protocol import validate_reply as validate_native
+        content, calls = validate_native(text, tools, tool_choice,
+                                        finish_reason=finish_reason, provider=provider)
+        if with_parts:
+            parts = [{'type': 'tool_call', 'call': call} for call in calls or []]
+            return content, calls, parts
+        return content, calls
     names = [t.get("function", t).get("name") for t in tools or []]
     finished = finish_reason == "stop"
     blocks = find_tool_blocks(text)

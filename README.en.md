@@ -34,6 +34,33 @@ not tested against live accounts in Harness, OpenCode or a browser.
 > restricted repeatedly, with the exact cause undetermined. A passing test does
 > not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
+## DeepSeek review, October 21, 2026
+
+DeepSeek [updated its website, app and API to V4.1-Flash-1017](https://api-docs.deepseek.com/news/news261017/).
+The bridge sends `default` (`deepseek-chat`) or `expert` (`deepseek-expert`),
+not a weight revision: the service updates the selected mode. This does not
+prove a particular response version or automatically add a new model ID.
+DeepSeek recommends Harness `0.2.1-rc.1` or newer for the new model; compatibility
+of an upgraded Harness with the plugins needs separate verification.
+
+The offline review reproduced insufficient spacing between generations and a
+missing PoW expiry check after solving/waiting. The fixes add an
+independent generation deadline that survives restart, sign-in and budget reset.
+Challenge request latency and solving time count against PoW lifetime, which is
+checked again before sending. Expiry stops the request without automatically
+fetching another challenge or generating again. These fixes are included in `main`.
+The installed Harness upgrade from `0.2.0-rc.2` to `0.2.1-rc.2` was checked with
+the profile and history preserved.
+
+313 unit tests and 9 real CLI scenarios passed on Harness `0.2.1-rc.2`, using a
+synthetic provider and outbound network isolation: read/write, refusal handling,
+shell pipelines and no retry on HTTP 503. Live generation with the upgraded
+version was not tested. Thirty seconds is a local setting, not a provider-approved
+safe quota. The exact cause of previous temporary restrictions remains unknown:
+the original server codes were not retained. An elapsed restriction period does
+not clear a local pause or establish the outcome of a pending request.
+[Evidence and remaining unknowns](docs/RECHECK.2026-10-21.md).
+
 ## Quick start
 
 You need **Python 3.9+** (3.12 recommended), Git, an account with your selected
@@ -138,6 +165,10 @@ token checks (except the transitional `legacy-loopback`) still apply to every `/
 
 1. Install and open [official Harness](https://www.deepseek.com/en/harness/)
    once. During initial setup, you can choose **Add API Key → Set up later**.
+   **Local account bridge** requires neither a Harness account sign-in nor an
+   official DeepSeek API key. If Welcome reappears after restarting, repeat
+   this choice: in Harness 0.2.1-rc.2 it lasts for the current launch only and
+   does not change the provider session stored in the bridge.
 2. In another terminal, enter the bridge directory, activate
    `source venv/bin/activate`, and run this while the server is running:
 
@@ -155,6 +186,9 @@ python -m integrations.harness_shell_safety --profile desktop
 The installer reads the local catalog, backs up the profile and updates
 `~/.dsh/profiles/desktop/cordis.patch.yml`. It disables automatic retries and
 model-generated titles. Setup sends no account requests.
+The menu keeps one entry per model: a bare ID and its `provider/model` alias
+are combined, preferring the bare ID. If duplicates appear, rerun setup with
+your previous options; the profile reloads without changing history or budgets.
 
 | Connection | Harness configuration |
 | --- | --- |
@@ -186,7 +220,11 @@ private token; installing the model catalog alone does not install these command
 ### Refresh DeepSeek through Safari
 
 On macOS, select **deepseek-login** in the Harness command menu or enter
-`/deepseek-login`. Safari opens; sign in to the same account if needed. The
+`/deepseek-login`. Safari opens; sign in to the same account if needed. Transfer
+accepts the [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750#section-2.1) Bearer
+alphabet, including `+`, `/` and trailing `=`; whitespace, line breaks, Unicode
+and excess length remain rejected. This fixes local refusals for some tokens
+after successful sign-in; same-account checks and the safety pause remain enforced. The
 session transfers locally without an inspector or copying tokens. Check the
 result with `/deepseek-login-status`. `saved_paused` means the credentials were
 saved while the entire safety pause and pending request remain. Review account
@@ -266,10 +304,15 @@ longer notes (Russian):
 [`docs/toolcall-format-repair-legacy.md`](docs/toolcall-format-repair-legacy.md)
 (`LEGACY=1`) and
 [`docs/toolcall-format-repair.md`](docs/toolcall-format-repair.md) (`LEGACY=0`).
+In both modes, a complete native DeepSeek DSML reply retains the shared schema,
+finish and `tool_choice` checks, without an extra generation.
 With `TOOLCALL_LEGACY=0`, tool calls are handled like in any agent. Only a top-level
 fenced `tool_calls` block is a call, wherever it stands in the message. Prose, text
 after the block, several blocks, arrays without that fence (also inside a
-```` ```json ```` block) and quoted blocks are plain text. Before validate/repair the
+```` ```json ```` block) and quoted blocks are plain text. This includes examples
+inside `~~~`, fences of four or more backticks, and code indented by four spaces
+or a tab: their tools are never executed. Verified offline; no live account was
+used for these checks. Before validate/repair the
 bridge may demote advice mistagged as a call: if a block has no call-level `name`
 (JSON whole or broken) or the name is unknown and there is accompanying prose, the
 opening fence is relabeled from `tool_calls` to `text` and the agent gets ordinary
@@ -316,8 +359,10 @@ A call that repeats, with identical arguments, the call whose result the request
 carries (the model answers a tool result with the same call again) is not executed a
 second time: with `TOOLCALL_INVALID_MODE=text` the agent gets the same kind of message
 (raw reply plus a line saying the call repeats the one just executed); with `error` it
-raises. A different call, or a call after a new user message, runs normally. Verified
-offline.
+raises. A nonempty new user message after the tool result starts a separate action:
+for example, checking CI that was previously `pending` again. An empty message does
+not clear this check. Replaying an already consumed history still fails before any
+provider request. Verified offline.
 
 The tool result the agent returns (for example the option you picked) goes to the
 provider as just `Tool result (name): <result JSON>`. It carries no tools reminder
@@ -344,6 +389,18 @@ action protocol: do not use it for explanatory examples. Browser providers follo
 rules above instead. Remote schemas are never fetched; local `$ref` references work.
 On update, install `requirements.txt` (the new dependency is `jsonschema`) and
 restart the bridge.
+
+A normally finished DeepSeek response may also contain **one whole native DSML
+batch** (`calls` → `invoke` → `parameter`). The bridge decodes it locally for any
+advertised tool and applies the same complete schema and `tool_choice` checks.
+Values marked `string="true"` remain literal; `string="false"` requires valid
+JSON, with no inferred types. Incomplete tags, duplicate parameters, unknown tools,
+trailing text or one invalid call reject the entire batch. Quotations, Markdown
+examples and DSML after commentary are never extracted as actions. XML entities
+are not expanded and external resources are never loaded. No format regeneration
+is needed. This fixes the saved `Unsupported tool-call markup` failure with a
+complete DSML invocation; upgrading does not redeliver the failed reply or resume
+the goal. Verified offline using the saved response and synthetic cases.
 
 A normal stop with a closed fence also permits swapping the final `]}` to `}]`
 only when a string-aware scan confirms that arguments are complete and only the
@@ -505,8 +562,34 @@ not resume a stopped goal, replay an old reply, or reset history or counters.
 | `Local request budget exhausted` | Rolling budgets, conversation reply cap or prompt size. A new chat or restart does not clear rolling usage |
 | `MISSING_CREDENTIAL` for `deepseek-official` | The official API route needs a key. To use the bridge, select **Local account bridge** |
 | `login_required` | Saved authentication expired; sign in to the selected provider again |
+| `History is unknown` / `History already consumed` | The former means no local binding was found; the latter means it was found but is already used. Signing in or resetting budgets cannot repair this. After upgrading Harness, use the verified local schema compatibility below; consumed links remain closed |
 | `quota_exceeded`, `user is muted`, security refusal | Stop and inspect the normal website; do not retry automatically |
 | Missing group or model | Check `.env`, the running server and `/v1/models`, then reinstall the catalog |
+
+Upgrading Harness from 0.2.0-rc.2 to 0.2.1-rc.2 changed the catalog from 27 to 32
+tools and also changed the leading system instruction. Both fields are included
+in the history key. A verified version pair can be **registered locally**:
+
+```bash
+python -m server.conversation_schemas --model deepseek-expert --catalogs /private/path/catalogs.json
+```
+
+The private JSON must contain `old` and `current`: exact OpenAI tool arrays
+(`type: function`, `function: {name, description, parameters}`) from saved request
+headers. If the leading system instruction changed, also include both exact
+strings as `old_system` and `current_system`. Never reconstruct them from memory
+or publish the file: descriptions and instructions may contain local paths.
+The command only reads the local DeepSeek session and scopes the upgrade to its
+account and the selected model; it does not sign in or contact the provider.
+
+The bridge verifies the full old history and tool results, then claims the
+**original** single-use link. It creates no extra replay ticket. New replies are
+validated against current schemas. Unregistered changes, ambiguous parents,
+consumed links and previously attempted migrations remain closed. Upgrading
+schemas does not reset conversation limits, rolling budgets or migration journals,
+and never resumes a goal automatically. Verified offline, including the saved
+large history: the old binding was located while preserving its consumed state.
+Successful account-backed continuation after this change has not been tested.
 
 DeepSeek defaults are **12/60 generations, 3/6 new chats and 40/200 HTTP requests
 per hour/day**, with a shared 20 accepted replies per conversation
@@ -569,9 +652,11 @@ and reset time have not been established.
 **Harness or OpenCode runs tools on your computer.** Prompts and tool-read data
 are sent to the selected provider. The bridge validates responses and
 `tool_calls`, saves conversation state and sends new tool results to the existing
-chat. Continuation matching ignores client `system` prompts and OpenCode
-`<system-reminder>` wrappers (they change between turns). Unknown or already
-consumed history stops instead of silently creating a new chat.
+chat. History keys keep the original `main` format: updating requires no database
+cleanup, sign-in or counter reset. `system` instructions, `<system-reminder>` wrappers
+and assistant commentary are matched exactly; changed Harness instructions or
+schemas need an [explicit local compatibility registration](#if-harness-stops).
+Unknown or already consumed history stops instead of silently creating a new chat.
 
 Refusal pauses survive restart. Client setup, ordinary sign-in and local budget
 reset do not clear them. Safari transfer also preserves the entire pause, pending
@@ -661,7 +746,9 @@ fixtures without accounts.
 
 `GET /v1/models` lists bare IDs and `provider/model` aliases, for example
 `qwen3.8-max` and `qwen/qwen3.8-max`, or `deepseek-chat` and
-`deepseek/deepseek-chat`. Both forms work with the API and Harness catalog.
+`deepseek/deepseek-chat`. Both forms work with the API; the Harness installer
+keeps one menu entry per pair, preferring the bare ID. If the catalog advertises
+only an alias, that exact ID is retained.
 The prefix must match the provider and does not enable disabled models.
 DeepSeek aliases share the same history binding and continuation accounting:
 changing the spelling neither creates a new chat nor resets replay protection.
