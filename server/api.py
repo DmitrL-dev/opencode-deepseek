@@ -659,6 +659,7 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest, *, allow_cont
                     reply.text, req.tools, req.tool_choice,
                     finish_reason=reply.finish_reason,
                     provider=provider, allow_dsml_preamble=native_preamble,
+                    allow_dsml_wrapper_tolerances=native_preamble,
                 )
             except ToolCallError:
                 save_tool_failure(reply, req)

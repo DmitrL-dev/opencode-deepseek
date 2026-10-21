@@ -418,8 +418,16 @@ one complete packet whose opening tag starts on its own unindented line.
 Blockquotes, Markdown fences, HTML, prefixes with backticks or a terminal colon
 remain data. Trailing text, a second batch, incomplete tags and schema errors
 remain disallowed. The prefix is never executed and parameter values are never
-rewritten. This option is verified offline; a long live goal with it is
-not yet verified. Keep `TOOLCALL_FORMAT_REPAIR=0` and
+rewritten. With `dsml` explicitly selected and a normal stop, two envelope variants
+are also recognized: one empty repeated `calls` header immediately after the
+first opening, and `</｜｜DSML｜｜>` as an invocation closer. The latter is accepted
+only after every parameter has closed; the root must still end with the named
+`</｜｜DSML｜｜ calls>` tag. No values or missing tags are added. A third header,
+nested batches, unnamed parameter/root closers, incomplete values or any schema
+error reject the entire reply. These tolerances are off under the `json` default.
+Verified offline against a retained stream and general synthetic packets, with
+no format regeneration. A long live goal with this option is not yet verified.
+Keep `TOOLCALL_FORMAT_REPAIR=0` and
 `TOOLCALL_MAX_CONTINUATIONS=0` when generation retries are forbidden. The loaded
 dialect and those settings are visible locally in the authenticated
 `/admin/budget` response under `tool_contract`.

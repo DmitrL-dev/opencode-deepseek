@@ -10,7 +10,7 @@ from .openai_format import (
 
 
 def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provider="deepseek",
-                   allow_dsml_preamble=False):
+                   allow_dsml_preamble=False, allow_dsml_wrapper_tolerances=False):
     names = [t.get("function", t).get("name") for t in tools or []]
     finished = finish_reason == "stop"
     deepseek = finished and provider == "deepseek"
@@ -28,6 +28,7 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
         allow_calls_fence=deepseek,
         allow_dsml=deepseek,
         allow_dsml_preamble=deepseek and allow_dsml_preamble,
+        allow_dsml_wrapper_tolerances=deepseek and allow_dsml_wrapper_tolerances,
     )
     if (tool_choice != "none" and calls is None
             and has_tool_call_markup(text, names if provider == "deepseek" else None)):

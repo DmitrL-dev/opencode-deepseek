@@ -9,13 +9,14 @@ OPEN = '<｜｜DSML｜｜ calls>'
 CLOSE = '</｜｜DSML｜｜ calls>'
 INVOKE_END = '</｜｜DSML｜｜ invoke>'
 PARAMETER_END = '</｜｜DSML｜｜ parameter>'
+GENERIC_END = '</｜｜DSML｜｜>'
 _NAME = r'([^"<>\x00-\x1f]{1,256})'
 _INVOKE = re.compile(r'<｜｜DSML｜｜ invoke name="' + _NAME + r'">')
 _PARAMETER = re.compile(r'<｜｜DSML｜｜ parameter name="' + _NAME + r'" string="(true|false)">')
 _SPACE = re.compile(r'[ \t\r\n]*')
 
 
-def envelope(text, *, allow_preamble=False):
+def envelope(text, *, allow_preamble=False, allow_duplicate_open=False):
     """Locate one explicit native action envelope, never quoted/example code.
 
     Plain commentary is eligible only when the caller explicitly requested the
@@ -30,7 +31,9 @@ def envelope(text, *, allow_preamble=False):
     if not allow_preamble:
         return None
     starts = list(re.finditer(r'(?m)^' + re.escape(OPEN) + r'[ \t]*\r?$', text or ''))
-    if len(starts) != 1:
+    duplicate = (allow_duplicate_open and len(starts) == 2
+                 and text[starts[0].start():starts[1].start()].strip() == OPEN)
+    if len(starts) != 1 and not duplicate:
         return None
     prefix = text[:starts[0].start()]
     if (any(marker in prefix for marker in ('`', '~~~', '<', '\t'))
@@ -40,7 +43,7 @@ def envelope(text, *, allow_preamble=False):
     return text[starts[0].start():].rstrip()
 
 
-def decode(text, load_json):
+def decode(text, load_json, *, allow_wrapper_tolerances=False):
     """Decode one whole batch without changing or inferring argument values."""
     if len(text.encode()) > 4 * 1024 * 1024 or not text.startswith(OPEN):
         raise ValueError('Invalid DSML envelope')
@@ -49,6 +52,13 @@ def decode(text, load_json):
     def space():
         nonlocal position
         position = _SPACE.match(text, position).end()
+
+    if allow_wrapper_tolerances:
+        space()
+        # One adjacent, empty repeated header contains no action or value.
+        # A third header, or one after an invocation, still fails the grammar.
+        if text.startswith(OPEN, position):
+            position += len(OPEN)
 
     while True:
         space()
@@ -66,6 +76,12 @@ def decode(text, load_json):
             space()
             if text.startswith(INVOKE_END, position):
                 position += len(INVOKE_END)
+                break
+            if allow_wrapper_tolerances and text.startswith(GENERIC_END, position):
+                # At this boundary every parameter is already fully closed.
+                # The only open inner element is invoke. Never use this alias
+                # to close a parameter, infer a value or close the calls root.
+                position += len(GENERIC_END)
                 break
             parameter = _PARAMETER.match(text, position)
             if parameter is None or len(arguments) >= 256:

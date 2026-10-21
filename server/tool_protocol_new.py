@@ -51,7 +51,8 @@ def _rewrite_tool_calls_fences_to_text(text: str, blocks) -> str:
     return result
 
 
-def demote_mistagged_tool_reply(text, tools, *, allow_dsml_preamble=False) -> Optional[str]:
+def demote_mistagged_tool_reply(text, tools, *, allow_dsml_preamble=False,
+                                allow_dsml_wrapper_tolerances=False) -> Optional[str]:
     """If a reply is advice mistagged as tool_calls, return rewritten text.
 
     Demote (```tool_calls → ```text) when every top-level tool fence is either:
@@ -63,7 +64,8 @@ def demote_mistagged_tool_reply(text, tools, *, allow_dsml_preamble=False) -> Op
     """
     text = text or ""
     if (text.strip().startswith(DSML_OPEN)
-            or native_envelope(text, allow_preamble=allow_dsml_preamble) is not None):
+            or native_envelope(text, allow_preamble=allow_dsml_preamble,
+                               allow_duplicate_open=allow_dsml_wrapper_tolerances) is not None):
         # A native parameter may itself contain example Markdown. Its bytes
         # belong to the argument, never to the advice-demotion layer.
         return None
@@ -110,7 +112,7 @@ def demote_mistagged_tool_reply(text, tools, *, allow_dsml_preamble=False) -> Op
 
 
 def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provider="deepseek",
-                   with_parts=False, allow_dsml_preamble=False):
+                   with_parts=False, allow_dsml_preamble=False, allow_dsml_wrapper_tolerances=False):
     """LEGACY=0 validate: same multi-block contract for every provider.
 
     Apart from main's whole native DeepSeek envelope, only a top-level fenced
@@ -130,11 +132,13 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
     """
     text = text or ""
     if (text.strip().startswith(DSML_OPEN)
-            or native_envelope(text, allow_preamble=allow_dsml_preamble) is not None):
+            or native_envelope(text, allow_preamble=allow_dsml_preamble,
+                               allow_duplicate_open=allow_dsml_wrapper_tolerances) is not None):
         from .tool_protocol import validate_reply as validate_native
         content, calls = validate_native(text, tools, tool_choice,
                                         finish_reason=finish_reason, provider=provider,
-                                        allow_dsml_preamble=allow_dsml_preamble)
+                                        allow_dsml_preamble=allow_dsml_preamble,
+                                        allow_dsml_wrapper_tolerances=allow_dsml_wrapper_tolerances)
         if with_parts:
             parts = [{'type': 'tool_call', 'call': call} for call in calls or []]
             return content, calls, parts
