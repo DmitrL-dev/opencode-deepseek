@@ -747,6 +747,7 @@ def parse_tool_calls(
     allow_missing_call_closer: bool = False,
     allow_calls_fence: bool = False,
     allow_dsml: bool = False,
+    allow_dsml_preamble: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, with explicit narrow tolerances.
 
@@ -765,10 +766,11 @@ def parse_tool_calls(
     """
     stripped = (text or "").strip()
     if allow_dsml and flat_argument_tools is not None:
-        from .dsml import OPEN, decode
-        if stripped.startswith(OPEN):
+        from .dsml import decode, envelope
+        native = envelope(text, allow_preamble=allow_dsml_preamble)
+        if native is not None:
             try:
-                data = decode(stripped, _tool_json)
+                data = decode(native, _tool_json)
                 # Reuse the existing whole-batch parser and schema checks.
                 # No second route may return calls without those checks.
                 stripped = '```tool_calls\n' + json.dumps(data, ensure_ascii=False, allow_nan=False) + '\n```'

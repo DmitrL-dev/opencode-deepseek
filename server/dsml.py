@@ -15,6 +15,31 @@ _PARAMETER = re.compile(r'<｜｜DSML｜｜ parameter name="' + _NAME + r'" stri
 _SPACE = re.compile(r'[ \t\r\n]*')
 
 
+def envelope(text, *, allow_preamble=False):
+    """Locate one explicit native action envelope, never quoted/example code.
+
+    Plain commentary is eligible only when the caller explicitly requested the
+    native dialect. This selects a suffix, not a decoder tolerance: the entire
+    suffix still has to pass decode() and every advertised argument schema.
+    """
+    stripped = (text or '').strip()
+    if stripped.startswith(OPEN):
+        first_line = next((line for line in text.splitlines() if line.strip()), '')
+        # Markdown indentation is data, even for otherwise valid native tags.
+        return stripped if first_line.startswith(OPEN) else None
+    if not allow_preamble:
+        return None
+    starts = list(re.finditer(r'(?m)^' + re.escape(OPEN) + r'[ \t]*\r?$', text or ''))
+    if len(starts) != 1:
+        return None
+    prefix = text[:starts[0].start()]
+    if (any(marker in prefix for marker in ('`', '~~~', '<', '\t'))
+            or re.search(r'(?m)^(?:[ \t]*>| {4})', prefix)
+            or prefix.rstrip().endswith(':')):
+        return None
+    return text[starts[0].start():].rstrip()
+
+
 def decode(text, load_json):
     """Decode one whole batch without changing or inferring argument values."""
     if len(text.encode()) > 4 * 1024 * 1024 or not text.startswith(OPEN):

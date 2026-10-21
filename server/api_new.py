@@ -114,11 +114,13 @@ def tool_chat_or_notice(prompt, req, model_type, provider: str, executed=()):
 def tool_chat_with_retry(prompt, req, model_type):
     """Demote + validate + pointed repair for every provider."""
     from . import api
+    from .config import tool_protocol_for_provider
 
     reply = api._chat_with_retry(prompt, req, model_type)
     if (reply.finish_reason == "stop"
             and req.tool_choice in (None, "auto")):
-        demoted = demote_mistagged_tool_reply(reply.text, req.tools)
+        demoted = demote_mistagged_tool_reply(reply.text, req.tools,
+            allow_dsml_preamble=tool_protocol_for_provider(api.model_provider(req.model)) == 'dsml')
         if demoted is not None:
             print('[toolcalls] mistagged tool_calls demoted to text', flush=True)
             demoted_reply = Reply(demoted, reply.conversation_id, reply.finish_reason)
@@ -160,8 +162,11 @@ def validate_tool_reply(reply: Reply, req, *, allow_continuation=True):
     from . import api
     from deepseek.auth import LoginRequired
     from providers.access import ProviderRejected
+    from .config import tool_protocol_for_provider
 
     names = api._tool_names(req.tools)
+    provider = api.model_provider(req.model)
+    native_preamble = tool_protocol_for_provider(provider) == 'dsml'
     maximum = api._MAX_CONTINUATIONS if allow_continuation else 0
     for attempt in range(maximum + 1):
         api._check_cancelled()
@@ -172,7 +177,7 @@ def validate_tool_reply(reply: Reply, req, *, allow_continuation=True):
                 content, tool_calls, parts = validate_reply(
                     reply.text, req.tools, req.tool_choice,
                     finish_reason=reply.finish_reason,
-                    provider=api.model_provider(req.model),
+                    provider=provider, allow_dsml_preamble=native_preamble,
                     with_parts=True,
                 )
                 reply.parts = parts

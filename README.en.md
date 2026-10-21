@@ -396,7 +396,8 @@ advertised tool and applies the same complete schema and `tool_choice` checks.
 Values marked `string="true"` remain literal; `string="false"` requires valid
 JSON, with no inferred types. Incomplete tags, duplicate parameters, unknown tools,
 trailing text or one invalid call reject the entire batch. Quotations, Markdown
-examples and DSML after commentary are never extracted as actions. XML entities
+examples are never extracted as actions. DSML after commentary is also inert by
+default; the explicitly selected dialect has the narrow exception below. XML entities
 are not expanded and external resources are never loaded. No format regeneration
 is needed. This fixes the saved `Unsupported tool-call markup` failure with a
 complete DSML invocation; upgrading does not redeliver the failed reply or resume
@@ -412,7 +413,12 @@ names must fit DSML attributes (1–256 characters, no quotes, `<`, `>` or contr
 characters); strings containing DSML delimiters use a JSON string with
 `string="false"` and escaped angle brackets. Broken mixed JSON/DSML packets fail
 as a whole, without dropping a second invocation or demoting the failure to
-successful text. This option is verified offline; a long live goal with it is
+successful text. Only with `dsml` explicitly selected may plain commentary precede
+one complete packet whose opening tag starts on its own unindented line.
+Blockquotes, Markdown fences, HTML, prefixes with backticks or a terminal colon
+remain data. Trailing text, a second batch, incomplete tags and schema errors
+remain disallowed. The prefix is never executed and parameter values are never
+rewritten. This option is verified offline; a long live goal with it is
 not yet verified. Keep `TOOLCALL_FORMAT_REPAIR=0` and
 `TOOLCALL_MAX_CONTINUATIONS=0` when generation retries are forbidden. The loaded
 dialect and those settings are visible locally in the authenticated

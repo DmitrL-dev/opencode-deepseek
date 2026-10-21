@@ -643,6 +643,9 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest, *, allow_cont
     normally completed response may omit the fence or exactly the outer array
     closer only when all call objects and their arguments validate in full.
     """
+    from .config import tool_protocol_for_provider
+    provider = model_provider(req.model)
+    native_preamble = tool_protocol_for_provider(provider) == 'dsml'
     names = _tool_names(req.tools)
 
     maximum = _MAX_CONTINUATIONS if allow_continuation else 0
@@ -655,7 +658,7 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest, *, allow_cont
                 content, tool_calls = validate_reply(
                     reply.text, req.tools, req.tool_choice,
                     finish_reason=reply.finish_reason,
-                    provider=model_provider(req.model),
+                    provider=provider, allow_dsml_preamble=native_preamble,
                 )
             except ToolCallError:
                 save_tool_failure(reply, req)

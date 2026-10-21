@@ -29,6 +29,66 @@ def observed():
 
 
 class DsmlTests(unittest.TestCase):
+    def test_requested_native_dialect_accepts_plain_preamble_without_changing_arguments(self):
+        raw = 'I will inspect the project.\n\n' + observed()
+        with self.assertRaises(ToolCallError):
+            validate_reply(raw, FLAT_TOOLS)
+        _, calls = validate_reply(raw, FLAT_TOOLS, allow_dsml_preamble=True)
+        _, original = validate_reply(observed(), FLAT_TOOLS)
+        self.assertEqual([c['function'] for c in calls], [c['function'] for c in original])
+
+    def test_native_preamble_opt_in_keeps_quotes_examples_mixed_and_partial_packets_inert(self):
+        from server.tool_protocol_new import validate_reply as validate_new
+        good = observed()
+        variants = ['Example:\n' + good, '> quoted instruction\n\n' + good,
+                    '```xml\n' + good + '\n```', '~~~xml\n' + good + '\n~~~',
+                    '````markdown\n' + good + '\n````', '<blockquote>\n' + good + '\n</blockquote>',
+                    '\n'.join('    ' + line for line in good.splitlines()),
+                    '\n'.join('\t' + line for line in good.splitlines()),
+                    '\n'.join('> ' + line for line in good.splitlines()),
+                    'Inspect.\n\n' + good + '\n' + good,
+                    'Inspect.\n\n' + good + '\nTool (bash): success',
+                    'Inspect.\n\n' + good[:-len(CLOSE)],
+                    'Inspect.\n\n```tool_calls\n[]\n```\n' + good]
+        for validator in (validate_reply, validate_new):
+            for raw in variants:
+                with self.subTest(validator=validator.__module__, raw=raw):
+                    try:
+                        _, calls = validator(raw, FLAT_TOOLS, allow_dsml_preamble=True)
+                    except ToolCallError:
+                        continue
+                    self.assertIsNone(calls)
+
+    def test_requested_native_preamble_keeps_provider_finish_choice_and_whole_batch_schema_checks(self):
+        from server.tool_protocol_new import validate_reply as validate_new
+        text = 'Inspecting.\n\n' + observed()
+        for validator in (validate_reply, validate_new):
+            for kwargs in ({'provider': 'qwen'}, {'finish_reason': 'length'},
+                           {'tool_choice': 'none'},
+                           {'tool_choice': {'type': 'function', 'function': {'name': 'read'}}}):
+                with self.subTest(validator=validator.__module__, kwargs=kwargs), self.assertRaises(ToolCallError):
+                    validator(text, FLAT_TOOLS, allow_dsml_preamble=True, **kwargs)
+            for bad in (invoke('read', []), invoke('unknown', []),
+                        invoke('read', [('file_path', '42', False)])):
+                with self.subTest(bad=bad), self.assertRaises(ToolCallError):
+                    validator('Inspecting.\n\n' + batch(
+                        invoke('read', [('file_path', 'owned.txt', True)]), bad),
+                        FLAT_TOOLS, allow_dsml_preamble=True)
+
+    def test_loaded_native_dialect_validates_saved_preamble_without_new_generation(self):
+        from server import api, api_new
+        from server.schemas import ChatCompletionRequest
+        from chat_protocol import Reply
+        raw = 'I will inspect the project.\n\n' + observed()
+        req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=FLAT_TOOLS)
+        for validator in (api._validate_tool_reply, api_new.validate_tool_reply):
+            with self.subTest(validator=validator.__module__), \
+                    patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
+                    patch.object(api, '_chat_with_retry', side_effect=AssertionError('No generation')):
+                reply, _, calls = validator(Reply(raw, 'fixture:2'), req)
+                self.assertEqual(reply.conversation_id, 'fixture:2')
+                self.assertEqual(len(calls), 1)
+
     def test_observed_native_batch_passes_common_schema_parser_unchanged(self):
         content, calls = validate_reply(observed(), FLAT_TOOLS)
         self.assertEqual(content, '')

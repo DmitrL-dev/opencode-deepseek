@@ -9,7 +9,8 @@ from .openai_format import (
 )
 
 
-def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provider="deepseek"):
+def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provider="deepseek",
+                   allow_dsml_preamble=False):
     names = [t.get("function", t).get("name") for t in tools or []]
     finished = finish_reason == "stop"
     deepseek = finished and provider == "deepseek"
@@ -26,6 +27,7 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
         allow_tool_preamble=deepseek,
         allow_calls_fence=deepseek,
         allow_dsml=deepseek,
+        allow_dsml_preamble=deepseek and allow_dsml_preamble,
     )
     if (tool_choice != "none" and calls is None
             and has_tool_call_markup(text, names if provider == "deepseek" else None)):
