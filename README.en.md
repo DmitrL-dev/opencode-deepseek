@@ -453,16 +453,34 @@ not resume a stopped goal, replay an old reply, or reset history or counters.
 | `Local request budget exhausted` | Rolling budgets, conversation reply cap or prompt size. A new chat or restart does not clear rolling usage |
 | `MISSING_CREDENTIAL` for `deepseek-official` | The official API route needs a key. To use the bridge, select **Local account bridge** |
 | `login_required` | Saved authentication expired; sign in to the selected provider again |
-| `History is unknown or already consumed` | The local history binding is missing or already used. After upgrading Harness, check tool-catalog/schema changes: these are hashed into the binding. Signing in or resetting budgets does not repair it; keep replay protection and do not automatically create a new chat |
+| `History is unknown` / `History already consumed` | The former means no local binding was found; the latter means it was found but is already used. Signing in or resetting budgets cannot repair this. After upgrading Harness, use the verified local schema compatibility below; consumed links remain closed |
 | `quota_exceeded`, `user is muted`, security refusal | Stop and inspect the normal website; do not retry automatically |
 | Missing group or model | Check `.env`, the running server and `/v1/models`, then reinstall the catalog |
 
-A check of an existing goal after upgrading Harness from 0.2.0-rc.2 to
-0.2.1-rc.2 found 32 tools instead of 27, with six existing descriptions/schemas
-changed. Offline checks confirmed that this changes the history key. The single
-continuation attempt stopped locally before any DeepSeek request; bindings were
-not rewritten and no retry followed. Cross-version continuation of these goals
-still requires separate investigation.
+Upgrading Harness from 0.2.0-rc.2 to 0.2.1-rc.2 changed the catalog from 27 to 32
+tools and also changed the leading system instruction. Both fields are included
+in the history key. A verified version pair can be **registered locally**:
+
+```bash
+python -m server.conversation_schemas --model deepseek-expert --catalogs /private/path/catalogs.json
+```
+
+The private JSON must contain `old` and `current`: exact OpenAI tool arrays
+(`type: function`, `function: {name, description, parameters}`) from saved request
+headers. If the leading system instruction changed, also include both exact
+strings as `old_system` and `current_system`. Never reconstruct them from memory
+or publish the file: descriptions and instructions may contain local paths.
+The command only reads the local DeepSeek session and scopes the upgrade to its
+account and the selected model; it does not sign in or contact the provider.
+
+The bridge verifies the full old history and tool results, then claims the
+**original** single-use link. It creates no extra replay ticket. New replies are
+validated against current schemas. Unregistered changes, ambiguous parents,
+consumed links and previously attempted migrations remain closed. Upgrading
+schemas does not reset conversation limits, rolling budgets or migration journals,
+and never resumes a goal automatically. Verified offline, including the saved
+large history: the old binding was located while preserving its consumed state.
+Successful account-backed continuation after this change has not been tested.
 
 DeepSeek defaults are **12/60 generations, 3/6 new chats and 40/200 HTTP requests
 per hour/day**, with a shared 20 accepted replies per conversation

@@ -16,6 +16,7 @@ from .config import canonical_model
 from .schemas import ChatMessage
 from .openai_format import _text_of
 from .recovery_status import RECOVERY_STOP_TEXT
+from . import conversation_schemas
 
 
 class ConversationStateError(RuntimeError):
@@ -130,6 +131,7 @@ class ConversationCache:
         if len(set(result_ids)) != len(result_ids) or set(result_ids) != set(calls):
             raise ConversationStateError('Tool results do not match the delivered calls.')
         key = self.key(req, req.messages[:end], scope)
+        identity = self.account_identity() if scope is None else scope
         with self.connection() as db:
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
             # A namespace upgrade must not orphan histories stored before it.
@@ -140,8 +142,30 @@ class ConversationCache:
                 if row:
                     key = legacy_key
                     break
-            if not row or row[1]:
-                raise ConversationStateError('History is unknown or already consumed; automatic replay and new-chat fallback are disabled.')
+            if row is None or not row[1]:
+                # An administrator must register the exact old/current catalogs
+                # locally. A changed leading Harness instruction also requires
+                # an explicit exact pair. Account, model, flags and every other
+                # message/argument/call ID stay identical under the normal
+                # digest. Claim the OLD row, never mint an alias.
+                matches = {key: row} if row is not None else {}
+                try:
+                    for old in conversation_schemas.candidates(db, req, identity):
+                        old_key = self.key(old, old.messages[:end], identity)
+                        old_row = db.execute('SELECT cid, used, steps FROM links WHERE key=?',
+                                             (old_key,)).fetchone()
+                        if old_row is not None:
+                            matches[old_key] = old_row
+                except (ValueError, TypeError) as exc:
+                    raise ConversationStateError('Local schema upgrade unavailable; no request sent.') from exc
+                if len(matches) > 1:
+                    raise ConversationStateError('Ambiguous schema upgrade history; no request sent.')
+                if matches:
+                    key, row = next(iter(matches.items()))
+            if not row:
+                raise ConversationStateError('History is unknown; automatic replay and new-chat fallback are disabled.')
+            if row[1]:
+                raise ConversationStateError('History already consumed; automatic replay and new-chat fallback are disabled.')
             if row[2] >= self.max_replies and not (allow_local_rollover and claim is not None):
                 raise ConversationStateError(f'Local conversation limit reached ({self.max_replies} accepted replies); continuation stopped. This per-conversation cap is separate from hourly/daily budgets and is not reset by /bridge-budget-reset.')
             # Claim before dispatch. An uncertain response must never replay.
