@@ -21,14 +21,14 @@ class ToolDialectTests(unittest.TestCase):
 
     def test_native_full_prompt_has_one_dialect_and_keeps_safety_contracts(self):
         prompt = self.prompt()
-        for marker in ('<｜｜DSML｜｜ calls>', '</｜｜DSML｜｜ calls>',
+        for marker in ('<｜DSML｜ calls>', '</｜DSML｜ calls>',
                        'string="true"', 'string="false"', 'Required top-level argument fields',
                        'Verification reuse contract:', 'Shell search contract:',
                        'Only tool results establish what actually happened',
                        'Wait for the mutation tool result before running its verifier'):
             self.assertIn(marker, prompt)
         for mixed_rule in ('```tool_calls', 'Never use XML/DSML', 'closing tool_calls fence',
-                           'all input fields inside `arguments`'):
+                           'all input fields inside `arguments`', '｜｜DSML｜｜'):
             self.assertNotIn(mixed_rule, prompt)
         self.assertIn('Never mix', prompt)
         self.assertIn('Never append a `Tool (...):` line', prompt)
@@ -39,6 +39,8 @@ class ToolDialectTests(unittest.TestCase):
                 with self.subTest(mode=mode, choice=choice):
                     prompt = self.prompt(mode=mode, choice=choice, continuation=True)
                     self.assertIn('DSML', prompt)
+                    self.assertIn('<｜DSML｜ calls>', prompt)
+                    self.assertNotIn('｜｜DSML｜｜', prompt)
                     self.assertNotIn('```tool_calls', prompt)
                     self.assertNotIn('ONLY the fenced', prompt)
                     if choice == 'required':
@@ -66,6 +68,7 @@ class ToolDialectTests(unittest.TestCase):
             with self.subTest(provider=provider):
                 prompt = self.prompt(provider=provider)
                 self.assertIn('```tool_calls', prompt)
+                self.assertNotIn('<｜DSML｜ calls>', prompt)
                 self.assertNotIn('<｜｜DSML｜｜ calls>', prompt)
 
     def test_config_defaults_to_json_and_rejects_unknown_dialects(self):

@@ -52,10 +52,15 @@ fetching another challenge or generating again. These fixes are included in `mai
 The installed Harness upgrade from `0.2.0-rc.2` to `0.2.1-rc.2` was checked with
 the profile and history preserved.
 
-313 unit tests and 9 real CLI scenarios passed on Harness `0.2.1-rc.2`, using a
-synthetic provider and outbound network isolation: read/write, refusal handling,
-shell pipelines and no retry on HTTP 503. Live generation with the upgraded
-version was not tested. Thirty seconds is a local setting, not a provider-approved
+Latest full offline run: **848 tests, 799 passed, 49 skipped**. Nine real CLI
+scenarios were previously checked on Harness `0.2.1-rc.2` with a synthetic provider
+and outbound network isolation: read/write, refusal handling, shell pipelines and
+no retry on HTTP 503. Additional checks cover one-use history links during saved
+reply recovery and permissions when resuming a CLI session. A short live check
+stopped on damaged DSML without executing commands. Incorrect prompt delimiters
+and accepting damaged framing as successful text were fixed and verified offline;
+a long live goal with the corrected contract is not yet verified.
+Thirty seconds is a local setting, not a provider-approved
 safe quota. The exact cause of previous temporary restrictions remains unknown:
 the original server codes were not retained. An elapsed restriction period does
 not clear a local pause or establish the outcome of a pending request.
@@ -404,7 +409,12 @@ complete DSML invocation; upgrading does not redeliver the failed reply or resum
 the goal. Verified offline using the saved response and synthetic cases.
 
 DeepSeek can explicitly request `DEEPSEEK_TOOL_PROTOCOL=dsml` after a bridge
-restart. This asks for one complete native batch instead of a JSON fence;
+restart. The prompt uses the V4.1 reference vocabulary: `<｜DSML｜ calls>`, with
+one separator on each side of `DSML` and a space before the tag name
+([DeepSeek reference](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/encoding/README.md)).
+The previous prompt incorrectly doubled those separators. Complete retained
+packets using that older vocabulary remain readable for compatibility, but a
+batch cannot mix vocabularies. This asks for one complete native batch instead of a JSON fence;
 literal command/file strings need no JSON quote or newline escaping. Complete
 schemas, `tool_choice`, history, counters and replay prevention still apply.
 Other providers and the `json` default stay unchanged. Historical calls retain
@@ -420,13 +430,18 @@ remain data. Trailing text, a second batch, incomplete tags and schema errors
 remain disallowed. The prefix is never executed and parameter values are never
 rewritten. With `dsml` explicitly selected and a normal stop, two envelope variants
 are also recognized: one empty repeated `calls` header immediately after the
-first opening, and `</｜｜DSML｜｜>` as an invocation closer. The latter is accepted
+first opening, and `</｜DSML｜>` as an invocation closer. The latter is accepted
 only after every parameter has closed; the root must still end with the named
-`</｜｜DSML｜｜ calls>` tag. No values or missing tags are added. A third header,
+`</｜DSML｜ calls>` tag. No values or missing tags are added. A third header,
 nested batches, unnamed parameter/root closers, incomplete values or any schema
 error reject the entire reply. These tolerances are off under the `json` default.
 Verified offline against a retained stream and general synthetic packets, with
-no format regeneration. A long live goal with this option is not yet verified.
+no format regeneration. Damaged DSML markers, including asymmetric and ASCII
+separators, are recognized as format failures and retained in private diagnostics,
+rather than returned as successful text. They are never repaired into calls.
+Quoted, fenced and indented examples remain data. The latest ambiguous batch
+was not restored or executed; upgrading never repeats a generation.
+A long live goal with this option is not yet verified.
 Keep `TOOLCALL_FORMAT_REPAIR=0` and
 `TOOLCALL_MAX_CONTINUATIONS=0` when generation retries are forbidden. The loaded
 dialect and those settings are visible locally in the authenticated
@@ -604,6 +619,13 @@ not resume a stopped goal, replay an old reply, or reset history or counters.
 | `History is unknown` / `History already consumed` | The former means no local binding was found; the latter means it was found but is already used. Signing in or resetting budgets cannot repair this. After upgrading Harness, use the verified local schema compatibility below; consumed links remain closed |
 | `quota_exceeded`, `user is muted`, security refusal | Stop and inspect the normal website; do not retry automatically |
 | Missing group or model | Check `.env`, the running server and `/v1/models`, then reinstall the catalog |
+
+`headless` has no interactive approval channel: a `sandbox_permissions`
+escalation may stop before the command starts. Harness persists permissions in
+the session; changing the launch-time `DSH_PERMISSION_MODE` does not replace an
+already saved mode. Use the selected session's native permission control,
+preserve filesystem/network boundaries, and never fabricate a tool result.
+This is local Harness state rather than a DeepSeek authentication failure.
 
 Upgrading Harness from 0.2.0-rc.2 to 0.2.1-rc.2 changed the catalog from 27 to 32
 tools and also changed the leading system instruction. Both fields are included

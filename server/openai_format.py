@@ -18,6 +18,7 @@ import uuid
 from typing import Iterable, List, Optional, Tuple
 
 from .schemas import ChatMessage
+from .dsml import has_markup as has_native_markup
 
 _ROLE_LABELS = {"system": "System", "user": "User", "assistant": "Assistant"}
 
@@ -27,7 +28,6 @@ _TOOL_START_RE = re.compile(r"\A```tool_calls(?:[ \t]+[^\r\n]*)?\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
 _TOOL_MARKUP_RE = re.compile(
     r"(?m)^[ \t]*```(?:tool_calls|calls)[ \t]*\r?$"
-    r"|^[ \t]*<｜｜DSML｜｜ (?:calls|invoke)\b"
 )
 # Observed web-model terminators after an otherwise complete JSON array. Only
 # closing syntax is allowed; no opening tag, content, or second call can match.
@@ -102,7 +102,7 @@ def has_tool_call_markup(text: str, allowed_names=None) -> bool:
     Detection alone never authorizes execution: callers may request one fresh
     formatted response, which must pass the full parser and tool-choice policy.
     """
-    if _TOOL_MARKUP_RE.search(text):
+    if _TOOL_MARKUP_RE.search(text) or has_native_markup(text):
         return True
     if not allowed_names:
         return False
@@ -185,12 +185,12 @@ def _tool_wire_rules(protocol):
             "calls envelope, with one invoke per call and one parameter per "
             "top-level argument. No Markdown fence or surrounding commentary. "
             "Structural example (replace every placeholder using the schemas):\n\n"
-            '<｜｜DSML｜｜ calls>\n'
-            '<｜｜DSML｜｜ invoke name="ADVERTISED_TOOL_NAME">\n'
-            '<｜｜DSML｜｜ parameter name="ARGUMENT_NAME" string="true">'
-            'EXACT_STRING_VALUE</｜｜DSML｜｜ parameter>\n'
-            '</｜｜DSML｜｜ invoke>\n'
-            '</｜｜DSML｜｜ calls>\n\n'
+            '<｜DSML｜ calls>\n'
+            '<｜DSML｜ invoke name="ADVERTISED_TOOL_NAME">\n'
+            '<｜DSML｜ parameter name="ARGUMENT_NAME" string="true">'
+            'EXACT_STRING_VALUE</｜DSML｜ parameter>\n'
+            '</｜DSML｜ invoke>\n'
+            '</｜DSML｜ calls>\n\n'
             "Use exact tool and argument names. Never copy placeholders, invent "
             "fields, add an arguments wrapper, or omit required parameters. "
             "An invocation with no parameters is valid only if its schema permits {}.\n"

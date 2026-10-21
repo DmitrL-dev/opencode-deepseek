@@ -6,7 +6,7 @@ Used only when TOOLCALL_LEGACY=0. Main-era validate lives in tool_protocol.py.
 import re
 from typing import Optional
 
-from .dsml import OPEN as DSML_OPEN, envelope as native_envelope
+from .dsml import OPEN as DSML_OPEN, envelope as native_envelope, has_markup as has_native_markup
 from .openai_format import (
     ToolCallError, enforce_tool_choice, find_tool_blocks, parse_tool_calls,
 )
@@ -18,7 +18,6 @@ _CALL_NAME_BEFORE_ARGS_RE = re.compile(
 _FUNCTION_NAME_RE = re.compile(
     r'"function"\s*:\s*\{\s*"name"\s*:\s*"((?:\\.|[^"\\])*)"')
 _OPEN_TOOL_CALLS_FENCE_RE = re.compile(r'^([ \t]*```)tool_calls\b', re.MULTILINE)
-_NATIVE_FRAME_RE = re.compile(r'(?m)^[ \t]*</?｜｜DSML｜｜ (?:calls|invoke|parameter)(?:\s|>)')
 
 
 def _call_names_in_payload(body: str) -> list[str]:
@@ -90,7 +89,7 @@ def demote_mistagged_tool_reply(text, tools, *, allow_dsml_preamble=False,
             if exc.kind == "syntax":
                 # A broken mixed wire packet is not advice. Never hide an
                 # unfinished native invocation by relabelling its JSON fence.
-                if _NATIVE_FRAME_RE.search(body):
+                if has_native_markup(body, include_code=True):
                     return None
                 extracted = _call_names_in_payload(body)
                 if not extracted:
@@ -143,6 +142,8 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
             parts = [{'type': 'tool_call', 'call': call} for call in calls or []]
             return content, calls, parts
         return content, calls
+    if tool_choice != 'none' and has_native_markup(text):
+        raise ToolCallError('Unsupported tool-call markup; no calls were returned')
     names = [t.get("function", t).get("name") for t in tools or []]
     finished = finish_reason == "stop"
     blocks = find_tool_blocks(text)
