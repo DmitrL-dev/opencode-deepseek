@@ -25,6 +25,7 @@ def validate_reply(text, tools, tool_choice=None, *, finish_reason="stop", provi
         allow_missing_call_closer=deepseek,
         allow_tool_preamble=deepseek,
         allow_calls_fence=deepseek,
+        allow_dsml=deepseek,
     )
     if (tool_choice != "none" and calls is None
             and has_tool_call_markup(text, names if provider == "deepseek" else None)):

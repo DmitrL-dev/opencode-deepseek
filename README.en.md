@@ -293,6 +293,18 @@ action protocol: do not use it for explanatory examples. Remote schemas are neve
 fetched; local `$ref` references work. On update, install `requirements.txt`
 (the new dependency is `jsonschema`) and restart the bridge.
 
+A normally finished DeepSeek response may also contain **one whole native DSML
+batch** (`calls` → `invoke` → `parameter`). The bridge decodes it locally for any
+advertised tool and applies the same complete schema and `tool_choice` checks.
+Values marked `string="true"` remain literal; `string="false"` requires valid
+JSON, with no inferred types. Incomplete tags, duplicate parameters, unknown tools,
+trailing text or one invalid call reject the entire batch. Quotations, Markdown
+examples and DSML after commentary are never extracted as actions. XML entities
+are not expanded and external resources are never loaded. No format regeneration
+is needed. This fixes the saved `Unsupported tool-call markup` failure with a
+complete DSML invocation; upgrading does not redeliver the failed reply or resume
+the goal. Verified offline using the saved response and synthetic cases.
+
 A normal stop with a closed fence also permits swapping the final `]}` to `}]`
 only when a string-aware scan confirms that arguments are complete and only the
 call object and outer array remain open. No values or delimiters are added. The

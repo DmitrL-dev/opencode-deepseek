@@ -28,7 +28,7 @@ _TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
 _TOOL_MARKUP_RE = re.compile(
     r"(?m)^[ \t]*```(?:tool_calls|calls)[ \t]*\r?$"
-    r"|^[ \t]*<｜｜DSML｜｜ calls>(?=\s*<｜｜DSML｜｜ invoke\b)"
+    r"|^[ \t]*<｜｜DSML｜｜ (?:calls|invoke)\b"
 )
 # Observed web-model terminators after an otherwise complete JSON array. Only
 # closing syntax is allowed; no opening tag, content, or second call can match.
@@ -588,11 +588,13 @@ def parse_tool_calls(
     allow_outer_closer_transposition: bool = False,
     allow_missing_call_closer: bool = False,
     allow_calls_fence: bool = False,
+    allow_dsml: bool = False,
 ) -> Tuple[str, Optional[List[dict]]]:
     """Accept one whole fenced tool_calls array, with explicit narrow tolerances.
 
     All calls and their arguments must validate before any call is returned.
-    Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text.
+    Ordinary text, JSON examples, XML/DSML and pseudo-calls remain visible text
+    unless the caller opts into a complete native DSML envelope with schemas.
     Optional normal-stop tolerances cover an absent final Markdown fence and
     known closing-only artifacts after a complete array, independently.
     A caller may permit a missing outer array closer only after all objects
@@ -604,6 +606,16 @@ def parse_tool_calls(
     block. Advertised schemas validate every call before the batch is returned.
     """
     stripped = (text or "").strip()
+    if allow_dsml and flat_argument_tools is not None:
+        from .dsml import OPEN, decode
+        if stripped.startswith(OPEN):
+            try:
+                data = decode(stripped, _tool_json)
+                # Reuse the existing whole-batch parser and schema checks.
+                # No second route may return calls without those checks.
+                stripped = '```tool_calls\n' + json.dumps(data, ensure_ascii=False, allow_nan=False) + '\n```'
+            except (ValueError, TypeError, RecursionError):
+                raise ToolCallError('Invalid or incomplete DSML tool envelope; no calls were returned') from None
     if allow_tool_preamble and flat_argument_tools is not None:
         stripped = _tool_block_after_preamble(stripped, allow_calls_fence=allow_calls_fence)
     if allow_calls_fence and flat_argument_tools is not None and re.match(r'\A```calls[ \t]*\r?\n', stripped):
