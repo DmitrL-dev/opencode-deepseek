@@ -27,6 +27,11 @@ configuration, and updates `~/.dsh/profiles/desktop/cordis.patch.yml`. Enabled
 bridge models appear under **Local account bridge**. A requested default absent
 from that catalog fails before writing. Harness reloads the configuration;
 restart the app if necessary. Select a workspace and start a new session.
+
+A bare ID and its `provider/model` alias produce one menu entry using the bare
+ID; a model advertised only as an alias retains that exact ID. Rerun setup with
+your previous options to remove duplicates from an older profile. The API still
+accepts both spellings. Updating the menu does not change history, pauses or budgets.
 Existing sessions may retain their previous model.
 
 Omit `--default-model` to preserve your current default. Use `--install web` for

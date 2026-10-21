@@ -186,6 +186,9 @@ python -m integrations.harness_shell_safety --profile desktop
 The installer reads the local catalog, backs up the profile and updates
 `~/.dsh/profiles/desktop/cordis.patch.yml`. It disables automatic retries and
 model-generated titles. Setup sends no account requests.
+The menu keeps one entry per model: a bare ID and its `provider/model` alias
+are combined, preferring the bare ID. If duplicates appear, rerun setup with
+your previous options; the profile reloads without changing history or budgets.
 
 | Connection | Harness configuration |
 | --- | --- |
@@ -569,7 +572,9 @@ fixtures without accounts.
 
 `GET /v1/models` lists bare IDs and `provider/model` aliases, for example
 `qwen3.8-max` and `qwen/qwen3.8-max`, or `deepseek-chat` and
-`deepseek/deepseek-chat`. Both forms work with the API and Harness catalog.
+`deepseek/deepseek-chat`. Both forms work with the API; the Harness installer
+keeps one menu entry per pair, preferring the bare ID. If the catalog advertises
+only an alias, that exact ID is retained.
 The prefix must match the provider and does not enable disabled models.
 DeepSeek aliases share the same history binding and continuation accounting:
 changing the spelling neither creates a new chat nor resets replay protection.

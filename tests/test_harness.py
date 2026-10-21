@@ -98,7 +98,7 @@ class HarnessSetupTests(unittest.TestCase):
         self.assertEqual([m['id'] for m in models], ['kimi-instant', 'kimi-k3', 'kimi-k2.8'])
         self.assertEqual(models[0]['name'], 'Kimi Instant · web')
 
-    def test_catalog_accepts_matching_owner_prefixed_aliases(self):
+    def test_catalog_coalesces_matching_aliases_and_keeps_alias_only_models(self):
         catalog = {"data": [
             {"id": "qwen3.8-omni-flash", "owned_by": "qwen"},
             {"id": "qwen/qwen3.8-omni-flash", "owned_by": "qwen"},
@@ -106,14 +106,60 @@ class HarnessSetupTests(unittest.TestCase):
         ]}
         models = harness.catalog_models(catalog)
         self.assertEqual([model["id"] for model in models],
-                         ["qwen3.8-omni-flash", "qwen/qwen3.8-omni-flash", "kimi/kimi-instant"])
-        self.assertEqual(models[1]["name"], "Qwen3.8 Omni Flash · web")
+                         ["qwen3.8-omni-flash", "kimi/kimi-instant"])
+        self.assertEqual(models[0]["name"], "Qwen3.8 Omni Flash · web")
         self.assertEqual(
             [model["id"] for model in harness.catalog_models(catalog, without_browser=True)],
-            ["qwen3.8-omni-flash", "qwen/qwen3.8-omni-flash", "kimi/kimi-instant"],
+            ["qwen3.8-omni-flash", "kimi/kimi-instant"],
         )
         with self.assertRaises(ValueError):
             harness.catalog_models({"data": [{"id": "evil/qwen3.8-omni-flash", "owned_by": "qwen"}]})
+
+    def test_catalog_prefers_bare_ids_even_after_aliases_without_reordering_targets(self):
+        rows = [
+            {"id": "deepseek/deepseek-expert", "owned_by": "deepseek"},
+            {"id": "qwen/qwen3.8-max", "owned_by": "qwen"},
+            {"id": "deepseek-expert", "owned_by": "deepseek"},
+            {"id": "qwen3.8-max", "owned_by": "qwen"},
+        ]
+        original = json.dumps(rows)
+        for browserless in (False, True):
+            with self.subTest(browserless=browserless):
+                models = harness.catalog_models({"data": rows}, without_browser=browserless)
+                self.assertEqual([m["id"] for m in models], ["deepseek-expert", "qwen3.8-max"])
+        self.assertEqual(json.dumps(rows), original)
+
+    def test_catalog_does_not_coalesce_the_same_suffix_from_different_owners(self):
+        rows = [{"id": "qwen/shared", "owned_by": "qwen"},
+                {"id": "deepseek/shared", "owned_by": "deepseek"},
+                {"id": "shared", "owned_by": "qwen"}]
+        self.assertEqual([m["id"] for m in harness.catalog_models({"data": rows})],
+                         ["shared", "deepseek/shared"])
+
+    def test_catalog_validates_redundant_aliases_before_coalescing_or_filtering(self):
+        rows = [{"id": "glm-web", "owned_by": "glm"},
+                {"id": "glm/glm-web", "owned_by": "glm"}]
+        for invalid in (rows[1], {"id": "other/glm-web", "owned_by": "glm"}):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                harness.catalog_models({"data": CATALOG["data"][:1] + rows + [invalid]},
+                                       without_browser=True)
+
+    def test_install_replaces_duplicate_menu_entries_without_changing_default_or_safety(self):
+        rows = [{"id": "deepseek-expert", "owned_by": "deepseek"},
+                {"id": "deepseek/deepseek-expert", "owned_by": "deepseek"}]
+        old_models = [{"id": row["id"], "name": "DeepSeek Expert · web"} for row in rows]
+        original = harness.patch_document([], BASE, old_models, "deepseek-expert")
+        original.append({"insert": [{"id": "local-bridge-shell-safety", "name": "safety.mjs"}]})
+        self.path.write_bytes(harness.render(original))
+        models = harness.catalog_models({"data": rows}, without_browser=True)
+        path, backup = harness.install(self.home, "desktop", BASE, models, without_browser=True)
+        self.assertEqual(backup.read_bytes(), harness.render(original))
+        updated = harness.yaml_codec().load(path)
+        route = updated[0]["config"]["providers"][harness.ROUTE]
+        self.assertEqual([m["id"] for m in route["models"]], ["deepseek-expert"])
+        self.assertEqual(updated[1:], original[1:])
+        self.assertEqual(route["retryPolicy"]["maxRetries"], 0)
+        self.assertIsNone(harness.install(self.home, "desktop", BASE, models, without_browser=True)[1])
 
     def test_without_browser_excludes_web_aliases_too(self):
         rows = [{"id": "deepseek/deepseek-chat", "owned_by": "deepseek"}]
