@@ -26,12 +26,18 @@ def authorized(request):
 
 def status_with_conversation_limit(guard):
     from server.api import conversation_cache, SESSION_MAX_AGE
+    from server import api
+    from server.config import DEEPSEEK_TOOL_PROTOCOL
     from deepseek.stream_diagnostics import StreamCapture
     return {**guard.budget_status(), 'conversation': {
         'max_replies': conversation_cache.max_replies,
         'reset_by_budget_reset': False,
     }, 'session_policy': {'max_age_seconds': SESSION_MAX_AGE},
-        'stream_diagnostics': {'enabled': StreamCapture().enabled}}
+        'stream_diagnostics': {'enabled': StreamCapture().enabled},
+        'tool_contract': {'deepseek_protocol': DEEPSEEK_TOOL_PROTOCOL,
+                          'legacy': api._LEGACY,
+                          'format_repair': api._FORMAT_REPAIR,
+                          'max_continuations': api._MAX_CONTINUATIONS}}
 
 
 @router.get('/admin/budget')

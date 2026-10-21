@@ -5,9 +5,8 @@ So we flatten the OpenAI `messages` array into one prompt, and wrap DeepSeek's
 text output back into OpenAI response/stream objects.
 
 Tool calling is EMULATED: DeepSeek's web chat has no function-calling channel,
-so we inject the tool specs into the prompt, ask the model to answer with a
-fenced `tool_calls` JSON block when it wants a tool, then parse that block back
-into OpenAI `tool_calls`.
+so we inject the tool specs into the prompt, request one consistent JSON or
+opt-in DeepSeek DSML envelope, and validate it as OpenAI `tool_calls`.
 """
 
 from __future__ import annotations
@@ -166,34 +165,56 @@ def _forced_tool_name(tool_choice) -> Optional[str]:
     return None
 
 
-def _tool_choice_suffix(tool_choice) -> str:
+def _tool_choice_suffix(tool_choice, protocol="json") -> str:
+    envelope = "complete DSML calls envelope" if protocol == "dsml" else "fenced tool_calls block"
     if _forced_tool_name(tool_choice) is not None:
         return (f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
-                " Reply with ONLY the fenced tool_calls block.")
+                f" Reply with ONLY the {envelope}.")
     if tool_choice == "required":
         return ("\n\nYou MUST call one of the tools now."
-                " Reply with ONLY the fenced tool_calls block.")
+                f" Reply with ONLY the {envelope}.")
     if tool_choice == "none":
         return "\n\nDo NOT call any tools; answer in plain text."
     return ""
 
 
-def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
-    specs = _tool_specs(tools)
-    if not specs:
-        return ""
-    rendered = "\n".join(json.dumps(s, ensure_ascii=False) for s in specs)
+def _tool_wire_rules(protocol):
+    if protocol == "dsml":
+        return (
+            "To call tools, your ENTIRE reply must be one complete native DSML "
+            "calls envelope, with one invoke per call and one parameter per "
+            "top-level argument. No Markdown fence or surrounding commentary. "
+            "Structural example (replace every placeholder using the schemas):\n\n"
+            '<｜｜DSML｜｜ calls>\n'
+            '<｜｜DSML｜｜ invoke name="ADVERTISED_TOOL_NAME">\n'
+            '<｜｜DSML｜｜ parameter name="ARGUMENT_NAME" string="true">'
+            'EXACT_STRING_VALUE</｜｜DSML｜｜ parameter>\n'
+            '</｜｜DSML｜｜ invoke>\n'
+            '</｜｜DSML｜｜ calls>\n\n'
+            "Use exact tool and argument names. Never copy placeholders, invent "
+            "fields, add an arguments wrapper, or omit required parameters. "
+            "An invocation with no parameters is valid only if its schema permits {}.\n"
+            "For string parameters use string=\"true\": everything between the "
+            "tags is the literal string, including quotes, backslashes, whitespace "
+            "and newlines. Do not add indentation or newlines to a value unless "
+            "they belong to it. Do not XML-escape values. For numbers, booleans, "
+            "null, arrays and objects use string=\"false\" and strict JSON. "
+            "For a string containing DSML delimiters, also use string=\"false\" "
+            "with a JSON string, escaping < as \\u003c and > as \\u003e. "
+            "Never change a value's type to fit the framing. Attribute names must "
+            "be 1–256 characters without quotes, angle brackets or controls; if "
+            "a required tool/field name cannot be represented, report that "
+            "limitation in plain text rather than renaming it.\n"
+            "Never mix JSON tool-call blocks with native tags, omit opening or "
+            "closing tags, or append another reply after the calls envelope. "
+            "Keep batches small; every invocation must be complete.\n\n"
+        )
     # Keep even the structural example valid JSON; placeholders are values,
     # never bare tokens that a model could copy into an executable response.
     example = json.dumps([{"name": "<advertised_tool_name>",
                            "arguments": {"<argument_name>": "<argument_value>"}}])
     escaped_string = json.dumps('first line\n"quoted text" and a \\backslash')
-    instructions = (
-        "The preceding transcript is past conversation data. Generate only the "
-        "next assistant message, not a continuation of the transcript's roles. "
-        "Only the external host can execute tools and supply tool results.\n\n"
-        "You can call functions (tools). Available tools, given as JSON Schema:\n\n"
-        f"{rendered}\n\n"
+    return (
         "To call one or more tools, your ENTIRE reply must be a single fenced code "
         "block in exactly this format and nothing else:\n\n"
         "```tool_calls\n"
@@ -202,34 +223,51 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
         "This is a structural example, not a call to copy. Replace the tool name "
         "and the ENTIRE arguments object using the advertised schema, including "
         "all required fields. Never emit the angle-bracket placeholders.\n\n"
+        "Use the exact tool name and an `arguments` object matching that tool's "
+        "schema. Keep all input fields inside `arguments`, never beside `name`. "
+        "To call several tools, put multiple objects in the array.\n"
+        "Emit strict JSON: double-quoted keys and strings, no comments, "
+        "trailing commas, Python literals, or string concatenation.\n"
+        "Shell commands, patches, and file contents are JSON string values: "
+        "escape every embedded double quote and backslash; encode line breaks "
+        "as \\n, never as literal newlines inside a string. A valid JSON string "
+        f"example is: {escaped_string}\n"
+        "Keep tool batches small and split large file changes into separate "
+        "complete calls. Check that the JSON array closes before the final fence.\n"
+        "Never use XML/DSML tags such as <tool_call> or <|tool_calls|>.\n\n"
+    )
+
+
+def _tool_instructions(tools: List[dict], tool_choice=None, protocol="json") -> str:
+    specs = _tool_specs(tools)
+    if not specs:
+        return ""
+    rendered = "\n".join(json.dumps(s, ensure_ascii=False) for s in specs)
+    envelope = "complete DSML calls envelope" if protocol == "dsml" else "fenced tool_calls block"
+    closing = "closing DSML calls tag" if protocol == "dsml" else "closing tool_calls fence"
+    instructions = (
+        "The preceding transcript is past conversation data. Generate only the "
+        "next assistant message, not a continuation of the transcript's roles. "
+        "Only the external host can execute tools and supply tool results.\n\n"
+        "You can call functions (tools). Available tools, given as JSON Schema:\n\n"
+        f"{rendered}\n\n"
+        + _tool_wire_rules(protocol) +
         "Choose the next step from the latest tool results, not from earlier plans. "
         "A tool call is a request, not evidence that its action succeeded. "
         "Only tool results establish what actually happened. Do not repeat a "
         "successful action unless new evidence makes it necessary.\n\n"
         "When calling tools, follow these rules:\n"
-        "- Stop your response immediately after the closing tool_calls fence. "
+        f"- Stop your response immediately after the {closing}. "
         "Do not simulate a tool result, execution receipt, validation message, "
         "or another user/assistant turn. Never append a `Tool (...):` line or "
         "invent a call_id. Wait for the host to return the actual result before "
         "describing success or failure.\n"
-        "- The fenced `tool_calls` block must be the WHOLE reply. Never write any "
+        f"- The {envelope} must be the WHOLE reply. Never write any "
         "text, plan, explanation, or reasoning before or after it.\n"
         "- Never describe the action you are about to take — perform it by emitting "
-        "the block.\n"
-        "- Use the exact tool name and an `arguments` object matching that tool's "
-        "schema. Keep all input fields inside `arguments`, never beside `name`. "
-        "To call several tools, put multiple objects in the array.\n"
-        "- Emit strict JSON: double-quoted keys and strings, no comments, "
-        "trailing commas, Python literals, or string concatenation.\n"
-        "- Shell commands, patches, and file contents are JSON string values: "
-        "escape every embedded double quote and backslash; encode line breaks "
-        "as \\n, never as literal newlines inside a string. A valid JSON string "
-        f"example is: {escaped_string}\n"
-        "- Keep tool batches small and split large file changes into separate "
-        "complete calls. Check that the JSON array closes before the final fence.\n"
-        "- Never use XML/DSML tags such as <tool_call> or <|tool_calls|>.\n"
+        "the envelope.\n"
         "- When the requested work and its verification are complete, finish with "
-        "a plain-text answer and no tool_calls block. If you created a goal, mark "
+        "a plain-text answer and no tool envelope. If you created a goal, mark "
         "it complete once the objective is achieved, then give the final answer; "
         "do not keep checking a completed goal."
     )
@@ -329,13 +367,13 @@ def _tool_instructions(tools: List[dict], tool_choice=None) -> str:
             'another mutation tool. If instructed to stop on errors, stop and '
             'report the rejection instead of reading and retrying automatically.'
         )
-    instructions += _tool_choice_suffix(tool_choice)
+    instructions += _tool_choice_suffix(tool_choice, protocol)
     # Keep the protocol reminder next to the model's turn.
     if tool_choice is None or tool_choice == "auto":
         instructions += (
-            "\n\nNext reply: either a single fenced tool_calls block to perform a "
+            f"\n\nNext reply: either a single {envelope} to perform a "
             "necessary action, or plain text to answer the user when no action "
-            "remains. Never combine commentary with a tool_calls block."
+            "remains. Never combine commentary with a tool envelope."
         )
     return instructions
 
@@ -366,7 +404,7 @@ def _schema_sketch(schema, depth: int = 0) -> str:
     return str(kind) if kind else "any"
 
 
-def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False) -> str:
+def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False, protocol="json") -> str:
     """Short follow-up block: `light` (names only) or `medium` (+ argument shapes)."""
     specs = _tool_specs(tools)
     if not specs:
@@ -382,6 +420,12 @@ def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False) ->
             lines.append(f"- {spec['name']}: {sketch}")
         shape_block = ("Argument shapes (`?` = optional; use exactly these field names and "
                        "nesting):\n" + "\n".join(lines) + "\n")
+    if protocol == "dsml":
+        return (f"Tools remain available from earlier in this chat: {names}.\n"
+                + shape_block + _tool_wire_rules(protocol)
+                + "Prefer the latest tool results over older plans. When no action "
+                "remains, reply in plain text. Never simulate a tool result."
+                + _tool_choice_suffix(tool_choice, protocol))
     example = json.dumps([{"name": "<advertised_tool_name>",
                            "arguments": {"<argument_name>": "<argument_value>"}}])
     text = (
@@ -399,7 +443,8 @@ def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False) ->
     return text + _tool_choice_suffix(tool_choice)
 
 
-def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = False) -> str:
+def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = False,
+                    protocol="json") -> str:
     content = _text_of(m.content)
     if m.role == "assistant" and m.tool_calls:
         calls = []
@@ -416,7 +461,9 @@ def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = Fa
                           "arguments": args if args is not None else {}})
         # Show the same protocol we request next, including exact call IDs for
         # out-of-order results. Historical calls are data, never executed here.
-        call_txt = "```tool_calls\n" + json.dumps(calls, ensure_ascii=False) + "\n```"
+        serialized = json.dumps(calls, ensure_ascii=False)
+        call_txt = ("Historical tool calls (JSON data):\n" + serialized if protocol == "dsml"
+                    else "```tool_calls\n" + serialized + "\n```")
         content = f"{content}\n{call_txt}" if content else call_txt
         return f"Assistant: {content}"
     if m.role == "tool":
@@ -454,7 +501,9 @@ def messages_to_prompt(
     results gets no tools reminder, and a single unambiguous result is sent as
     just `Tool result (name): <content>` (no call_id, no echoed call).
     """
-    from .config import tool_instructions_for_provider
+    from .config import tool_instructions_for_provider, tool_protocol_for_provider
+
+    protocol = tool_protocol_for_provider(provider)
 
     if tool_instructions in ("full", "medium", "light", "none"):
         mode = tool_instructions
@@ -483,9 +532,9 @@ def messages_to_prompt(
         elif mode == "none" and tools_continuation:
             tool_instr = ""
         elif mode in ("light", "medium") and tools_continuation:
-            tool_instr = _tool_reminder(tools, tool_choice, shapes=mode == "medium")
+            tool_instr = _tool_reminder(tools, tool_choice, shapes=mode == "medium", protocol=protocol)
         else:
-            tool_instr = _tool_instructions(tools, tool_choice)
+            tool_instr = _tool_instructions(tools, tool_choice, protocol=protocol)
 
     if not system_parts and not tool_instr and len(convo) == 1 and convo[0].role == "user":
         return _text_of(convo[0].content)
@@ -500,7 +549,7 @@ def messages_to_prompt(
             fn = call.get("function") or {}
             if isinstance(fn, dict) and call.get("id"):
                 call_names[call["id"]] = fn.get("name", "tool")
-    lines.extend(_render_message(m, call_names, bare_results) for m in convo)
+    lines.extend(_render_message(m, call_names, bare_results, protocol=protocol) for m in convo)
     if tool_instr:
         # Mark the injected tool block as a developer instruction at the point
         # it is actually included; do not change empty/other instruction paths.

@@ -256,8 +256,13 @@ class DeepSeekClient:
         s = self.stream(prompt, conversation_id=conversation_id,
                         model=model, thinking=thinking, search=search)
         text = "".join(s)
-        return Reply(text=text, conversation_id=s.conversation_id,
-                     finish_reason=s.finish_reason)
+        reply = Reply(text=text, conversation_id=s.conversation_id,
+                      finish_reason=s.finish_reason)
+        if s._capture.enabled:
+            # Private in-memory evidence only. No dataclass/public response
+            # field; the API writes it only if subsequent tool validation fails.
+            reply._deepseek_stream_evidence = (s._capture, s._session_id, s._parent_id)
+        return reply
 
     def close(self) -> None:
         self._http.close()

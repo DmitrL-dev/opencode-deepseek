@@ -402,6 +402,22 @@ is needed. This fixes the saved `Unsupported tool-call markup` failure with a
 complete DSML invocation; upgrading does not redeliver the failed reply or resume
 the goal. Verified offline using the saved response and synthetic cases.
 
+DeepSeek can explicitly request `DEEPSEEK_TOOL_PROTOCOL=dsml` after a bridge
+restart. This asks for one complete native batch instead of a JSON fence;
+literal command/file strings need no JSON quote or newline escaping. Complete
+schemas, `tool_choice`, history, counters and replay prevention still apply.
+Other providers and the `json` default stay unchanged. Historical calls retain
+exact IDs as inert data rather than a second protocol example. Tool and field
+names must fit DSML attributes (1–256 characters, no quotes, `<`, `>` or control
+characters); strings containing DSML delimiters use a JSON string with
+`string="false"` and escaped angle brackets. Broken mixed JSON/DSML packets fail
+as a whole, without dropping a second invocation or demoting the failure to
+successful text. This option is verified offline; a long live goal with it is
+not yet verified. Keep `TOOLCALL_FORMAT_REPAIR=0` and
+`TOOLCALL_MAX_CONTINUATIONS=0` when generation retries are forbidden. The loaded
+dialect and those settings are visible locally in the authenticated
+`/admin/budget` response under `tool_contract`.
+
 A normal stop with a closed fence also permits swapping the final `]}` to `}]`
 only when a string-aware scan confirms that arguments are complete and only the
 call object and outer array remain open. No values or delimiters are added. The
@@ -426,7 +442,16 @@ tests does not guarantee that the model's next response will be valid.
 Opt-in private diagnostics retain up to 32 distinct failures in
 `session/toolcall-failures/` (up to 4 MiB each), without deleting old evidence;
 `last-toolcall-error.json` still updates. Replies may contain source code: the
-directory is private and excluded from Git. Run sanitized shared regressions:
+directory is private and excluded from Git. DeepSeek diagnostics also retain
+the exact response ID and incoming request hash, without the request text or
+HTTP headers. These are binding-review metadata, never permission to redeliver
+tools. With `DEEPSEEK_STREAM_DIAGNOSTICS=1` also enabled, the original response
+stream for a failed tool reply is kept separately in `session/failed-tool-streams/`
+(up to four files, up to 8 MiB of raw stream each, mode `0600`). This does not
+consume network-failure evidence slots; duplicates use no additional slots and
+old evidence is never deleted. Successful calls do not write streams to disk.
+Upgrading cannot recover IDs already lost by an older version, fetch history,
+or resume the goal. Run sanitized shared regressions:
 `python -m unittest tests.test_tool_protocol tests.test_api tests.test_diagnostics`.
 Replay a private corpus with reviewed expectations and pinned SHA-256 hashes:
 `python -m server.offline_corpus session/protocol-corpus.json`.

@@ -50,6 +50,16 @@ class BudgetControls(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(data['stream_diagnostics'], {'enabled': expected})
         self.assertEqual(before, self.guard.path.read_bytes())
 
+    async def test_loaded_tool_contract_is_reported_without_account_requests_or_state_change(self):
+        before = self.guard.path.read_bytes()
+        with patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
+                patch.object(api, '_LEGACY', True), patch.object(api, '_FORMAT_REPAIR', False), \
+                patch.object(api, '_MAX_CONTINUATIONS', 0):
+            data = (await self.client.get('/admin/budget')).json()
+        self.assertEqual(data['tool_contract'], {'deepseek_protocol': 'dsml', 'legacy': True,
+                                               'format_repair': False, 'max_continuations': 0})
+        self.assertEqual(before, self.guard.path.read_bytes())
+
     async def test_reset_requires_confirmation_and_current_revision(self):
         self.assertEqual((await self.client.post('/admin/budget/reset',json={})).status_code,400)
         d=(await self.client.get('/admin/budget')).json()

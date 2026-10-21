@@ -40,6 +40,9 @@ def _tool_instructions_mode(name, default):
 # Browser tab bridge defaults to light (smaller follow-up prompts).
 TOOL_INSTRUCTIONS_HTTP = _tool_instructions_mode("TOOL_INSTRUCTIONS_HTTP", "full")
 TOOL_INSTRUCTIONS_BROWSER = _tool_instructions_mode("TOOL_INSTRUCTIONS_BROWSER", "light")
+# Opt-in native framing for DeepSeek only. Parsing and schema policy are shared;
+# this changes the requested output dialect, never retries a failed generation.
+DEEPSEEK_TOOL_PROTOCOL = _transport("DEEPSEEK_TOOL_PROTOCOL", "json", ("json", "dsml"))
 
 # Requests per minute allowed per client IP (override with RATE_LIMIT_PER_MINUTE).
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
@@ -179,6 +182,10 @@ def provider_uses_browser(provider: str) -> bool:
 
 def tool_instructions_for_provider(provider: str) -> str:
     return TOOL_INSTRUCTIONS_BROWSER if provider_uses_browser(provider) else TOOL_INSTRUCTIONS_HTTP
+
+
+def tool_protocol_for_provider(provider: str) -> str:
+    return DEEPSEEK_TOOL_PROTOCOL if provider == "deepseek" else "json"
 
 
 def _default_qwen_http_model():

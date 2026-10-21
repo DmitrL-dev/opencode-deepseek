@@ -18,6 +18,7 @@ _CALL_NAME_BEFORE_ARGS_RE = re.compile(
 _FUNCTION_NAME_RE = re.compile(
     r'"function"\s*:\s*\{\s*"name"\s*:\s*"((?:\\.|[^"\\])*)"')
 _OPEN_TOOL_CALLS_FENCE_RE = re.compile(r'^([ \t]*```)tool_calls\b', re.MULTILINE)
+_NATIVE_FRAME_RE = re.compile(r'(?m)^[ \t]*</?｜｜DSML｜｜ (?:calls|invoke|parameter)(?:\s|>)')
 
 
 def _call_names_in_payload(body: str) -> list[str]:
@@ -84,6 +85,10 @@ def demote_mistagged_tool_reply(text, tools) -> Optional[str]:
                 saw_demote = True
                 continue
             if exc.kind == "syntax":
+                # A broken mixed wire packet is not advice. Never hide an
+                # unfinished native invocation by relabelling its JSON fence.
+                if _NATIVE_FRAME_RE.search(body):
+                    return None
                 extracted = _call_names_in_payload(body)
                 if not extracted:
                     saw_demote = True

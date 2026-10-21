@@ -10,7 +10,6 @@ import logging
 import os
 from pathlib import Path
 import time
-import uuid
 
 from deepseek.auth import write_private_json
 from settings import ROOT
@@ -46,24 +45,31 @@ class StreamCapture:
 
         return Observed()
 
-    def save(self, *, reason, session_id, parent_id):
+    def save(self, *, reason, session_id, parent_id, directory=None):
         if not self.enabled or not self.raw:
             return
         try:
-            DIRECTORY.mkdir(parents=True, exist_ok=True, mode=0o700)
-            # Never silently delete earlier evidence. Bound disk use instead.
-            if len(list(DIRECTORY.iterdir())) >= MAX_FILES:
-                LOG.warning('Private stream evidence directory is full; capture not saved')
-                return
-            name = uuid.uuid4().hex + '.json'
-            write_private_json(DIRECTORY / name, {
-                'version': 1, 'captured_at': time.time(), 'reason': reason,
+            directory = DIRECTORY if directory is None else Path(directory)
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            data = {
+                'version': 1, 'reason': reason,
                 'eof': self.eof, 'truncated': self.truncated,
                 'session_id': session_id, 'parent_id': parent_id,
                 'sha256': hashlib.sha256(self.raw).hexdigest(),
                 'body_base64': base64.b64encode(self.raw).decode('ascii'),
-            })
+            }
+            # Re-saving the same evidence must not fill the bounded directory.
+            name = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest() + '.json'
+            target = directory / name
+            if target.exists():
+                return target
+            # Never silently delete earlier evidence. Bound disk use instead.
+            if len(list(directory.iterdir())) >= MAX_FILES:
+                LOG.warning('Private stream evidence directory is full; capture not saved')
+                return
+            write_private_json(target, {**data, 'captured_at': time.time()})
             LOG.warning('Private failed stream saved: %s', name)
+            return target
         except (OSError, ValueError, TypeError):
             LOG.warning('Private stream evidence could not be saved')
 
