@@ -42,11 +42,14 @@ export async function apply(ctx, config) {
     }
     if (event.type !== 'turn/end') return;
     // Observe the shipped scheduler's disarming; do not do it on its behalf.
+    // Capture this turn's state: a delayed observer must not finish a newer
+    // round merely because that round has already completed the goal.
+    const {phase, activation} = ctx.goals.get(agent) || {};
     setTimeout(() => {
-      const goal = ctx.goals.get(agent);
+      if (finishing) return;
       if (event.data.reason.kind !== 'completed') void finish(1, event.data.reason);
-      else if (goal?.phase === 'complete') void finish(0, 'complete');
-      else if (goal?.activation === 'disarmed') void finish(2, 'disarmed');
+      else if (phase === 'complete') void finish(0, 'complete');
+      else if (activation === 'disarmed') void finish(2, 'disarmed');
     }, 50);
   });
   const start = async () => {

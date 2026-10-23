@@ -324,6 +324,18 @@ Web-bridge history, pause and counters were preserved. Separate offline checks
 cover goal completion after fixing an assertion and retaining the mandatory
 `read` guard while precondition recovery is enabled.
 
+The same day, a long Röntgen task completed through the official API:
+73 steps, 89 tool calls, and the original goal reached `complete`.
+A confirmed notification-receiver initialization defect was fixed and boundary
+checks added; the final suite reported 265 passed and 8 skipped. Three local
+stops (no grep matches, Python import path, and a temporary-directory symlink)
+were diagnosed and resumed by the operator without asking the user; this was
+not an unaided model run. There were no API errors or subagents, and web-bridge
+history and counters were preserved. The offline driver's turn-end observer
+race was also fixed: a delayed callback no longer finishes a later turn based
+on its newer goal state. All 9 installed-Harness fixtures using a local test API
+passed, including failure without retry.
+
 ### Counters and reset inside Harness
 
 After [installing the local budget plugin](docs/HARNESS.en.md#local-budget-commands),
