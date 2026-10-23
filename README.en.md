@@ -75,6 +75,12 @@ from tool parameters. Changing the setting does not erase prior DSML messages
 on the server; this is a text instruction, not an enforced API `response_format`.
 The fix was checked against the retained request without generating again;
 the original malformed batch remains fully rejected and the goal stays stopped.
+The next separately authorized attempt with this fix delivered two valid calls:
+`get_goal` and the Rentgen tests. The run stopped with exit code 1:
+47 passed, 21 failed, 17 skipped. The prepared test environment lacks the
+required `mcp==1.30.0`; all failures are MCP scenarios. No further generations
+or test reruns followed the failure. This verifies handling one reply and
+stopping on a tool failure, not completion of the long goal.
 Separately, offline Harness checks completed
 two native goal rounds and verified stopping on an HTTP refusal and a step bound.
 [October 23 results and limits](docs/RECHECK.2026-10-23.md).
