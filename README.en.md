@@ -284,8 +284,12 @@ remain separate. This example does not enable `strict` schema mode.
 **Verified October 23, 2026:** installed Harness `0.2.1-rc.2` completed one live API
 task in four steps: two `read` calls, `edit`, one test run, then a final answer.
 All four tests passed and the test file remained unchanged. Separate offline
-fixtures verified exact argument round-tripping and no retry after HTTP 503.
-This confirms that run, not error-free operation for every goal.
+fixtures verified exact argument round-tripping, automatic goal continuation
+between turns, and stopping after HTTP 503 or an incomplete stream. The goal
+remains disarmed after failure; explicit resume in a new process retains its
+history without repeating the completed file write. These scenarios run the
+installed Harness with a temporary profile and a loopback test server, without
+an account. This confirms those checks, not error-free operation for every goal.
 
 ### Counters and reset inside Harness
 
