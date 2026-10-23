@@ -413,6 +413,20 @@ is needed. This fixes the saved `Unsupported tool-call markup` failure with a
 complete DSML invocation; upgrading does not redeliver the failed reply or resume
 the goal. Verified offline using the saved response and synthetic cases.
 
+Clients that omit `thinking` can opt into `DEEPSEEK_TOOL_THINKING=1`:
+DeepThink then applies only to DeepSeek requests with tools. The default is `0`;
+explicit `thinking=false` takes precedence. Restart after changing it; the loaded
+value appears in authenticated local `/admin/budget` as `tool_thinking_default`.
+Selecting Expert alone does not enable DeepThink. The setting changes neither
+history keys nor retry policy and does not guarantee valid tool output.
+
+For a manually reviewed format failure, `checkpoint(..., format_recovery=True)`
+archives the complete original request privately, preserves instructions and
+observed action results, and replaces recent assistant notes with archive
+references. Damaged markup is not used as an example for the next reply. This
+only prepares context: it sends no request, clears no pause and never resumes a
+goal automatically. Configuration and archive checks were performed offline.
+
 DeepSeek can explicitly request `DEEPSEEK_TOOL_PROTOCOL=dsml` after a bridge
 restart. The prompt uses the V4.1 reference vocabulary: `<｜DSML｜ calls>`, with
 one separator on each side of `DSML` and a space before the tag name

@@ -78,6 +78,7 @@ from .config import (
     model_provider,
     provider_uses_browser,
     qwen_uses_browser,
+    effective_thinking,
 )
 from .openai_format import (
     completion_response,
@@ -334,7 +335,7 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
                                         'no request was sent.')
             attempt.check()  # Recheck a pause that happened while building a client.
             record_toolcall_log(trace, "to_provider", prompt)
-            reply = client.chat(prompt, req.conversation_id, model_type, req.thinking, req.search)
+            reply = client.chat(prompt, req.conversation_id, model_type, effective_thinking(req), req.search)
             record_toolcall_log(trace, "from_provider", reply.text)
             return reply
     except LoginRequired as exc:
@@ -692,7 +693,7 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest, *, allow_cont
 def _open_stream(client: DeepSeekClient, prompt: str, req: ChatCompletionRequest, model_type):
     return client.stream(
         prompt, conversation_id=req.conversation_id,
-        model=model_type, thinking=req.thinking, search=req.search,
+        model=model_type, thinking=effective_thinking(req), search=req.search,
     )
 
 

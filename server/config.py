@@ -43,6 +43,16 @@ TOOL_INSTRUCTIONS_BROWSER = _tool_instructions_mode("TOOL_INSTRUCTIONS_BROWSER",
 # Opt-in native framing for DeepSeek only. Parsing and schema policy are shared;
 # this changes the requested output dialect, never retries a failed generation.
 DEEPSEEK_TOOL_PROTOCOL = _transport("DEEPSEEK_TOOL_PROTOCOL", "json", ("json", "dsml"))
+# Transport default only: explicit per-request thinking (including false) wins.
+# Do not rewrite the request: its original fields bind durable history keys.
+DEEPSEEK_TOOL_THINKING = _transport("DEEPSEEK_TOOL_THINKING", "0", ("0", "1")) == "1"
+
+
+def effective_thinking(req):
+    if 'thinking' in req.model_fields_set:
+        return req.thinking
+    return bool(req.thinking or (DEEPSEEK_TOOL_THINKING and req.tools
+                                 and model_provider(req.model) == 'deepseek'))
 
 # Requests per minute allowed per client IP (override with RATE_LIMIT_PER_MINUTE).
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
