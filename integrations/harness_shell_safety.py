@@ -4,10 +4,11 @@ from pathlib import Path
 from .harness import default_home, install_plugin_copy, profile_lock, render, write_private, yaml_codec
 
 IDENTITY = 'local-bridge-shell-safety'
-SOURCES = (Path(__file__).with_suffix('.mjs'), Path(__file__).with_name('harness_gh_checks.py'))
+SOURCES = (Path(__file__).with_suffix('.mjs'), Path(__file__).with_name('harness_gh_checks.py'),
+           Path(__file__).with_name('harness_unittest.py'))
 
 
-def patch_document(document, entry=None):
+def patch_document(document, entry=None, allow_read_repair=None):
     if not isinstance(document, list):
         raise ValueError('Unsupported Harness profile')
     entry = str(Path(__file__).with_suffix('.mjs').resolve()) if entry is None else str(entry)
@@ -22,20 +23,29 @@ def patch_document(document, entry=None):
         old = result[matches[0]]
         if 'insert' in old and len(old['insert']) != 1:
             raise ValueError('Shell safety shares an insert block; preserve it manually')
+        previous = old['insert'][0] if 'insert' in old else old
+        if 'config' in previous:
+            if not isinstance(previous['config'], dict):
+                raise ValueError('Unsupported shell safety configuration')
+            row['insert'][0]['config'] = dict(previous['config'])
         result[matches[0]] = row
     else:
         result.append(row)
+    if allow_read_repair is not None:
+        if type(allow_read_repair) is not bool:
+            raise ValueError('allow_read_repair must be a boolean')
+        row['insert'][0].setdefault('config', {})['allowReadRepair'] = allow_read_repair
     return result
 
 
-def install(home, profile):
+def install(home, profile, allow_read_repair=None):
     with profile_lock(home, profile):
         path = Path(home) / 'profiles' / profile / 'cordis.patch.yml'
         if path.is_symlink():
             raise ValueError('Refusing to replace a symlinked Harness profile')
         original = path.read_bytes()
         entry = install_plugin_copy(home, IDENTITY, SOURCES)
-        updated = render(patch_document(yaml_codec().load(original.decode()), entry))
+        updated = render(patch_document(yaml_codec().load(original.decode()), entry, allow_read_repair))
         write_private(path, updated, original)
         return path
 
@@ -44,5 +54,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--home', type=Path, default=default_home())
     parser.add_argument('--profile', default='desktop', choices=['desktop', 'web', 'headless'])
+    repair = parser.add_mutually_exclusive_group()
+    repair.add_argument('--allow-read-repair', dest='allow_read_repair', action='store_const', const=True, default=None,
+                        help='Allow the model to correct native FS_NOT_OBSERVED precondition errors')
+    repair.add_argument('--stop-on-read-error', dest='allow_read_repair', action='store_const', const=False)
     args = parser.parse_args()
-    print(install(args.home, args.profile))
+    print(install(args.home, args.profile, args.allow_read_repair))

@@ -46,6 +46,8 @@ intact, and resubmitting the same history does not generate again. This verifies
 replay protection; it does not fix the text generator.
 For API-key users, the separate [official Harness route](#official-deepseek-api-in-harness-optional)
 completed a live native-tool task with all four tests passing.
+On October 24, the resumed installer-development goal also completed: its final
+continuation ran 12 steps without errors and reached native `complete`.
 
 ## DeepSeek review, October 21, 2026
 
@@ -311,6 +313,16 @@ remains disarmed after failure; explicit resume in a new process retains its
 history without repeating the completed file write. These scenarios run the
 installed Harness with a temporary profile and a loopback test server, without
 an account. This confirms those checks, not error-free operation for every goal.
+
+**Verified October 24, 2026:** after local fixes, the same installer-development
+goal resumed. Its final live turn completed 12 steps and 21 tool calls without
+errors, finished documentation and diff review, and marked the original goal
+`complete`. The previously passing 13 installer tests were not repeated; code
+had not changed since those tests. Earlier runs required installer and stop-policy
+fixes, so this does not claim fully autonomous execution from the first attempt.
+Web-bridge history, pause and counters were preserved. Separate offline checks
+cover goal completion after fixing an assertion and retaining the mandatory
+`read` guard while precondition recovery is enabled.
 
 ### Counters and reset inside Harness
 
@@ -672,7 +684,36 @@ A nonzero foreground result, timeout or tool error stops the current turn using
 native Stop, without asking the model to retry or diagnose it. History, completed
 actions and counters are preserved. `if`, `!`, `&&` and `||` retain normal Bash
 semantics: an explicitly handled nonzero status need not fail the whole command.
-Plain `gh pr checks` (including `--required`/`--repo`) fetches status once and returns JSON: validated failing or pending checks do not stop the goal. With a valid schema and empty stderr, exit `0` means the JSON was retrieved successfully even when checks are `pending` or `fail`; their statuses remain in the response. Nonzero exit codes `1`/`8` are normalized only when they match the check statuses. Network/authentication errors, malformed responses and other pipeline failures still stop the turn. `--watch`, `--web` and custom formatting retain native gh behavior. Requires `python3` on PATH; `/bridge-shell-status` must report `harness-contract-v3`. The `pending` plus exit `0` case that stopped PR #80 check retrieval was fixed and verified offline using the saved JSON and a shell pipeline, without re-querying CI to test the fix. This does not mean the CI checks themselves passed.
+
+When the user authorizes autonomous local test repair, run
+`bridge_unittest /path/to/venv/bin/python -v tests.test_module` as a separate command.
+This explicit `unittest` helper delivers completed assertion failures as
+`status: tests_failed`, preserving the original report and child exit code.
+Shell exit `0` means the result was delivered, **not that the tests passed**.
+The model can fix code and rerun affected tests after a change; do not repeat
+passing tests without a new reason. Loading errors, test exceptions, interruption
+and missing completion receipts still stop the goal. Ordinary `python -m unittest`,
+other shell commands and API retry policy are unchanged. The helper does not
+disable networking; offline verification requires a separate sandbox. A fully skipped suite is
+reported as `tests_skipped`, not as a passing run.
+Offline checks cover assertions, loading errors, exceptions and early exits.
+
+To allow correction of a confirmed rejection **before any write**, enable:
+
+```bash
+python -m integrations.harness_shell_safety --profile desktop --allow-read-repair
+```
+
+After restarting, `/bridge-shell-status` must show `FS_NOT_OBSERVED read repair enabled`.
+Only native `FsError / FS_NOT_OBSERVED` from `edit`/`write` returns to the model
+for correction. Harness still rejects writes until an actual `read` succeeds.
+The error stays in history; arguments are not filled in and no tools run on the
+model's behalf. Other errors and uncertain outcomes still stop the goal.
+This is off by default; `--stop-on-read-error` restores stopping, and ordinary
+reinstallation preserves the choice. Checks use the installed Harness offline
+with a local fixture server and a separate test profile.
+
+Plain `gh pr checks` (including `--required`/`--repo`) fetches status once and returns JSON: validated failing or pending checks do not stop the goal. With a valid schema and empty stderr, exit `0` means the JSON was retrieved successfully even when checks are `pending` or `fail`; their statuses remain in the response. Nonzero exit codes `1`/`8` are normalized only when they match the check statuses. Network/authentication errors, malformed responses and other pipeline failures still stop the turn. `--watch`, `--web` and custom formatting retain native gh behavior. Requires `python3` on PATH; `/bridge-shell-status` must report `harness-contract-v5`. The `pending` plus exit `0` case that stopped PR #80 check retrieval was fixed and verified offline using the saved JSON and a shell pipeline, without re-querying CI to test the fix. This does not mean the CI checks themselves passed.
 
 When checking whether a branch contains a fix or locating optional markers/sections, no match is a discovery result even when presence is unknown beforehand. The model contract requires `bridge_grep_optional` for this case; plain `grep` remains for mandatory assertions. Use `-E 'marker_a|marker_b'` for alternatives. Producer errors (`git show`, etc.) still stop the pipeline. This is a prompt selection rule, not a guarantee of model behavior; shell safety does not override plain `grep`.
 
@@ -975,7 +1016,7 @@ a turn on a tool error. The durable goal phase and revision remain unchanged;
 resuming requires a separate user action. Install with
 `python -m integrations.harness_shell_safety --profile desktop`, then restart
 Harness. `/bridge-shell-status` checks shell settings without sending a request;
-the current version reports `harness-contract-v2` and `goal disarm before native stop`.
+the current version reports `harness-contract-v5` and `goal disarm before native stop`.
 Model reconfiguration preserves the safety plugin.
 
 Verified offline against Harness 0.2.0-rc.2 contract fixtures: SSE, exact call IDs,

@@ -44,6 +44,16 @@ try {
   assert.equal(result.stdout, 'before');
   assert.equal(run('printf ok | tail -1').stdout, 'ok');
   assert.equal(run('false; printf UNREACHABLE').status, 1);
+  writeFileSync(join(root, 'test_assertion.py'), 'import unittest\nclass Test(unittest.TestCase):\n def test_failure(self): self.assertEqual(1, 2)\n');
+  let testRun = run('bridge_unittest python3 test_assertion -v');
+  assert.equal(testRun.status, 0, testRun.stderr);
+  assert.match(testRun.stdout, /"status": "tests_failed"/);
+  assert.match(testRun.stderr, /FAILED \(failures=1\)/);
+  assert.equal(run('python3 -m unittest test_assertion; printf UNREACHABLE').status, 1);
+  assert.equal(run('bridge_unittest python3 test_assertion | (exit 17)').status, 17);
+  assert.equal(run('bridge_unittest python3 missing_test; printf UNREACHABLE').status, 2);
+  assert.equal(run('bridge_unittest missing-python test_assertion; printf UNREACHABLE').status, 127);
+  assert.equal(run('bridge_unittest; printf UNREACHABLE').status, 2);
   // Regression: probing a branch for an optional platform fix must reach the
   // next inspection when markers are absent, while mandatory assertions fail.
   assert.equal(run("printf 'unrelated source\\n' | bridge_grep_optional -n -E 'requires_bytes_plan|pytestmark|CAPABILITY_UNAVAILABLE' | sed -n '1,20p'; printf NEXT_FILE").stdout, 'NEXT_FILE');
@@ -86,6 +96,13 @@ try {
   assert.equal(failedResult(exec, {value: {kind: 'foreground', exitCode: 17}}), true);
   assert.equal(failedResult(exec, {value: {kind: 'foreground', exitCode: 0, sandbox: {denied: true}}}), true);
   assert.equal(failedResult({name: 'read'}, {isError: true}), true);
+  const notObserved = Object.freeze({isError: true, error: {info: {name: 'FsError', code: 'FS_NOT_OBSERVED'}}});
+  assert.equal(failedResult({name: 'edit'}, notObserved), true);
+  assert.equal(failedResult({name: 'edit'}, notObserved, true), false);
+  assert.equal(failedResult({name: 'write'}, notObserved, true), false);
+  assert.equal(failedResult({name: 'bash'}, notObserved, true), true);
+  assert.equal(failedResult({name: 'edit'}, {isError: true, content: 'FS_NOT_OBSERVED'}, true), true);
+  assert.equal(failedResult({name: 'edit'}, {isError: true, error: {info: {name: 'FsError', code: 'FS_WRITE_FAILED'}}}, true), true);
   assert.equal(failedResult(exec, {value: {kind: 'background'}}), false);
   const cancelled = [], disposers = [], handlers = {}, events = [];
   const goals = {disarm: agent => { agent.activation = 'disarmed'; events.push('disarm'); }};
@@ -115,7 +132,8 @@ try {
     cancel() { stopped = true; }}}, {isError: true}), /disarm failed/);
   assert.equal(stopped, true);
   assert.equal((await commands[0].handler()).kind, 'success');
-  assert.match((await commands[0].handler()).text, /harness-contract-v3/);
+  assert.match((await commands[0].handler()).text, /harness-contract-v5/);
+  assert.match((await commands[0].handler()).text, /read repair disabled/);
   disposers.forEach(fn => fn());
   assert.equal(ctx.shell.resolve, resolve);
   // P3-11: cordis returns a fresh proxy for every method read. Teardown must

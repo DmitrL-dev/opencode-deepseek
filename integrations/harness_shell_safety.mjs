@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const name = 'bridge-shell-safety';
-export const contractVersion = 'harness-contract-v3';
+export const contractVersion = 'harness-contract-v5';
 export const inject = ['shell', 'tools', 'commands', 'goals'];
 
 // This is execution policy, not a rewrite of the model's shell source. Bash
@@ -54,6 +54,12 @@ export function hardenSpec(spec, cacheRoot) {
   // Never normalize a whole pipeline's status: its producer may also exit 1.
   const helper = fileURLToPath(new URL('./harness_gh_checks.py', import.meta.url));
   const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+  const unittestHelper = fileURLToPath(new URL('./harness_unittest.py', import.meta.url));
+  const localTests = 'bridge_unittest() {\n'
+    + '  if [ "$#" -eq 0 ]; then echo "usage: bridge_unittest PYTHON [unittest arguments]" >&2; return 2; fi\n'
+    + '  local __bridge_python=$1; shift\n'
+    + '  command "$__bridge_python" ' + quote(unittestHelper) + ' "$@"\n'
+    + '}\n';
   const ghChecks = 'gh() {\n'
     + '  if [ "${1-}" = pr ] && [ "${2-}" = checks ]; then\n'
     + '    local gh_binary; gh_binary=$(type -P gh) || return $?\n'
@@ -64,11 +70,17 @@ export function hardenSpec(spec, cacheRoot) {
   // Executors run `bash -c`; refuse any other interpreter instead of letting
   // shell differences (e.g. zsh's read-only $status) turn errors into exit 0.
   const requireBash = '[ -n "${BASH_VERSION-}" ] || { echo "bridge shell safety requires bash" >&2; exit 2; }\n';
-  return {...spec, command: 'set -e -o pipefail\n' + requireBash + optionalGrep + ghChecks + spec.command,
+  return {...spec, command: 'set -e -o pipefail\n' + requireBash + optionalGrep + ghChecks + localTests + spec.command,
     env: {...spec.env, XDG_CACHE_HOME: cacheRoot}};
 }
 
-export function failedResult(exec, result) {
+export function failedResult(exec, result, allowReadRepair = false) {
+  // Native precondition error: the filesystem tool rejected before writing.
+  // Keep the actual error in model history so it must perform read itself.
+  // Never infer this from provider text or allow other filesystem errors.
+  if (allowReadRepair === true && ['edit', 'write'].includes(exec.name)
+      && result.isError === true && result.error?.info?.name === 'FsError'
+      && result.error.info.code === 'FS_NOT_OBSERVED') return false;
   if (result.isError) return true;
   if (exec.name !== 'bash' || result.value?.kind !== 'foreground') return false;
   const value = result.value;
@@ -76,7 +88,8 @@ export function failedResult(exec, result) {
     || value.aborted || value.sandbox?.denied === true;
 }
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  const allowReadRepair = config.allowReadRepair === true;
   // Random, owner-only cache; no HOME/GH_CONFIG_DIR changes or credential copy.
   // Keep it until OS temp cleanup: background readers must not lose their files.
   const cacheRoot = mkdtempSync(join(process.platform === 'linux' ? '/tmp' : tmpdir(), 'harness-gh-'));
@@ -104,7 +117,7 @@ export function apply(ctx) {
     };
   });
   ctx.on('tools/result', (exec, result) => {
-    if (failedResult(exec, result) && exec.agent?.status === 'running') {
+    if (failedResult(exec, result, allowReadRepair) && exec.agent?.status === 'running') {
       // Cancellation alone does not revoke an armed goal's continuation
       // authority. Disarm first, without changing its durable phase/revision.
       // Still cancel if disarm throws: result observers cannot propagate errors
@@ -122,7 +135,7 @@ export function apply(ctx) {
       const active = spec.command.startsWith('set -e -o pipefail\n') && spec.env.XDG_CACHE_HOME === cacheRoot
         && typeof ctx.goals.disarm === 'function';
       return {kind: active ? 'success' : 'error', text: active
-        ? `Shell safety active (${contractVersion}): errexit + pipefail; goal disarm before native stop on tool failure; validated gh pr checks status; private temporary gh cache. No command or provider request was sent.`
+        ? `Shell safety active (${contractVersion}): errexit + pipefail; goal disarm before native stop on tool failure; FS_NOT_OBSERVED read repair ${allowReadRepair ? 'enabled' : 'disabled'}; explicit bridge_unittest PYTHON [args] reports completed assertion failures for repair, execution errors still stop; validated gh pr checks status; private temporary gh cache. No command or provider request was sent.`
         : 'Shell safety is not active in the current executor. Do not resume until the profile is reloaded.'};
     }});
 }

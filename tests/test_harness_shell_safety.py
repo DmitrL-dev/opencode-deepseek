@@ -8,6 +8,16 @@ from integrations.harness_shell_safety import install, patch_document
 
 
 class ShellSafetyTests(unittest.TestCase):
+    def test_read_repair_is_explicit_and_preserved_on_reinstall(self):
+        default = patch_document([])
+        self.assertNotIn('config', default[0]['insert'][0])
+        enabled = patch_document(default, allow_read_repair=True)
+        self.assertTrue(enabled[0]['insert'][0]['config']['allowReadRepair'])
+        self.assertEqual(patch_document(enabled), enabled)
+        disabled = patch_document(enabled, allow_read_repair=False)
+        self.assertFalse(disabled[0]['insert'][0]['config']['allowReadRepair'])
+        self.assertTrue(enabled[0]['insert'][0]['config']['allowReadRepair'])
+
     def test_model_reconfiguration_preserves_installed_safety(self):
         document = patch_document([])
         updated = patch_models(document, 'http://127.0.0.1:8000/v1',
@@ -35,6 +45,7 @@ class ShellSafetyTests(unittest.TestCase):
             entry = Path(yaml_codec().load(first)[1]['insert'][0]['name'])
             self.assertTrue(entry.is_relative_to(home / 'plugins'))
             self.assertTrue(entry.is_file() and entry.with_name('harness_gh_checks.py').is_file())
+            self.assertTrue(entry.with_name('harness_unittest.py').is_file())
 
     def test_installer_refuses_symlinked_profile_and_uses_dsh_home(self):
         import os

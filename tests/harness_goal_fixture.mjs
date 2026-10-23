@@ -12,6 +12,10 @@ export async function apply(ctx, config) {
   const exit = ctx.get('appExit');
   let agent, finishing = false, steps = 0, timer;
   const emit = data => process.stdout.write(JSON.stringify(data) + '\n');
+  ctx.on('tools/result', (exec, result) => {
+    if (exec.agent === agent && result.isError) emit({type: 'fixture/tool-error',
+      tool: exec.name, error: result.error?.info});
+  });
   const finish = async (code, reason) => {
     if (finishing) return;
     finishing = true;

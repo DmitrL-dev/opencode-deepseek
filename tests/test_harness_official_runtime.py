@@ -6,6 +6,8 @@ The fixture never reads user credentials or invokes a web-bridge parser.
 
 import json
 import os
+import shlex
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -164,6 +166,85 @@ class HarnessOfficialRuntimeTests(unittest.TestCase):
         self.assertIn("Owned 503 fixture", result.stdout + result.stderr)
         self.assertFalse((self.workspace / "report.md").exists())
 
+    def install_shell_safety(self, allow_read_repair=False):
+        document = yaml_codec().load(self.overlay.read_text())
+        # Owned commands only, under the caller's offline OS sandbox. macOS
+        # cannot start a second sandbox-exec inside that outer sandbox. This
+        # temporary profile never changes the user's desktop permissions.
+        document.append({'id': 'sandbox-policy', 'config': {'mode': 'danger-full-access'}})
+        document.append({'insert': [{'id': 'local-bridge-shell-safety', 'name': str(
+            Path(__file__).resolve().parents[1] / 'integrations/harness_shell_safety.mjs'),
+            'config': {'allowReadRepair': allow_read_repair}}]})
+        self.overlay.write_bytes(render(document))
+
+    def test_read_repair_requires_real_read_and_preserves_the_guard(self):
+        self.install_shell_safety(allow_read_repair=True)
+        target = self.workspace / 'input.txt'
+        writes = []
+        def response(body, step):
+            if step in (1, 2):
+                writes.append(target.read_text())
+                return 'edit', {'file_path': str(target), 'old_string': 'OFFICIAL_INPUT_73', 'new_string': 'UPDATED'}, ''
+            if step == 3:
+                writes.append(target.read_text())
+                return 'read', {'file_path': str(target)}, ''
+            if step == 4:
+                return 'edit', {'file_path': str(target), 'old_string': 'OFFICIAL_INPUT_73', 'new_string': 'UPDATED'}, ''
+            return None, None, 'READ_REPAIR_OK'
+        self.response_script = response
+        result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls), 5)
+        self.assertEqual(writes, ['OFFICIAL_INPUT_73\n'] * 3)
+        self.assertEqual(target.read_text(), 'UPDATED\n')
+        self.assertIn('file has not been read', json.dumps(self.calls[2]['messages']))
+        self.assertIn('READ_REPAIR_OK', result.stdout)
+
+    def test_completed_assertions_can_be_fixed_without_disarming_goal(self):
+        self.install_shell_safety()
+        target = self.workspace / 'test_sample.py'
+        source = 'import unittest\nclass Test(unittest.TestCase):\n def test_it(self): self.assertTrue(False)\n'
+        target.write_text(source)
+        def response(body, step):
+            if step in (1, 4):
+                return 'bash', {'command': 'bridge_unittest ' + shlex.quote(sys.executable) + ' test_sample -v',
+                                'description': 'Run the owned local assertion fixture'}, ''
+            if step == 2:
+                return 'read', {'file_path': str(target)}, ''
+            if step == 3:
+                return 'write', {'file_path': str(target), 'content': source.replace('False', 'True')}, ''
+            # End this round, then let the native goal driver start the next one.
+            if step == 7:
+                value = next(part['content'] for msg in body['messages'] for part in msg.get('content', [])
+                             if isinstance(part, dict) and part.get('type') == 'tool_result'
+                             and part.get('tool_use_id') == 'call_owned_6')
+                if isinstance(value, list):
+                    value = '\n'.join(part['text'] for part in value if part.get('type') == 'text')
+                goal = json.loads(value)['goal']
+                return 'update_goal', {'goal_id': goal['id'], 'revision': goal['revision'], 'action': 'complete'}, ''
+            return self.goal_response(body, step - 3)
+        self.response_script = response
+        result = self.run_harness(goal_driver=True)
+        end = self.fixture_end(result)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls), 8)
+        self.assertIn('tests_failed', json.dumps(self.calls[1]['messages']))
+        self.assertIn('tests_passed', json.dumps(self.calls[4]['messages']))
+        self.assertEqual(end['goal']['phase'], 'complete')
+        self.assertEqual(end['goal']['roundsStarted'], 2)
+
+    def test_unittest_load_error_disarms_goal_without_retry(self):
+        self.install_shell_safety(allow_read_repair=True)
+        self.response_script = lambda _body, _step: ('bash', {
+            'command': 'bridge_unittest ' + shlex.quote(sys.executable) + ' missing_module -v',
+            'description': 'Check that a missing test module stops the fixture'}, '')
+        result = self.run_harness(goal_driver=True)
+        end = self.fixture_end(result)
+        self.assertEqual(len(self.calls), 1, result.stdout + result.stderr)
+        self.assertEqual(end['goal']['activation'], 'disarmed')
+        self.assertIn('test_execution_error', result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+
     def goal_response(self, body, step):
         if step == 1:
             return 'write', {'file_path': str(self.workspace / 'report.md'), 'content': self.payload}, ''
@@ -201,6 +282,7 @@ class HarnessOfficialRuntimeTests(unittest.TestCase):
         self.assertEqual((self.workspace / 'report.md').read_text(), self.payload)
 
     def test_goal_503_disarms_and_manual_resume_does_not_replay_write(self):
+        self.install_shell_safety(allow_read_repair=True)
         self.response_script = self.goal_response
         self.fail_at = 2
         first = self.run_harness(goal_driver=True)
