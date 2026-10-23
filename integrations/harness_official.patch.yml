@@ -1,0 +1,18 @@
+# Optional official API route. Enter the API key in Harness Settings -> Models.
+# No credentials belong in this file. The local web bridge remains available.
+- id: llm-deepseek
+  config:
+    baseURL: https://api.deepseek.com/anthropic
+    retryPolicy:
+      mode: normal
+      maxRetries: 0
+    maxTokens: 8192
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: deepseek-flash
+- id: session-title-llm
+  disabled: true
+- id: session-log-deepseek
+  config:
+    enabled: false

@@ -34,7 +34,7 @@ not tested against live accounts in Harness, OpenCode or a browser.
 > restricted repeatedly, with the exact cause undetermined. A passing test does
 > not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
-**Current autonomy status:** a fresh Harness session stopped at step four on
+**Current web-bridge status:** a fresh Harness session stopped at step four on
 October 23 because malformed DSML parameters were already present in DeepSeek's
 complete response. The previously completed goal and green CI do not establish
 reliable operation on arbitrary goals. The web transport sends textual
@@ -44,6 +44,8 @@ The installed CLI was checked offline with three successful actions followed by
 a damaged fourth reply: the entire bad batch is rejected, completed work stays
 intact, and resubmitting the same history does not generate again. This verifies
 replay protection; it does not fix the text generator.
+For API-key users, the separate [official Harness route](#official-deepseek-api-in-harness-optional)
+completed a live native-tool task with all four tests passing.
 
 ## DeepSeek review, October 21, 2026
 
@@ -256,6 +258,34 @@ your previous options; the profile reloads without changing history or budgets.
 `--without-browser` filters adapters; it does not remove initial sign-in or
 turn GLM into a direct HTTP connection. Catalog visibility does not confirm
 account availability. [Full Harness guide](docs/HARNESS.en.md).
+
+### Official DeepSeek API in Harness (optional)
+
+With a funded API key, Harness can use its built-in **DeepSeek** provider directly.
+This route sends tool schemas and calls through the Messages API; the web bridge's
+textual DSML parser is not involved.
+
+1. Open **Settings → Models → DeepSeek**, enter your API key and click **Apply**.
+   Do not store the key in the repository or a conversation.
+2. Use **Settings → Open configuration file** to open the profile. Add or update
+   entries with the same `id` from
+   [harness_official.patch.yml](integrations/harness_official.patch.yml), preserving
+   all other entries. **Do not replace the entire existing profile** with this example.
+3. Restart Harness and create a new chat. Choose **DeepSeek → DeepSeek-V4.1-Flash**,
+   without the `· web` suffix. Existing chats retain their selected model; this
+   example neither migrates their history nor resumes failed steps.
+
+The example makes the official route the default, disables automatic retries,
+model-generated titles and session-log uploads, and caps each response at 8192
+tokens. This is **not a total spending cap**: the provider bills API usage, while
+`/bridge-budget` measures only the web bridge. Its history, pauses and counters
+remain separate. This example does not enable `strict` schema mode.
+
+**Verified October 23, 2026:** installed Harness `0.2.1-rc.2` completed one live API
+task in four steps: two `read` calls, `edit`, one test run, then a final answer.
+All four tests passed and the test file remained unchanged. Separate offline
+fixtures verified exact argument round-tripping and no retry after HTTP 503.
+This confirms that run, not error-free operation for every goal.
 
 ### Counters and reset inside Harness
 
