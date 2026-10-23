@@ -52,7 +52,9 @@ fetching another challenge or generating again. These fixes are included in `mai
 The installed Harness upgrade from `0.2.0-rc.2` to `0.2.1-rc.2` was checked with
 the profile and history preserved.
 
-Latest full offline run: **863 tests, 814 passed, 49 skipped**. Nine real CLI
+Latest offline verification: **869 tests, 820 passed, 49 skipped**;
+five loopback fixtures and one child-process check were verified separately
+after test sandbox restrictions. Nine real CLI
 scenarios were previously checked on Harness `0.2.1-rc.2` with a synthetic provider
 and outbound network isolation: read/write, refusal handling, shell pipelines and
 no retry on HTTP 503. Additional checks cover one-use history links during saved
@@ -64,7 +66,16 @@ The malformed batch was stopped without executing it. DeepThink and clean
 context did not eliminate the format failure. One separately authorized JSON
 retry executed another command, but the next reply was malformed again. Seven
 tools succeeded in total; a long autonomous task using this web provider remains
-unverified. Separately, offline Harness checks completed
+unverified. Offline analysis of the retained stream confirmed that the extra
+brace and invalid argument wrapper were already in the provider response.
+Prompt construction now renders past calls as data with exact IDs and puts one
+JSON wire contract after schemas and execution rules, immediately before the
+next response. It explicitly separates the JSON `arguments` envelope member
+from tool parameters. Changing the setting does not erase prior DSML messages
+on the server; this is a text instruction, not an enforced API `response_format`.
+The fix was checked against the retained request without generating again;
+the original malformed batch remains fully rejected and the goal stays stopped.
+Separately, offline Harness checks completed
 two native goal rounds and verified stopping on an HTTP refusal and a step bound.
 [October 23 results and limits](docs/RECHECK.2026-10-23.md).
 Thirty seconds is a local setting, not a provider-approved

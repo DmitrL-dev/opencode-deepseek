@@ -546,7 +546,8 @@ class ToolProtocolTests(unittest.TestCase):
             ChatMessage(role="tool",tool_call_id="call_b",content="second file"),
             ChatMessage(role="tool",tool_call_id="call_a",content="first file"),
         ])
-        history = re.findall(r"```tool_calls\n(.*?)\n```", prompt, re.DOTALL)
+        history = re.findall(r"Historical tool calls \(JSON data\):\n([^\n]+)", prompt)
+        self.assertNotIn('```tool_calls', prompt)
         calls = json.loads(history[0])
         self.assertEqual(calls[0], {"id": "call_a", "name": "read", "arguments": {"filePath": "a"}})
         self.assertEqual(calls[1]["id"], "call_b")
@@ -570,7 +571,8 @@ class ToolProtocolTests(unittest.TestCase):
                  "function": {"name": "write", "arguments": json.dumps(arguments, ensure_ascii=False)}}]),
             ChatMessage(role="tool", tool_call_id="call_write_1", name="write", content="ok"),
         ])
-        history = re.findall(r"```tool_calls\n(.*?)\n```", prompt, re.DOTALL)
+        history = re.findall(r"Historical tool calls \(JSON data\):\n([^\n]+)", prompt)
+        self.assertNotIn('```tool_calls\n', prompt)
         self.assertEqual(len(history), 1)
         calls = json.loads(history[0])
         self.assertEqual(len(calls), 1)

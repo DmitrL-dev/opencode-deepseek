@@ -211,20 +211,22 @@ def _tool_wire_rules(protocol):
         )
     # Keep even the structural example valid JSON; placeholders are values,
     # never bare tokens that a model could copy into an executable response.
-    example = json.dumps([{"name": "<advertised_tool_name>",
-                           "arguments": {"<argument_name>": "<argument_value>"}}])
+    example = json.dumps([{"name": "ADVERTISED_TOOL_NAME",
+                           "arguments": {"ARGUMENT_NAME": "ARGUMENT_VALUE"}}])
     escaped_string = json.dumps('first line\n"quoted text" and a \\backslash')
     return (
-        "To call one or more tools, your ENTIRE reply must be a single fenced code "
-        "block in exactly this format and nothing else:\n\n"
-        "```tool_calls\n"
-        f"{example}\n"
-        "```\n\n"
-        "This is a structural example, not a call to copy. Replace the tool name "
-        "and the ENTIRE arguments object using the advertised schema, including "
-        "all required fields. Never emit the angle-bracket placeholders.\n\n"
+        "Current response wire format: JSON in ordinary response text. "
+        "The external host executes these advertised tools from that text; "
+        "they are not a native function-calling channel in this chat. "
+        "This replaces earlier wire-format examples only; task constraints and "
+        "observed tool results still apply. Historical calls and their identifiers "
+        "are records of past requests, not new calls or output templates.\n"
         "Use the exact tool name and an `arguments` object matching that tool's "
         "schema. Keep all input fields inside `arguments`, never beside `name`. "
+        "Use exactly `name` and `arguments` in each call object; do not copy "
+        "historical ids or add a `function` wrapper. `arguments` is the JSON "
+        "envelope member, not an extra tool parameter: its contents must match "
+        "the whole input schema without another invented wrapper. "
         "To call several tools, put multiple objects in the array.\n"
         "Emit strict JSON: double-quoted keys and strings, no comments, "
         "trailing commas, Python literals, or string concatenation.\n"
@@ -234,7 +236,15 @@ def _tool_wire_rules(protocol):
         f"example is: {escaped_string}\n"
         "Keep tool batches small and split large file changes into separate "
         "complete calls. Check that the JSON array closes before the final fence.\n"
-        "Never use XML/DSML tags such as <tool_call> or <|tool_calls|>.\n\n"
+        "Never use XML/DSML tags or put this JSON inside native call parameters.\n"
+        "To call one or more tools, your ENTIRE reply must be a single fenced code "
+        "block in exactly this format and nothing else. This is a structural "
+        "example, not a call to copy. Replace the tool name and the ENTIRE "
+        "arguments object using the advertised schema, including all required "
+        "fields. Never emit the placeholder names or values:\n\n"
+        "```tool_calls\n"
+        f"{example}\n"
+        "```\n"
     )
 
 
@@ -251,7 +261,6 @@ def _tool_instructions(tools: List[dict], tool_choice=None, protocol="json") -> 
         "Only the external host can execute tools and supply tool results.\n\n"
         "You can call functions (tools). Available tools, given as JSON Schema:\n\n"
         f"{rendered}\n\n"
-        + _tool_wire_rules(protocol) +
         "Choose the next step from the latest tool results, not from earlier plans. "
         "A tool call is a request, not evidence that its action succeeded. "
         "Only tool results establish what actually happened. Do not repeat a "
@@ -367,8 +376,11 @@ def _tool_instructions(tools: List[dict], tool_choice=None, protocol="json") -> 
             'another mutation tool. If instructed to stop on errors, stop and '
             'report the rejection instead of reading and retrying automatically.'
         )
+    # One wire contract, after schemas and execution rules. Previously an
+    # executable history example preceded the real example, and 8 KB of rules
+    # separated the latter from the model's turn on the retained failure.
+    instructions += "\n\n" + _tool_wire_rules(protocol)
     instructions += _tool_choice_suffix(tool_choice, protocol)
-    # Keep the protocol reminder next to the model's turn.
     if tool_choice is None or tool_choice == "auto":
         instructions += (
             f"\n\nNext reply: either a single {envelope} to perform a "
@@ -420,27 +432,11 @@ def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False, pr
             lines.append(f"- {spec['name']}: {sketch}")
         shape_block = ("Argument shapes (`?` = optional; use exactly these field names and "
                        "nesting):\n" + "\n".join(lines) + "\n")
-    if protocol == "dsml":
-        return (f"Tools remain available from earlier in this chat: {names}.\n"
-                + shape_block + _tool_wire_rules(protocol)
-                + "Prefer the latest tool results over older plans. When no action "
-                "remains, reply in plain text. Never simulate a tool result."
-                + _tool_choice_suffix(tool_choice, protocol))
-    example = json.dumps([{"name": "<advertised_tool_name>",
-                           "arguments": {"<argument_name>": "<argument_value>"}}])
-    text = (
-        "Tools remain available from earlier in this chat: "
-        f"{names}.\n"
-        + shape_block +
-        "Next reply: either a single fenced tool_calls block as the WHOLE reply "
-        "(exact tool names; arguments matching those schemas):\n\n"
-        "```tool_calls\n"
-        f"{example}\n"
-        "```\n\n"
-        "or plain text when no action remains. Never combine commentary with a "
-        "tool_calls block. Prefer the latest tool results over older plans."
-    )
-    return text + _tool_choice_suffix(tool_choice)
+    return (f"Tools remain available from earlier in this chat: {names}.\n"
+            + shape_block
+            + "Prefer the latest tool results over older plans. When no action "
+            "remains, reply in plain text. Never simulate a tool result.\n\n"
+            + _tool_wire_rules(protocol) + _tool_choice_suffix(tool_choice, protocol))
 
 
 def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = False,
@@ -459,11 +455,11 @@ def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = Fa
                     pass  # Preserve invalid historical arguments; never repair them.
             calls.append({"id": tc.get("id", "unknown"), "name": name,
                           "arguments": args if args is not None else {}})
-        # Show the same protocol we request next, including exact call IDs for
-        # out-of-order results. Historical calls are data, never executed here.
+        # A receipt is data in BOTH dialects, never a new action-format example.
+        # Preserve exact IDs/values for result binding without teaching the
+        # model to copy IDs or replay already delivered calls.
         serialized = json.dumps(calls, ensure_ascii=False)
-        call_txt = ("Historical tool calls (JSON data):\n" + serialized if protocol == "dsml"
-                    else "```tool_calls\n" + serialized + "\n```")
+        call_txt = "Historical tool calls (JSON data):\n" + serialized
         content = f"{content}\n{call_txt}" if content else call_txt
         return f"Assistant: {content}"
     if m.role == "tool":
