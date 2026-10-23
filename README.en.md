@@ -267,25 +267,46 @@ textual DSML parser is not involved.
 
 1. Open **Settings → Models → DeepSeek**, enter your API key and click **Apply**.
    Do not store the key in the repository or a conversation.
-2. Use **Settings → Open configuration file** to open the profile. Add or update
-   entries with the same `id` from
-   [harness_official.patch.yml](integrations/harness_official.patch.yml), preserving
-   all other entries. **Do not replace the entire existing profile** with this example.
-3. Restart Harness and create a new chat. Choose **DeepSeek → DeepSeek-V4.1-Flash**,
-   without the `· web` suffix. Existing chats retain their selected model; this
-   example neither migrates their history nor resumes failed steps.
+2. Close Harness and run from the repository root in an environment with the
+   project dependencies installed:
 
-The example makes the official route the default, disables automatic retries,
-model-generated titles and session-log uploads, and caps each response at 8192
-tokens. This is **not a total spending cap**: the provider bills API usage, while
-`/bridge-budget` measures only the web bridge. Its history, pauses and counters
-remain separate. This example does not enable `strict` schema mode.
+   ```bash
+   python3 -m integrations.harness_official --install desktop --dry-run
+   python3 -m integrations.harness_official --install desktop --default-model deepseek-flash
+   ```
+
+3. Start Harness and create a new chat. Choose **DeepSeek → DeepSeek-V4.1-Flash**,
+   without the `· web` suffix. Existing chats retain their selected model; the
+   installer neither migrates their history nor resumes failed steps.
+
+The installer supports initialized standard `desktop`, `web`, and `headless`
+profiles; `--home` overrides `DSH_HOME` or `~/.dsh`. Without `--default-model`,
+the current selection is preserved. Other providers and profile options are
+retained; changed files and backups are written with `0600` permissions.
+An unchanged reinstall writes nothing. `--dry-run` creates no files. The installer
+makes no network requests, reads no keys or bridge `.env`, and leaves history,
+pauses, and counters untouched.
+
+Symlinked paths, ambiguous entries, dynamic configuration in edited plugins, and
+custom bundle compositions are refused. For profiles with replaced plugins,
+manually merge entries from [harness_official.patch.yml](integrations/harness_official.patch.yml)
+through **Settings → Open configuration file**, preserving your settings.
+**Do not replace the entire profile** with the example.
+
+The configuration disables automatic retries, model-generated titles, and session
+log uploads. Each response is capped at **32768 tokens, including reasoning**.
+A long task exhausted the previous 8192-token cap before producing a tool call,
+so the cap was increased. Reaching the cap stops the goal without an automatic
+retry. This is **not a total spending cap**: the provider bills API usage, while
+`/bridge-budget` measures only the web bridge. `strict` schema mode is not enabled.
 
 **Verified October 23, 2026:** installed Harness `0.2.1-rc.2` completed one live API
 task in four steps: two `read` calls, `edit`, one test run, then a final answer.
 All four tests passed and the test file remained unchanged. Separate offline
 fixtures verified exact argument round-tripping, automatic goal continuation
-between turns, and stopping after HTTP 503 or an incomplete stream. The goal
+between turns, and stopping after HTTP 503, an incomplete stream, or the output
+limit. Separate temporary-profile tests cover installer preservation, backups,
+idempotency, rejection without writes, and secret-safe errors. The goal
 remains disarmed after failure; explicit resume in a new process retains its
 history without repeating the completed file write. These scenarios run the
 installed Harness with a temporary profile and a loopback test server, without

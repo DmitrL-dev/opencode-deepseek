@@ -30,6 +30,7 @@ class HarnessOfficialRuntimeTests(unittest.TestCase):
         self.reject = False
         self.fail_at = None
         self.truncate_at = None
+        self.max_tokens_at = None
         self.response_script = None
         owner = self
 
@@ -78,7 +79,7 @@ class HarnessOfficialRuntimeTests(unittest.TestCase):
                     ]
                 events += [
                     {"type": "content_block_stop", "index": 0},
-                    {"type": "message_delta", "delta": {"stop_reason": "tool_use" if name else "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 20}},
+                    {"type": "message_delta", "delta": {"stop_reason": "max_tokens" if step == owner.max_tokens_at else "tool_use" if name else "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 20}},
                     {"type": "message_stop"},
                 ]
                 wire = "".join("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n" for event in events).encode()
@@ -141,7 +142,7 @@ class HarnessOfficialRuntimeTests(unittest.TestCase):
         self.assertEqual((self.workspace / "report.md").read_text(), self.payload)
         for call in self.calls:
             self.assertEqual(call["model"], "deepseek-flash")
-            self.assertEqual(call["max_tokens"], 8192)
+            self.assertEqual(call["max_tokens"], 32768)
             self.assertTrue(call["stream"])
             read = next(tool for tool in call["tools"] if tool["name"] == "read")
             self.assertIn("file_path", read["input_schema"]["required"])
@@ -232,4 +233,16 @@ class HarnessOfficialRuntimeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(end['goal']['activation'], 'disarmed')
+        self.assertFalse((self.workspace / 'report.md').exists())
+
+    def test_max_tokens_disarms_goal_without_auto_continuation(self):
+        self.max_tokens_at = 1
+        self.response_script = lambda _body, _step: (None, None, 'Incomplete output at the request limit.')
+        result = self.run_harness(goal_driver=True)
+        end = self.fixture_end(result)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(end['reason']['kind'], 'max-tokens')
+        self.assertEqual(end['goal']['activation'], 'disarmed')
+        self.assertEqual(end['goal']['phase'], 'active')
         self.assertFalse((self.workspace / 'report.md').exists())
