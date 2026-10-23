@@ -115,4 +115,3 @@ class DsmlArgumentEnvelopeTests(unittest.TestCase):
                 with self.assertRaises(ToolCallError):
                     validate(Reply(raw, 'fixture:2', 'stop'), request, allow_continuation=False)
                 saved.assert_called_once()
-
