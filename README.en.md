@@ -56,10 +56,15 @@ Latest full offline run: **848 tests, 799 passed, 49 skipped**. Nine real CLI
 scenarios were previously checked on Harness `0.2.1-rc.2` with a synthetic provider
 and outbound network isolation: read/write, refusal handling, shell pipelines and
 no retry on HTTP 503. Additional checks cover one-use history links during saved
-reply recovery and permissions when resuming a CLI session. A short live check
-stopped on damaged DSML without executing commands. Incorrect prompt delimiters
-and accepting damaged framing as successful text were fixed and verified offline;
-a long live goal with the corrected contract is not yet verified.
+reply recovery and permissions when resuming a CLI session. Incorrect DSML prompt
+delimiters and accepting damaged framing as successful text were fixed.
+**October 23 check: DeepSeek returned another malformed packet after these fixes.**
+The original SSE confirms malformed response content; the bridge stopped without
+executing commands or regenerating the step. A long autonomous task using this
+web provider is still unverified. Separately, an offline Harness check completed
+two native goal rounds and verified stopping on an HTTP refusal and a step bound;
+this does not establish live model reliability.
+[October 23 results and limits](docs/RECHECK.2026-10-23.md).
 Thirty seconds is a local setting, not a provider-approved
 safe quota. The exact cause of previous temporary restrictions remains unknown:
 the original server codes were not retained. An elapsed restriction period does
@@ -626,6 +631,14 @@ the session; changing the launch-time `DSH_PERMISSION_MODE` does not replace an
 already saved mode. Use the selected session's native permission control,
 preserve filesystem/network boundaries, and never fabricate a tool result.
 This is local Harness state rather than a DeepSeek authentication failure.
+
+For a long goal, use Harness's native **Continue goal** action. An ordinary
+"continue" message does not arm a saved goal. In the checked `0.2.1-rc.2` build,
+the one-shot `--profile headless` runner can exit with code `0` after the first
+turn even while another goal round is starting. That exit code does not prove
+goal completion: check its durable state and deliverables. The offline verification
+driver waited for native `complete`; it is not installed as an automatic workaround
+in users' profiles.
 
 Upgrading Harness from 0.2.0-rc.2 to 0.2.1-rc.2 changed the catalog from 27 to 32
 tools and also changed the leading system instruction. Both fields are included
