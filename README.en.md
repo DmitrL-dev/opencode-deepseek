@@ -52,18 +52,18 @@ fetching another challenge or generating again. These fixes are included in `mai
 The installed Harness upgrade from `0.2.0-rc.2` to `0.2.1-rc.2` was checked with
 the profile and history preserved.
 
-Latest full offline run: **848 tests, 799 passed, 49 skipped**. Nine real CLI
+Latest full offline run: **863 tests, 814 passed, 49 skipped**. Nine real CLI
 scenarios were previously checked on Harness `0.2.1-rc.2` with a synthetic provider
 and outbound network isolation: read/write, refusal handling, shell pipelines and
 no retry on HTTP 503. Additional checks cover one-use history links during saved
 reply recovery and permissions when resuming a CLI session. Incorrect DSML prompt
-delimiters and accepting damaged framing as successful text were fixed.
-**October 23 check: DeepSeek returned another malformed packet after these fixes.**
-The original SSE confirms malformed response content; the bridge stopped without
-executing commands or regenerating the step. A long autonomous task using this
-web provider is still unverified. Separately, an offline Harness check completed
-two native goal rounds and verified stopping on an HTTP refusal and a step bound;
-this does not establish live model reliability.
+markers and accepting malformed framing as successful text were fixed.
+**October 23 live check:** after manual migration and recovery of a complete
+packet, six tools executed; the next reply again contained incomplete tags.
+The malformed batch was stopped without executing it. DeepThink and clean
+context did not eliminate the format failure. A long autonomous task using this
+web provider is still unverified. Separately, offline Harness checks completed
+two native goal rounds and verified stopping on an HTTP refusal and a step bound.
 [October 23 results and limits](docs/RECHECK.2026-10-23.md).
 Thirty seconds is a local setting, not a provider-approved
 safe quota. The exact cause of previous temporary restrictions remains unknown:
@@ -508,6 +508,15 @@ Replay a private corpus with reviewed expectations and pinned SHA-256 hashes:
 `python -m server.offline_corpus session/protocol-corpus.json`.
 This manifest is private, prepared during diagnostic review and not shipped in
 the repository; parser output alone must not establish the expected result.
+
+When that directory is full, earlier evidence is never deleted. Private
+diagnostics record `stream_capture_status=storage_full` when raw bytes could not
+be saved. Authenticated local `/admin/budget` exposes `stream_capture_storage`
+with the file count, cap and state, without paths or content. Enabling capture
+does not itself guarantee available storage. Set `DEEPSEEK_STREAM_CAPTURE_FILES`
+explicitly to change capacity (1–32, default 4), without deleting earlier files.
+Each capture remains limited to 8 MiB of raw data.
+
 
 An intentional stop after delivering a recovered answer returns a normal message
 with `finish_reason=stop`, no error and no new provider call. It finishes the

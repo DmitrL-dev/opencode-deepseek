@@ -154,6 +154,30 @@ class CaptureTests(unittest.TestCase):
         with patch.object(diagnostics, 'MAX_FILE_BYTES', 10), self.assertRaises(ValueError):
             diagnostics.reconstruct(path)
 
+    def test_capacity_status_is_read_only_bounded_and_does_not_leak_paths(self):
+        self.assertEqual(diagnostics.storage_status(self.root),
+                         {'files': 0, 'max_files': 4, 'status': 'available'})
+        self.assertFalse(self.root.exists())
+        self.root.mkdir()
+        for i in range(4): (self.root/str(i)).write_bytes(b'preserved')
+        self.assertEqual(diagnostics.storage_status(self.root),
+                         {'files': 4, 'max_files': 4, 'status': 'full'})
+        with patch.object(Path, 'iterdir', side_effect=PermissionError('PRIVATE_PATH')):
+            self.assertEqual(diagnostics.storage_status(self.root),
+                             {'files': None, 'max_files': 4, 'status': 'unavailable'})
+
+    def test_explicit_capacity_increase_preserves_previous_evidence(self):
+        first = self.capture(b'first'); original = first.read_bytes()
+        with patch.object(diagnostics, 'MAX_FILES', 1), \
+                patch.dict(os.environ, DEEPSEEK_STREAM_CAPTURE_FILES='2'):
+            self.capture(b'second')
+            self.assertEqual(diagnostics.storage_status(self.root),
+                             {'files': 2, 'max_files': 2, 'status': 'full'})
+        self.assertEqual(first.read_bytes(), original)
+        for invalid in ('0', '33', '-1', '1.5', 'unbounded'):
+            with patch.dict(os.environ, DEEPSEEK_STREAM_CAPTURE_FILES=invalid), self.assertRaises(ValueError):
+                diagnostics.file_limit()
+
     def test_cli_exports_private_review_only_and_never_overwrites(self):
         path = self.capture(snapshot('PRIVATE_REPLY', 'FINISHED').encode())
         with patch('sys.argv', ['stream_diagnostics', str(path)]), \

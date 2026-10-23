@@ -21,6 +21,25 @@ MAX_FILE_BYTES = 12 * 1024 * 1024
 LOG = logging.getLogger(__name__)
 
 
+def file_limit():
+    raw = os.getenv('DEEPSEEK_STREAM_CAPTURE_FILES', str(MAX_FILES))
+    if not raw.isascii() or not raw.isdecimal() or not 1 <= int(raw) <= 32:
+        raise ValueError('DEEPSEEK_STREAM_CAPTURE_FILES must be an integer from 1 to 32')
+    return int(raw)
+
+
+def storage_status(directory):
+    """Local capacity only; never creates directories or exposes private paths."""
+    try:
+        directory = Path(directory)
+        count = len(list(directory.iterdir())) if directory.exists() else 0
+        limit = file_limit()
+        return {'files': count, 'max_files': limit,
+                'status': 'full' if count >= limit else 'available'}
+    except OSError:
+        return {'files': None, 'max_files': MAX_FILES, 'status': 'unavailable'}
+
+
 class StreamCapture:
     def __init__(self):
         setting = os.getenv('DEEPSEEK_STREAM_DIAGNOSTICS', '0')
@@ -28,6 +47,7 @@ class StreamCapture:
         self.raw = bytearray()
         self.truncated = False
         self.eof = False
+        self.save_status = 'not_attempted'
 
     def wrap(self, response):
         capture = self
@@ -47,6 +67,7 @@ class StreamCapture:
 
     def save(self, *, reason, session_id, parent_id, directory=None):
         if not self.enabled or not self.raw:
+            self.save_status = 'disabled' if not self.enabled else 'empty'
             return
         try:
             directory = DIRECTORY if directory is None else Path(directory)
@@ -62,15 +83,19 @@ class StreamCapture:
             name = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest() + '.json'
             target = directory / name
             if target.exists():
+                self.save_status = 'saved'
                 return target
             # Never silently delete earlier evidence. Bound disk use instead.
-            if len(list(directory.iterdir())) >= MAX_FILES:
+            if len(list(directory.iterdir())) >= file_limit():
+                self.save_status = 'storage_full'
                 LOG.warning('Private stream evidence directory is full; capture not saved')
                 return
             write_private_json(target, {**data, 'captured_at': time.time()})
+            self.save_status = 'saved'
             LOG.warning('Private failed stream saved: %s', name)
             return target
         except (OSError, ValueError, TypeError):
+            self.save_status = 'write_failed'
             LOG.warning('Private stream evidence could not be saved')
 
 

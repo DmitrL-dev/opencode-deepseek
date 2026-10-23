@@ -100,6 +100,7 @@ class DiagnosticTests(unittest.TestCase):
         data = json.loads(self.path.read_text())
         self.assertEqual(data['recovery_binding']['conversation_id'], 'fixture:2')
         self.assertNotIn('stream_capture', data)
+        self.assertEqual(data['stream_capture_status'], 'storage_full')
 
     def test_exact_deepseek_binding_is_private_metadata_not_a_delivery_permission(self):
         from server.conversation_cache import digest
@@ -138,6 +139,7 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(len(captures), 1)
         self.assertFalse(transport_captures.exists())
         self.assertEqual(data['stream_capture'], captures[0].name)
+        self.assertEqual(data['stream_capture_status'], 'saved')
         self.assertEqual(reconstruct(captures[0])['conversation_id'], 'fixture:2')
         self.assertEqual(reconstruct(captures[0])['text'], 'PRIVATE_INVALID_REPLY')
         self.assertNotIn('PRIVATE_PROMPT', captures[0].read_text())

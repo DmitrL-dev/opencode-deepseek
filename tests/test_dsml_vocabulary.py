@@ -56,3 +56,17 @@ class DsmlVocabularyTests(unittest.TestCase):
             self.assertIsNone(self.validate(text)[1])
         with self.assertRaises(ToolCallError):
             self.validate(MIXED.replace('Inspect fixture','Literal <｜DSML｜ invoke name="bad">'))
+
+    def test_retained_incomplete_parameter_header_never_infers_argument_name(self):
+        # A later real step omitted `parameter name=` and used a closing tag
+        # where a parameter opener was required. Neither can be reconstructed.
+        raw = '''<｜DSML｜ calls>
+<｜DSML｜ invoke name="glob">
+<｜DSML｜ pattern" string="true">**/*report*</｜DSML｜ parameter>
+</｜DSML｜｜ parameter name="path" string="true">fixture</｜DSML｜｜ parameter>
+</｜DSML｜｜ invoke>
+</｜DSML｜ calls>'''
+        for validator in (validate_reply, validate_new):
+            with self.subTest(validator=validator.__module__), self.assertRaises(ToolCallError):
+                validator(raw, TOOLS, allow_dsml_wrapper_tolerances=True,
+                          allow_dsml_preamble=True)

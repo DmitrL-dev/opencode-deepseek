@@ -49,6 +49,7 @@ def save_tool_failure(reply, request):
             saved = capture.save(reason='invalid_tool_reply', session_id=session_id,
                                  parent_id=parent_id,
                                  directory=FAILURE_FILE.parent / 'failed-tool-streams')
+            data['stream_capture_status'] = capture.save_status
             if saved is not None:
                 data['stream_capture'] = saved.name
         if len(json.dumps(data, ensure_ascii=False).encode('utf-8')) > MAX_BYTES:
