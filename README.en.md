@@ -34,6 +34,13 @@ not tested against live accounts in Harness, OpenCode or a browser.
 > restricted repeatedly, with the exact cause undetermined. A passing test does
 > not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
+**Current autonomy status:** a fresh Harness session stopped at step four on
+October 23 because malformed DSML parameters were already present in DeepSeek's
+complete response. The previously completed goal and green CI do not establish
+reliable operation on arbitrary goals. The web transport sends textual
+instructions without an enforced generation schema.
+[Protocol review and verification limits](docs/PROTOCOL-AUDIT.2026-10-23.md).
+
 ## DeepSeek review, October 21, 2026
 
 DeepSeek [updated its website, app and API to V4.1-Flash-1017](https://api-docs.deepseek.com/news/news261017/).
@@ -543,6 +550,13 @@ Replay a private corpus with reviewed expectations and pinned SHA-256 hashes:
 `python -m server.offline_corpus session/protocol-corpus.json`.
 This manifest is private, prepared during diagnostic review and not shipped in
 the repository; parser output alone must not establish the expected result.
+Each case can pin `protocol: "json" | "dsml"` and
+`implementation: "legacy" | "new"`. Missing fields preserve the original
+`json` / `legacy` policy, independently of `.env`. Pin immutable diagnostic
+copies with SHA-256, rather than the overwritten `last-toolcall-error.json`.
+`matched_outcomes` separately counts accepted batches, plain text and expected
+refusals. A passing refusal check proves that a bad batch stops, not that a goal
+succeeds. Invalid evidence and unknown policies fail verification.
 
 When that directory is full, earlier evidence is never deleted. Private
 diagnostics record `stream_capture_status=storage_full` when raw bytes could not
