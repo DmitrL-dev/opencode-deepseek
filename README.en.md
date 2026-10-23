@@ -61,12 +61,13 @@ and outbound network isolation: read/write, refusal handling, shell pipelines an
 no retry on HTTP 503. Additional checks cover one-use history links during saved
 reply recovery and permissions when resuming a CLI session. Incorrect DSML prompt
 markers and accepting malformed framing as successful text were fixed.
-**October 23 live check:** the DSML fix recovered the retained reply without
-generating it again. The same goal completed nine steps and 16 successful tool
-calls; a new focused Rentgen test selection returned 228 passed, 64 skipped.
-Previously passing checks were not repeated. The next reply contained malformed
-framing, so its entire batch was rejected and continuation stopped. The long
-goal remains unfinished.
+**October 23 live check completed:** the same long Rentgen goal reached native
+`complete`, and the CLI exited with code 0. Harness saved the retained report
+through a real `write`, checked the workspace, called `update_goal` and returned
+its final answer. All 14,959 report bytes match the retained reply; recovery
+did not regenerate it. A new focused Rentgen test selection returned 228 passed,
+64 skipped; previously passing checks were not repeated. This completes one
+concrete task, not a guarantee of error-free web-model behavior on every task.
 
 A complete DSML `arguments` input
 object is accepted only for an unambiguous direct object schema. It must be the
@@ -80,16 +81,19 @@ This spelling cannot open an element, delimit a parameter or close an unnamed
 element; argument contents are never rewritten.
 Both API implementations validate the saved reply with identical argument values;
 its one-use recovery link was verified on a database copy without account access.
-The new refusal is a different case: an unknown extra tag contains malformed
+One intermediate refusal is a different case: an unknown extra tag contains malformed
 JSON, followed by repeated arguments in a valid tag. An independent fold of the
 complete SSE matches the reply. Neither the first encoding nor an invalid call
 may be silently discarded. Two new offline tests check exact stream preservation
 and atomic refusal by both API implementations without corrective requests.
 
-All 460 previous history rows remain unchanged, nine new links were consumed
-once, and all three Harness sessions retain their old byte prefixes. Continuation
-used nine generations / 18 HTTP requests and no new chat. Counters were not reset;
-credentials and limits did not change. The web transport sends text without
+Final recovery preserved all 469 previous history rows; new links continued the
+counter from 16 to 19, and all three Harness sessions retain their old byte
+prefixes. Recovery was followed by three normal generations / six HTTP requests,
+with no new chat. Counters were not reset; credentials and protective limits
+did not change. The verification goal's local round cap was raised from 8 to 10
+through the native API while retaining used rounds. Its relay was stopped after
+completion. The web transport sends text without
 enforced `response_format` or native tools: fully autonomous operation on arbitrary
 tasks remains unproven. Schema validation and replay protection were not weakened.
 Previous offline
