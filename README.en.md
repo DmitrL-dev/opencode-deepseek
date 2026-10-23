@@ -60,29 +60,32 @@ and outbound network isolation: read/write, refusal handling, shell pipelines an
 no retry on HTTP 503. Additional checks cover one-use history links during saved
 reply recovery and permissions when resuming a CLI session. Incorrect DSML prompt
 markers and accepting malformed framing as successful text were fixed.
-**October 23 live check:** after manual migration and recovery of a complete
-packet, six tools executed; the next reply again contained incomplete tags.
-The malformed batch was stopped without executing it. DeepThink and clean
-context did not eliminate the format failure. One separately authorized JSON
-retry executed another command, but the next reply was malformed again. Seven
-tools succeeded in total; a long autonomous task using this web provider remains
-unverified. Offline analysis of the retained stream confirmed that the extra
-brace and invalid argument wrapper were already in the provider response.
-Prompt construction now renders past calls as data with exact IDs and puts one
-JSON wire contract after schemas and execution rules, immediately before the
-next response. It explicitly separates the JSON `arguments` envelope member
-from tool parameters. Changing the setting does not erase prior DSML messages
-on the server; this is a text instruction, not an enforced API `response_format`.
-The fix was checked against the retained request without generating again;
-the original malformed batch remains fully rejected and the goal stays stopped.
-The next separately authorized attempt with this fix delivered two valid calls:
-`get_goal` and the Rentgen tests. The run stopped with exit code 1:
-47 passed, 21 failed, 17 skipped. The prepared test environment lacks the
-required `mcp==1.30.0`; all failures are MCP scenarios. No further generations
-or test reruns followed the failure. This verifies handling one reply and
-stopping on a tool failure, not completion of the long goal.
-Separately, offline Harness checks completed
-two native goal rounds and verified stopping on an HTTP refusal and a step bound.
+**October 23 live check:** the long Rentgen goal remains unfinished.
+Repairing its prepared environment resolved all 21 previously failing MCP cases
+offline: pinned `mcp==1.30.0` is installed and `pytest==9.1.1` retained.
+The other 47 passing tests were not repeated; 17 skips remain skips.
+
+The same native goal then resumed with a separate environment-repair note;
+the original failure was not rewritten. The first reply was valid JSON and its
+entry-point inspection command succeeded. The next reply reverted to DSML with
+an unadvertised `arguments` field on `bash`. Its nested JSON is valid, but the
+call does not satisfy the advertised schema. The entire batch, including a
+valid `read`, was rejected without partial execution or another generation.
+
+Private diagnostics retained the complete stream. An independent fold matches
+the reply: the extra wrapper was already present upstream. Past calls are sent
+as data with exact IDs, and the current JSON contract follows schemas and
+execution rules. Nevertheless, this web transport sends a text prompt without
+an enforced `response_format` or native tools; model format compliance remains
+unreliable. Parser and schema checks were not relaxed to make the run pass.
+
+This continuation used two generations, four HTTP requests and no new chat.
+History only gained real events, cumulative counters grew by this actual use,
+and account credentials were unchanged. The goal stopped at the new error.
+A regression checks atomic rejection and no corrective request in both API
+implementations; the focused offline module passed all 3 tests. Previous offline
+checks completed two native Harness goal rounds using a fixture provider,
+which does not establish live model reliability.
 [October 23 results and limits](docs/RECHECK.2026-10-23.md).
 Thirty seconds is a local setting, not a provider-approved
 safe quota. The exact cause of previous temporary restrictions remains unknown:
