@@ -61,8 +61,10 @@ markers and accepting malformed framing as successful text were fixed.
 **October 23 live check:** after manual migration and recovery of a complete
 packet, six tools executed; the next reply again contained incomplete tags.
 The malformed batch was stopped without executing it. DeepThink and clean
-context did not eliminate the format failure. A long autonomous task using this
-web provider is still unverified. Separately, offline Harness checks completed
+context did not eliminate the format failure. One separately authorized JSON
+retry executed another command, but the next reply was malformed again. Seven
+tools succeeded in total; a long autonomous task using this web provider remains
+unverified. Separately, offline Harness checks completed
 two native goal rounds and verified stopping on an HTTP refusal and a step bound.
 [October 23 results and limits](docs/RECHECK.2026-10-23.md).
 Thirty seconds is a local setting, not a provider-approved
