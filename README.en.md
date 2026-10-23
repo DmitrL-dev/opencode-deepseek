@@ -60,29 +60,14 @@ and outbound network isolation: read/write, refusal handling, shell pipelines an
 no retry on HTTP 503. Additional checks cover one-use history links during saved
 reply recovery and permissions when resuming a CLI session. Incorrect DSML prompt
 markers and accepting malformed framing as successful text were fixed.
-**October 23 live check:** the long Rentgen goal remains unfinished.
-Repairing its prepared environment resolved all 21 previously failing MCP cases
-offline: pinned `mcp==1.30.0` is installed and `pytest==9.1.1` retained.
-The other 47 passing tests were not repeated; 17 skips remain skips.
+**October 23 live check:** the DSML fix recovered the retained reply without
+generating it again. The same goal completed nine steps and 16 successful tool
+calls; a new focused Rentgen test selection returned 228 passed, 64 skipped.
+Previously passing checks were not repeated. The next reply contained malformed
+framing, so its entire batch was rejected and continuation stopped. The long
+goal remains unfinished.
 
-The same native goal then resumed with a separate environment-repair note;
-the original failure was not rewritten. The first reply was valid JSON and its
-entry-point inspection command succeeded. The next reply reverted to DSML with
-an unadvertised `arguments` field on `bash`. Its nested JSON is valid, but the
-call does not satisfy the advertised schema. The entire batch, including a
-valid `read`, was rejected without partial execution or another generation.
-
-Private diagnostics retained the complete stream. An independent fold matches
-the reply: the extra wrapper was already present upstream. Past calls are sent
-as data with exact IDs, and the current JSON contract follows schemas and
-execution rules. Nevertheless, this web transport sends a text prompt without
-an enforced `response_format` or native tools; model format compliance remains
-unreliable. Parser and schema checks were not relaxed to make the run pass.
-
-This continuation used two generations, four HTTP requests and no new chat.
-History only gained real events, cumulative counters grew by this actual use,
-and account credentials were unchanged. The goal stopped at the new error.
-The refusal has since been fixed offline: a complete DSML `arguments` input
+A complete DSML `arguments` input
 object is accepted only for an unambiguous direct object schema. It must be the
 only typed parameter, contain only advertised fields and pass the whole original
 schema. A real field named `arguments` is never unwrapped; composed/reference
@@ -90,9 +75,19 @@ schemas or schemas without required fields do not enable this decoding.
 Malformed JSON, missing fields and invalid values still reject the entire batch.
 Both API implementations validate the saved reply with identical argument values;
 its one-use recovery link was verified on a database copy without account access.
-A real Harness CLI fixture read once and returned its result through the existing
-conversation without a corrective generation. Live continuation with this change
-is still being checked. Previous offline
+The new refusal is a different case: an unknown extra tag contains malformed
+JSON, followed by repeated arguments in a valid tag. An independent fold of the
+complete SSE matches the reply. Neither the first encoding nor an invalid call
+may be silently discarded. Two new offline tests check exact stream preservation
+and atomic refusal by both API implementations without corrective requests.
+
+All 460 previous history rows remain unchanged, nine new links were consumed
+once, and all three Harness sessions retain their old byte prefixes. Continuation
+used nine generations / 18 HTTP requests and no new chat. Counters were not reset;
+credentials and limits did not change. The web transport sends text without
+enforced `response_format` or native tools: fully autonomous operation on arbitrary
+tasks remains unproven. Schema validation and replay protection were not weakened.
+Previous offline
 checks completed two native Harness goal rounds using a fixture provider,
 which does not establish live model reliability.
 [October 23 results and limits](docs/RECHECK.2026-10-23.md).
