@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -41,6 +42,7 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.guard = AccessGuard(self.root / "pauses.json", interval=0)
         self.calls, self.prompts, self.conversation_args = [], [], []
         self.behavior = "text"
+        self.failed_packet = None
         self.addCleanup(patch.stopall)
         # The module-level app is shared across tests. Give each isolated
         # server its own identity rather than sharing localhost's rolling quota.
@@ -104,6 +106,35 @@ class HarnessRuntimeTests(unittest.TestCase):
         attempt.dispatch()
         self.prompts.append(prompt)
         self.conversation_args.append(args)
+        if self.behavior == 'dsml_chain_then_damage':
+            step = len(self.prompts)
+            self.assertLessEqual(step, 4, 'A damaged packet must never trigger a provider retry')
+            if step == 1:
+                call = ('read', {'file_path': str(self.workspace / 'fixture.txt')})
+            elif step == 2:
+                self.assertIn('HARNESS_OWNED_FILE_73', prompt)
+                call = ('write', {'file_path': str(self.workspace / 'report.md'),
+                                  'content': FILE_PAYLOAD})
+            elif step == 3:
+                call = ('read', {'file_path': str(self.workspace / 'report.md')})
+            else:
+                call = ('write', {'file_path': str(self.workspace / 'should-not-exist'),
+                                  'content': 'Must not run beside a damaged call'})
+            name, arguments = call
+            invocation = '<｜DSML｜ invoke name="' + name + '">\n'
+            for key, value in arguments.items():
+                invocation += ('<｜DSML｜ parameter name="' + key + '" string="true">'
+                               + value + '</｜DSML｜ parameter>\n')
+            invocation += '</｜DSML｜ invoke>\n'
+            if step == 4:
+                invocation += ('<｜DSML｜ invoke name="read">\n'
+                               '<｜DSML｜ file_path" string="true">PRIVATE_DAMAGED_TARGET'
+                               '</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n')
+            answer = '<｜DSML｜ calls>\n' + invocation + '</｜DSML｜ calls>'
+            if step == 4:
+                self.failed_packet = answer
+            attempt.complete()
+            return Reply(answer, 'owned-chain:' + str(step * 2))
         if self.behavior in ('shell_failure', 'shell_failure_batch', 'shell_cache', 'shell_grep_empty', 'shell_grep_producer'):
             if len(self.prompts) == 1:
                 command = ('printf BEFORE; (exit 17) | tail -60; touch should-not-exist'
@@ -443,6 +474,67 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertNotIn("CONFIDENTIAL_TOOL_PAYLOAD_927", result.stdout + result.stderr)
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(len(self.prompts), 1)
+
+    def check_native_dsml_chain_stops_atomically(self, legacy):
+        from server import config, diagnostics
+        import httpx
+        from tests import TEST_API_TOKEN
+
+        self.behavior = 'dsml_chain_then_damage'
+        failure_file = self.root / 'private' / 'last.json'
+        with patch.object(config, 'DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
+                patch.object(api, '_LEGACY', legacy), \
+                patch.object(api, '_FORMAT_REPAIR', False), \
+                patch.object(api, '_MAX_CONTINUATIONS', 0), \
+                patch.object(diagnostics, 'FAILURE_FILE', failure_file), \
+                patch.dict(os.environ, TOOLCALL_DIAGNOSTICS='1'):
+            result = self.run_harness()
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn('Invalid or incomplete DSML tool envelope', result.stdout)
+            self.assertNotIn('PRIVATE_DAMAGED_TARGET', result.stdout + result.stderr)
+            self.assertEqual(len(self.calls), 4)
+            self.assertEqual(len(self.prompts), 4)
+            self.assertEqual([args[0] for args in self.conversation_args],
+                             [None, 'owned-chain:2', 'owned-chain:4', 'owned-chain:6'])
+            events = [json.loads(line) for line in result.stdout.splitlines() if line.startswith('{')]
+            issued = [e for e in events if e.get('type') == 'tool_call']
+            self.assertEqual([e['tool'] for e in issued], ['read', 'write', 'read'])
+            completed = [e for e in events if e.get('type') == 'tool_result']
+            self.assertEqual([e['status'] for e in completed], ['completed'] * 3)
+            self.assertEqual([e['callId'] for e in issued], [e['callId'] for e in completed])
+            self.assertEqual((self.workspace / 'report.md').read_text(), FILE_PAYLOAD)
+            self.assertFalse((self.workspace / 'should-not-exist').exists())
+            saved = json.loads(failure_file.read_text())
+            self.assertEqual(saved['reply'], self.failed_packet)
+            self.assertEqual(saved['recovery_binding']['conversation_id'], 'owned-chain:8')
+            self.assertFalse(saved['recovery_binding']['delivery_authorized'])
+            cache_path = self.root / 'conversations.sqlite3'
+            with sqlite3.connect(cache_path) as db:
+                rows = db.execute('SELECT cid,used,steps FROM links ORDER BY steps').fetchall()
+            self.assertEqual(rows, [('owned-chain:2', 1, 1), ('owned-chain:4', 1, 2),
+                                    ('owned-chain:6', 1, 3)])
+            budgets_before = (self.root / 'pauses.json').read_bytes()
+            saved_before = failure_file.read_bytes()
+            # A second local delivery of the same consumed history must stop
+            # before reaching even this synthetic provider. No real account I/O.
+            with httpx.Client(trust_env=False) as client:
+                rejected = client.post(self.base + '/chat/completions',
+                    json=self.calls[-1], headers={'Authorization': 'Bearer ' + TEST_API_TOKEN})
+            self.assertIn('History already consumed', rejected.text)
+            self.assertEqual(len(self.calls), 5)
+            self.assertEqual(len(self.prompts), 4)
+            with sqlite3.connect(cache_path) as db:
+                self.assertEqual(db.execute('SELECT cid,used,steps FROM links ORDER BY steps').fetchall(), rows)
+            self.assertEqual((self.root / 'pauses.json').read_bytes(), budgets_before)
+            self.assertEqual(failure_file.read_bytes(), saved_before)
+            self.assertEqual((self.workspace / 'report.md').read_text(), FILE_PAYLOAD)
+            self.assertFalse((self.workspace / 'should-not-exist').exists())
+
+    def test_native_dsml_chain_preserves_work_on_damaged_fourth_step(self):
+        self.check_native_dsml_chain_stops_atomically(legacy=False)
+
+    def test_legacy_dsml_chain_preserves_work_on_damaged_fourth_step(self):
+        self.check_native_dsml_chain_stops_atomically(legacy=True)
 
     def test_transient_http_failure_is_not_retried(self):
         self.behavior = "503"

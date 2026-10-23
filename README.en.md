@@ -40,6 +40,10 @@ complete response. The previously completed goal and green CI do not establish
 reliable operation on arbitrary goals. The web transport sends textual
 instructions without an enforced generation schema.
 [Protocol review and verification limits](docs/PROTOCOL-AUDIT.2026-10-23.md).
+The installed CLI was checked offline with three successful actions followed by
+a damaged fourth reply: the entire bad batch is rejected, completed work stays
+intact, and resubmitting the same history does not generate again. This verifies
+replay protection; it does not fix the text generator.
 
 ## DeepSeek review, October 21, 2026
 
