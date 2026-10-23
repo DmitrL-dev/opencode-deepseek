@@ -432,8 +432,11 @@ restart. The prompt uses the V4.1 reference vocabulary: `<｜DSML｜ calls>`, wi
 one separator on each side of `DSML` and a space before the tag name
 ([DeepSeek reference](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/encoding/README.md)).
 The previous prompt incorrectly doubled those separators. Complete retained
-packets using that older vocabulary remain readable for compatibility, but a
-batch cannot mix vocabularies. This asks for one complete native batch instead of a JSON fence;
+packets using that older vocabulary remain readable for compatibility. With
+`dsml` explicitly selected, both complete symmetric marker spellings are lexical
+aliases at tag boundaries, including within one batch. Argument bytes are never
+replaced; every parameter, invocation and batch must close. Asymmetric or
+incomplete markers remain invalid. This asks for one complete native batch instead of a JSON fence;
 literal command/file strings need no JSON quote or newline escaping. Complete
 schemas, `tool_choice`, history, counters and replay prevention still apply.
 Other providers and the `json` default stay unchanged. Historical calls retain

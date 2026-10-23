@@ -72,11 +72,17 @@ def decode(text, load_json, *, allow_wrapper_tolerances=False):
     token = next((value for value in _TOKENS if text.startswith('<' + value + ' calls>')), None)
     if len(text.encode()) > 4 * 1024 * 1024 or token is None:
         raise ValueError('Invalid DSML envelope')
-    opening, closing = '<' + token + ' calls>', '</' + token + ' calls>'
-    invoke_end, parameter_end = '</' + token + ' invoke>', '</' + token + ' parameter>'
-    generic_end = '</' + token + '>'
-    invoke_start = re.compile(r'<' + re.escape(token) + r' invoke name="' + _NAME + r'">')
-    parameter_start = re.compile(r'<' + re.escape(token) + r' parameter name="' + _NAME + r'" string="(true|false)">')
+    opening = '<' + token + ' calls>'
+    # Only two complete, symmetric marker spellings are lexical aliases. Match
+    # them at structural boundaries; never replace bytes inside argument values.
+    # Missing tags, asymmetric delimiters and inferred closures remain invalid.
+    vocabulary = '(?:' + '|'.join(map(re.escape, _TOKENS)) + ')' if allow_wrapper_tolerances else re.escape(token)
+    closing = re.compile(r'</' + vocabulary + r' calls>')
+    invoke_end = re.compile(r'</' + vocabulary + r' invoke>')
+    parameter_end = re.compile(r'</' + vocabulary + r' parameter>')
+    generic_end = re.compile(r'</' + vocabulary + r'>')
+    invoke_start = re.compile(r'<' + vocabulary + r' invoke name="' + _NAME + r'">')
+    parameter_start = re.compile(r'<' + vocabulary + r' parameter name="' + _NAME + r'" string="(true|false)">')
     position, calls = len(opening), []
 
     def space():
@@ -92,8 +98,9 @@ def decode(text, load_json, *, allow_wrapper_tolerances=False):
 
     while True:
         space()
-        if text.startswith(closing, position):
-            position += len(closing)
+        closed = closing.match(text, position)
+        if closed:
+            position = closed.end()
             if position != len(text) or not calls:
                 raise ValueError('Expected one nonempty DSML batch')
             return calls
@@ -104,14 +111,16 @@ def decode(text, load_json, *, allow_wrapper_tolerances=False):
         arguments = {}
         while True:
             space()
-            if text.startswith(invoke_end, position):
-                position += len(invoke_end)
+            closed = invoke_end.match(text, position)
+            if closed:
+                position = closed.end()
                 break
-            if allow_wrapper_tolerances and text.startswith(generic_end, position):
+            generic = generic_end.match(text, position)
+            if allow_wrapper_tolerances and generic:
                 # At this boundary every parameter is already fully closed.
                 # The only open inner element is invoke. Never use this alias
                 # to close a parameter, infer a value or close the calls root.
-                position += len(generic_end)
+                position = generic.end()
                 break
             parameter = parameter_start.match(text, position)
             if parameter is None or len(arguments) >= 256:
@@ -119,12 +128,12 @@ def decode(text, load_json, *, allow_wrapper_tolerances=False):
             key, string = parameter.group(1, 2)
             if key in arguments:
                 raise ValueError('Duplicate DSML parameter')
-            end = text.find(parameter_end, parameter.end())
-            if end < 0:
+            end = parameter_end.search(text, parameter.end())
+            if end is None:
                 raise ValueError('Incomplete DSML parameter')
-            raw = text[parameter.end():end]
+            raw = text[parameter.end():end.start()]
             if _NATIVE_PREFIX.search(raw):
                 raise ValueError('Nested or ambiguous DSML framing')
             arguments[key] = raw if string == 'true' else load_json(raw)
-            position = end + len(parameter_end)
+            position = end.end()
         calls.append({'name': name, 'arguments': arguments})
