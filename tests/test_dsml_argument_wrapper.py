@@ -33,15 +33,19 @@ class DsmlArgumentWrapperTests(unittest.TestCase):
                 with self.subTest(api=validate.__module__,native=native),self.assertRaises(ToolCallError):
                     validate(PACKET,TOOLS,allow_dsml_wrapper_tolerances=native)
 
-    def test_valid_json_still_cannot_invent_an_arguments_wrapper(self):
+    def test_complete_typed_input_object_uses_the_same_advertised_schema(self):
         raw=PACKET.replace('"}}','"}')
         for validate in (validate_reply,validate_new):
-            with self.subTest(api=validate.__module__),self.assertRaises(ToolCallError):
-                validate(raw,TOOLS,allow_dsml_wrapper_tolerances=True)
+            with self.subTest(api=validate.__module__):
+                _, calls = validate(raw,TOOLS,allow_dsml_wrapper_tolerances=True)
+                self.assertEqual([c['function']['name'] for c in calls], ['get_goal', 'bash'])
+                self.assertEqual(json.loads(calls[1]['function']['arguments']), {
+                    'description': 'Run focused tests',
+                    'command': 'python -m pytest -q tests/test_fixture.py'})
 
-    def test_typed_wrapper_before_valid_read_is_rejected_atomically_without_replay(self):
-        # Sanitized from a complete live response: valid JSON inside a DSML
-        # parameter does not make that parameter an advertised tool field.
+    def test_complete_typed_wrapper_and_read_validate_without_generation(self):
+        # Sanitized from a complete live response. The inert decoder preserves
+        # the wire object; the schema-aware envelope layer resolves its meaning.
         arguments = {'description': 'Find report documentation', 'command': 'ls docs'}
         tools = [*TOOLS, {'type': 'function', 'function': {'name': 'read',
             'parameters': {'type': 'object', 'properties': {
@@ -69,10 +73,11 @@ class DsmlArgumentWrapperTests(unittest.TestCase):
                     patch.object(module, 'save_tool_failure') as saved, \
                     patch.object(api, '_chat_with_retry',
                                  side_effect=AssertionError('Unexpected generation')):
-                with self.assertRaises(ToolCallError) as caught:
-                    validate(Reply(raw, 'fixture:2', 'stop'), request,
-                             allow_continuation=False)
-                self.assertEqual(caught.exception.kind, 'schema')
-                self.assertEqual(caught.exception.tool, 'bash')
-                saved.assert_called_once()
-                self.assertEqual(saved.call_args.args[0].text, raw)
+                reply, _, calls = validate(Reply(raw, 'fixture:2', 'stop'), request,
+                                          allow_continuation=False)
+                self.assertEqual(reply.conversation_id, 'fixture:2')
+                self.assertEqual([c['function']['name'] for c in calls], ['bash', 'read'])
+                self.assertEqual(json.loads(calls[0]['function']['arguments']), arguments)
+                self.assertEqual(json.loads(calls[1]['function']['arguments']),
+                                 decoded[1]['arguments'])
+                saved.assert_not_called()

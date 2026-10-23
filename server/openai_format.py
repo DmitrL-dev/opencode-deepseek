@@ -192,7 +192,12 @@ def _tool_wire_rules(protocol):
             '</｜DSML｜ invoke>\n'
             '</｜DSML｜ calls>\n\n'
             "Use exact tool and argument names. Never copy placeholders, invent "
-            "fields, add an arguments wrapper, or omit required parameters. "
+            "fields or omit required parameters. For a tool with a direct object "
+            "schema and required fields, whose schema does not declare an "
+            "arguments field, an alternative is one parameter named arguments "
+            "with string=\"false\" containing the complete JSON input object. "
+            "Never mix that envelope with individual parameters; its object "
+            "must contain only advertised fields and satisfy the whole schema. "
             "An invocation with no parameters is valid only if its schema permits {}.\n"
             "For string parameters use string=\"true\": everything between the "
             "tags is the literal string, including quotes, backslashes, whitespace "
@@ -763,13 +768,14 @@ def parse_tool_calls(
     """
     stripped = (text or "").strip()
     if allow_dsml and flat_argument_tools is not None:
-        from .dsml import decode, envelope
+        from .dsml import argument_envelopes, decode, envelope
         native = envelope(text, allow_preamble=allow_dsml_preamble,
                           allow_duplicate_open=allow_dsml_wrapper_tolerances)
         if native is not None:
             try:
                 data = decode(native, _tool_json,
                               allow_wrapper_tolerances=allow_dsml_wrapper_tolerances)
+                data = argument_envelopes(data, flat_argument_tools)
                 # Reuse the existing whole-batch parser and schema checks.
                 # No second route may return calls without those checks.
                 stripped = '```tool_calls\n' + json.dumps(data, ensure_ascii=False, allow_nan=False) + '\n```'

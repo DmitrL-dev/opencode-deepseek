@@ -13,6 +13,48 @@ _SPACE = re.compile(r'[ \t\r\n]*')
 _NATIVE_PREFIX = re.compile(r'</?[｜|]+DSML[｜|]+')
 _FRAME_LINE = re.compile(r'^ {0,3}</?[｜|]+DSML[｜|]+(?:[ \t]*(?:calls|tool_calls|function_calls|invoke|parameter)\b|>)')
 
+# A closed, directly advertised object schema can distinguish the wire envelope
+# from an actual tool field. Applicators/references/dynamic properties cannot:
+# leave those inputs unchanged for the ordinary schema validator to decide.
+_DIRECT_OBJECT_KEYS = frozenset({
+    'type', 'properties', 'required', 'additionalProperties', 'minProperties',
+    'maxProperties', '$schema', '$id', '$comment', 'title', 'description',
+    'default', 'examples', 'deprecated', 'readOnly', 'writeOnly',
+})
+
+
+def argument_envelopes(calls, tools):
+    """Decode one explicit typed input object, never infer/merge/repair fields.
+
+    Called only after a complete DSML batch was decoded. This returns data;
+    the shared parser must still validate every resulting call against the
+    unchanged advertised schema before returning any executable batch.
+    """
+    result = []
+    for call in calls:
+        arguments = call['arguments']
+        matches = []
+        for item in tools:
+            function = item.get('function', item) if isinstance(item, dict) else None
+            if isinstance(function, dict) and function.get('name') == call['name']:
+                matches.append(function)
+        schema = matches[0].get('parameters') if len(matches) == 1 else None
+        properties = schema.get('properties') if isinstance(schema, dict) else None
+        required = schema.get('required') if isinstance(schema, dict) else None
+        eligible = (isinstance(schema, dict) and schema.get('type') == 'object'
+                    and schema.keys() <= _DIRECT_OBJECT_KEYS
+                    and isinstance(properties, dict) and 'arguments' not in properties
+                    and isinstance(required, list) and bool(required)
+                    and all(isinstance(key, str) and key in properties for key in required))
+        if eligible and 'arguments' in arguments:
+            value = arguments['arguments']
+            if (set(arguments) != {'arguments'} or not isinstance(value, dict)
+                    or not value.keys() <= properties.keys()):
+                raise ValueError('Ambiguous or undeclared DSML input envelope')
+            call = {**call, 'arguments': value}
+        result.append(call)
+    return result
+
 
 def has_markup(text, *, include_code=False):
     """Recognize native-looking action framing, never authorize or repair it."""

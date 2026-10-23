@@ -52,9 +52,9 @@ fetching another challenge or generating again. These fixes are included in `mai
 The installed Harness upgrade from `0.2.0-rc.2` to `0.2.1-rc.2` was checked with
 the profile and history preserved.
 
-Latest offline verification: **869 tests, 820 passed, 49 skipped**;
-five loopback fixtures and one child-process check were verified separately
-after test sandbox restrictions. Nine real CLI
+Main offline run: **878 tests, 828 passed, 50 skipped**. A child-process check
+blocked by the sandbox and a new installed Harness CLI scenario with a local
+fixture provider passed separately. Nine real CLI
 scenarios were previously checked on Harness `0.2.1-rc.2` with a synthetic provider
 and outbound network isolation: read/write, refusal handling, shell pipelines and
 no retry on HTTP 503. Additional checks cover one-use history links during saved
@@ -82,8 +82,17 @@ unreliable. Parser and schema checks were not relaxed to make the run pass.
 This continuation used two generations, four HTTP requests and no new chat.
 History only gained real events, cumulative counters grew by this actual use,
 and account credentials were unchanged. The goal stopped at the new error.
-A regression checks atomic rejection and no corrective request in both API
-implementations; the focused offline module passed all 3 tests. Previous offline
+The refusal has since been fixed offline: a complete DSML `arguments` input
+object is accepted only for an unambiguous direct object schema. It must be the
+only typed parameter, contain only advertised fields and pass the whole original
+schema. A real field named `arguments` is never unwrapped; composed/reference
+schemas or schemas without required fields do not enable this decoding.
+Malformed JSON, missing fields and invalid values still reject the entire batch.
+Both API implementations validate the saved reply with identical argument values;
+its one-use recovery link was verified on a database copy without account access.
+A real Harness CLI fixture read once and returned its result through the existing
+conversation without a corrective generation. Live continuation with this change
+is still being checked. Previous offline
 checks completed two native Harness goal rounds using a fixture provider,
 which does not establish live model reliability.
 [October 23 results and limits](docs/RECHECK.2026-10-23.md).
