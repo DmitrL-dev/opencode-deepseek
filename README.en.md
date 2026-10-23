@@ -52,9 +52,10 @@ fetching another challenge or generating again. These fixes are included in `mai
 The installed Harness upgrade from `0.2.0-rc.2` to `0.2.1-rc.2` was checked with
 the profile and history preserved.
 
-Main offline run: **878 tests, 828 passed, 50 skipped**. A child-process check
-blocked by the sandbox and a new installed Harness CLI scenario with a local
-fixture provider passed separately. Nine real CLI
+Main offline run: **887 tests, 835 passed, 52 skipped**. A new installed Harness
+CLI fixture separately verified exact file contents and tool-result delivery
+without replay. The child-process check blocked by the sandbox passed separately
+in an earlier run. Nine real CLI
 scenarios were previously checked on Harness `0.2.1-rc.2` with a synthetic provider
 and outbound network isolation: read/write, refusal handling, shell pipelines and
 no retry on HTTP 503. Additional checks cover one-use history links during saved
@@ -73,6 +74,10 @@ only typed parameter, contain only advertised fields and pass the whole original
 schema. A real field named `arguments` is never unwrapped; composed/reference
 schemas or schemas without required fields do not enable this decoding.
 Malformed JSON, missing fields and invalid values still reject the entire batch.
+In DSML mode, the exact named closers `</DSML｜ invoke>` and `</DSML｜ calls>`
+are also recognized only at their corresponding outer element boundaries.
+This spelling cannot open an element, delimit a parameter or close an unnamed
+element; argument contents are never rewritten.
 Both API implementations validate the saved reply with identical argument values;
 its one-use recovery link was verified on a database copy without account access.
 The new refusal is a different case: an unknown extra tag contains malformed

@@ -168,7 +168,7 @@ class HarnessRuntimeTests(unittest.TestCase):
                 answer = "HARNESS_BRIDGE_OK"
             attempt.complete()
             return Reply(answer, "owned-fixture:2")
-        if self.behavior in ("tools", "native_dsml", "native_dsml_object", "calls_alias", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
+        if self.behavior in ("tools", "native_dsml", "native_dsml_object", "native_dsml_named_closers", "calls_alias", "tools_without_fence", "write_without_fence", "redundant_closer", "missing_array_closer") and len(self.prompts) == 1:
             self.assertTrue(any(tool["function"]["name"] == "read" for tool in self.calls[-1]["tools"]))
             answer = block([{"name": "read", "arguments": {"file_path": str(self.workspace / "fixture.txt")}}])
             if self.behavior == 'calls_alias':
@@ -183,6 +183,16 @@ class HarnessRuntimeTests(unittest.TestCase):
                     '<｜｜DSML｜｜ parameter name="arguments" string="false">'
                     + json.dumps({'file_path': str(self.workspace / 'fixture.txt')})
                     + '</｜｜DSML｜｜ parameter>\n</｜｜DSML｜｜ invoke>\n</｜｜DSML｜｜ calls>')
+            if self.behavior == 'native_dsml_named_closers':
+                answer = ('<｜DSML｜ calls>\n<｜DSML｜ invoke name="write">\n'
+                    '<｜DSML｜ parameter name="file_path" string="true">'
+                    + str(self.workspace / 'report.md') + '</｜DSML｜ parameter>\n'
+                    '<｜DSML｜ parameter name="content" string="true">'
+                    + FILE_PAYLOAD + '</｜DSML｜ parameter>\n</DSML｜ invoke>\n'
+                    '<｜DSML｜ invoke name="read">\n'
+                    '<｜DSML｜ parameter name="file_path" string="true">'
+                    + str(self.workspace / 'fixture.txt')
+                    + '</｜DSML｜ parameter>\n</DSML｜ invoke>\n</DSML｜ calls>')
             if self.behavior == "tools_without_fence":
                 answer = answer[:-4]
             elif self.behavior == "redundant_closer":
@@ -196,7 +206,7 @@ class HarnessRuntimeTests(unittest.TestCase):
             answer = block([{"name": "write", "arguments": {
                 "file_path": str(self.workspace / "fixture.txt"), "content": FILE_PAYLOAD}}])[:-4]
         else:
-            if self.behavior in ("tools", "native_dsml", "native_dsml_object", "tools_without_fence", "redundant_closer", "missing_array_closer"):
+            if self.behavior in ("tools", "native_dsml", "native_dsml_object", "native_dsml_named_closers", "tools_without_fence", "redundant_closer", "missing_array_closer"):
                 self.assertIn("HARNESS_OWNED_FILE_73", prompt)
             answer = "HARNESS_BRIDGE_OK"
         attempt.complete()
@@ -371,6 +381,20 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(self.conversation_args[1][:2], ('owned-fixture:2', None))
         self.assertNotIn(api._CONTINUE_PROMPT, self.prompts)
         self.assertNotIn(api._FORMAT_REPAIR_PROMPT, self.prompts)
+
+    def test_native_named_closers_write_exact_content_without_replay(self):
+        self.behavior = 'native_dsml_named_closers'
+        with patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'):
+            result = self.run_harness()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.workspace / 'report.md').read_text(), FILE_PAYLOAD)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.prompts), 2)
+        results = [m for m in self.calls[1]['messages'] if m['role'] == 'tool']
+        self.assertEqual(len(results), 2)
+        self.assertEqual(self.conversation_args[1][:2], ('owned-fixture:2', None))
+        self.assertNotIn(api._FORMAT_REPAIR_PROMPT, self.prompts)
+        self.assertIn('<｜DSML｜ calls>', self.prompts[0])
 
     def test_combined_envelope_errors_complete_a_native_tool_round_trip(self):
         self.behavior = 'combined_envelopes'

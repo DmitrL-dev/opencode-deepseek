@@ -10,8 +10,9 @@ OPEN = '<｜DSML｜ calls>'
 OPENINGS = tuple('<' + token + ' calls>' for token in _TOKENS)
 _NAME = r'([^"<>\x00-\x1f]{1,256})'
 _SPACE = re.compile(r'[ \t\r\n]*')
-_NATIVE_PREFIX = re.compile(r'</?[｜|]+DSML[｜|]+')
-_FRAME_LINE = re.compile(r'^ {0,3}</?[｜|]+DSML[｜|]+(?:[ \t]*(?:calls|tool_calls|function_calls|invoke|parameter)\b|>)')
+_MARKER_PREFIX = r'</?(?:[｜|]+DSML[｜|]+|DSML｜)'
+_NATIVE_PREFIX = re.compile(_MARKER_PREFIX)
+_FRAME_LINE = re.compile(r'^ {0,3}' + _MARKER_PREFIX + r'(?:[ \t]*(?:calls|tool_calls|function_calls|invoke|parameter)\b|>)')
 
 # A closed, directly advertised object schema can distinguish the wire envelope
 # from an actual tool field. Applicators/references/dynamic properties cannot:
@@ -115,12 +116,17 @@ def decode(text, load_json, *, allow_wrapper_tolerances=False):
     if len(text.encode()) > 4 * 1024 * 1024 or token is None:
         raise ValueError('Invalid DSML envelope')
     opening = '<' + token + ' calls>'
-    # Only two complete, symmetric marker spellings are lexical aliases. Match
-    # them at structural boundaries; never replace bytes inside argument values.
-    # Missing tags, asymmetric delimiters and inferred closures remain invalid.
+    # Opening/parameter tags have only two complete, symmetric marker aliases.
+    # Match at structural boundaries; never replace bytes inside argument values.
+    # No global replacement: marker-looking bytes inside values are never fixed.
     vocabulary = '(?:' + '|'.join(map(re.escape, _TOKENS)) + ')' if allow_wrapper_tolerances else re.escape(token)
-    closing = re.compile(r'</' + vocabulary + r' calls>')
-    invoke_end = re.compile(r'</' + vocabulary + r' invoke>')
+    # Two observed complete NAMED outer closers use </DSML｜ ...>. Their
+    # element names identify the already-open level without inferring any tag
+    # or argument. Admit this exact spelling only where invoke/calls can end.
+    # Parameter boundaries, opening tags and unnamed closures stay unchanged.
+    outer_close = '(?:' + vocabulary + '|DSML｜)' if allow_wrapper_tolerances else vocabulary
+    closing = re.compile(r'</' + outer_close + r' calls>')
+    invoke_end = re.compile(r'</' + outer_close + r' invoke>')
     parameter_end = re.compile(r'</' + vocabulary + r' parameter>')
     generic_end = re.compile(r'</' + vocabulary + r'>')
     invoke_start = re.compile(r'<' + vocabulary + r' invoke name="' + _NAME + r'">')
