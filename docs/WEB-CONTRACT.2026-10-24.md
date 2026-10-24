@@ -14,7 +14,7 @@
 | `tool_choice` при продолжении | Компактный режим и `none` теряли запрет/обязательный выбор. `auto` не отменял прежнее указание для отдельного ответа. | Политика текущего ответа передаётся всегда, включая явный переход к автоматическому выбору. |
 
 Четыре новых проверки воспроизвели 36 нарушенных утверждений на исходном коде.
-После исправления пройдены 219 тестов. Матрица обновления каталога проверяет обе
+После исправления пройдены 238 тестов. Матрица обновления каталога проверяет обе
 реализации API, HTTP и компактный браузерный путь, режимы `none`, `light`, `medium`.
 Каждый сценарий отправляет ровно один запрос заменённому провайдеру; повтор со
 старым или новым каталогом останавливается до отправки. Счётчик принятого ответа
@@ -54,7 +54,8 @@ API не используется как доказательство работ
 python -m unittest tests.test_prompt_contract tests.test_conversation_schemas \
   tests.test_tools tests.test_tool_protocol tests.test_dsml_canonical \
   tests.test_dsml_parameter_damage tests.test_offline_corpus \
-  tests.test_conversation_cache tests.test_context_rollover tests.test_api
+  tests.test_conversation_cache tests.test_context_rollover tests.test_api \
+  tests.test_tool_notice
 ```
 
 Приватный корпус не входит в Git. Для своего корпуса используйте

@@ -223,7 +223,10 @@ class ToolNoticeTests(unittest.TestCase):
         self.assertEqual(again, 'You chose Tea.')
         self.assertEqual(
             chat.call_args.args[0],
-            f'Tool result (ask_user_question id="{calls[0]["id"]}"): {answer}\n\nUser: continue')
+            f'Tool result (ask_user_question id="{calls[0]["id"]}"): {answer}\n\nUser: continue'
+            '\n\nDeveloper: Tool selection for this reply is automatic; decide from the current '
+            'task and observed results whether to call tools or answer in plain text. '
+            'Earlier per-reply tool choices do not apply.')
         self.assertEqual(chat.call_args.args[1].conversation_id, 'claude:1')
 
     def test_results_of_one_tool_keep_the_identifier_mapping(self):

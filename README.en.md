@@ -48,7 +48,7 @@ replay protection; it does not fix the text generator.
 **Offline web-contract fixes, October 24:** an authorized Harness catalog
 upgrade now sends the new system instruction and complete schemas once, including
 in compact mode. Every mode sends the current `tool_choice`; `auto` explicitly
-replaces the preceding reply's tool-selection policy. Verification covered 219
+replaces the preceding reply's tool-selection policy. Verification covered 238
 tests and 35 pinned archived cases through the parser and API paths, with network
 access denied. These fixes prevent lost request constraints; they **do not repair
 the confirmed parameter damage in the latest DeepSeek response**. No account or
