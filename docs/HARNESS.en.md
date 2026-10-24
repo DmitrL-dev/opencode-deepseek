@@ -10,6 +10,49 @@ with the key field empty. In 0.2.1-rc.2 this is the built-in skip for the curren
 launch; Welcome may reappear next time. It does not indicate an expired bridge
 session. This path was verified offline in the updated app; existing history opened.
 
+## Request provenance and goal review v8
+
+In `harness-contract-v8`, the `from_agent` log preserves explicitly supplied
+fields: omitted `thinking` does not become explicit `false`; allowed `null`
+values in optional parameters are preserved as well.
+`request_contract` records field presence, a request hash and effective settings;
+`dispatch_contract` additionally records the actual mode and prepared prompt hash
+immediately before dispatch. Private failure diagnostics retain this dispatch
+receipt instead of recalculating it after configuration changes. Request contents
+remain private.
+
+Offline parameter restoration checks the receipt, schema, protocol and current
+effective settings. Old logs without field-presence evidence are not filled in
+by guessing. A matching receipt **does not authorize another generation**, clear
+a pause, or change history bindings or budgets. Reserialize a verified request
+with `request_payload`, not a dump that materializes default values.
+
+When work is ready, the model calls `request_goal_review` with the exact goal ID,
+revision and evidence for its criteria, then provides its final report. The tool
+disarms subsequent automatic goal rounds; the current turn may still request a
+final model response. The goal remains unfinished. The tool neither verifies
+result quality nor grants completion approval. The operator reviews the entire
+scope through `/bridge-goal-review` and, if satisfied, uses the returned one-use
+`/bridge-goal-complete` command. The permit expires after five minutes, new work
+or a restart. Model self-acceptance through `update_goal(action="complete")`
+remains blocked.
+
+On October 24, the installed Harness 0.2.1-rc.3 passed a complete lifecycle with
+a local fake provider and external networking denied: two rounds, a read, one
+write, file verification, review readiness, a final report and two restarts.
+Acceptance and verification of its persistence made no further provider requests
+and did not repeat the write. Separate checks covered provider refusal, malformed
+JSON and `read` → `edit` protection across restarts. This verifies Harness exchange
+and state handling, not the reliability of fresh web-model output.
+
+The fixes are installed in the working bridge and Harness; both were restarted.
+A local status command confirmed v8, and an empty request rejected before provider
+access verified parameter preservation in the running bridge. Its profile,
+original history, counters and pause are preserved; only session-load lifecycle
+and status-command events were appended to Harness journals. The goal was not
+continued. The new tool changes the schema catalog: old history still requires
+the existing catalog-compatibility check, without automatic reset or rebinding.
+
 ## Setup
 
 Open the official Harness app once. Its welcome screen offers **Add API Key →

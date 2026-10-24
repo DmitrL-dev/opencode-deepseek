@@ -6,11 +6,11 @@ import * as safety from '../integrations/harness_shell_safety.mjs';
 const { Context, Service } = await import(pathToFileURL(process.argv[2]).href);
 const tick = () => new Promise(resolve => setTimeout(resolve, 30));
 class Shell extends Service { constructor(ctx) { super(ctx, 'shell'); } resolve(request) { return {...request, env: {}}; } }
-for (const name of ['tools', 'commands', 'goals']) {
-  globalThis[name] = class extends Service { constructor(ctx) { super(ctx, name); } register() {} disarm() {} };
+for (const name of ['tools', 'commands', 'goals', 'systemPrompt']) {
+  globalThis[name] = class extends Service { constructor(ctx) { super(ctx, name); } register() {} guard() {} disarm() {} context() {} };
 }
 const root = new Context();
-root.plugin(Shell); for (const name of ['tools', 'commands', 'goals']) root.plugin(globalThis[name]);
+root.plugin(Shell); for (const name of ['tools', 'commands', 'goals', 'systemPrompt']) root.plugin(globalThis[name]);
 await tick();
 let tool; root.inject(['shell'], ctx => { tool = ctx; });
 const plugin = {name: safety.name, inject: safety.inject, apply: safety.apply};

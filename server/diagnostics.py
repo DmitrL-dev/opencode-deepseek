@@ -23,6 +23,8 @@ def save_tool_failure(reply, request):
     data = {"captured_at": time.time(), "model": request.model, "finish_reason": reply.finish_reason,
             "reply": reply.text, "tools": request.tools, "tool_choice": request.tool_choice}
     try:
+        if request._dispatch_contract is not None:
+            data['dispatch_contract'] = request._dispatch_contract
         from deepseek.client import _decode_cid
         from .config import model_provider
         from .conversation_cache import digest

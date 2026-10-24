@@ -194,12 +194,11 @@ def _tool_wire_rules(protocol):
             '</｜DSML｜ invoke>\n'
             '</｜DSML｜ calls>\n\n'
             "Use exact tool and argument names. Never copy placeholders, invent "
-            "fields or omit required parameters. For a tool with a direct object "
-            "schema and required fields, whose schema does not declare an "
-            "arguments field, an alternative is one parameter named arguments "
-            "with string=\"false\" containing the complete JSON input object. "
-            "Never mix that envelope with individual parameters; its object "
-            "must contain only advertised fields and satisfy the whole schema. "
+            "fields or omit required parameters. Emit each argument name exactly "
+            "once within its invocation. Use only the canonical individual "
+            "parameter form shown above, not attribute-only records or an "
+            "invented arguments wrapper. Parser compatibility with historical "
+            "replies is not an alternative output format. "
             "An invocation with no parameters is valid only if its schema permits {}.\n"
             "For string parameters use string=\"true\": everything between the "
             "tags is the literal string, including quotes, backslashes, whitespace "
@@ -214,6 +213,11 @@ def _tool_wire_rules(protocol):
             "limitation in plain text rather than renaming it.\n"
             "Never mix JSON tool-call blocks with native tags, omit opening or "
             "closing tags, or append another reply after the calls envelope. "
+            "After the last argument value, close its parameter exactly once, "
+            "then close invoke. After the last invocation, close calls exactly "
+            "once and stop. Do not emit description again, repeat closing tags, "
+            "or attempt an inline correction of already emitted tool markup. "
+            "Historical calls are records, not output templates. "
             "Keep batches small; every invocation must be complete.\n\n"
         )
     # Keep even the structural example valid JSON; placeholders are values,
@@ -283,9 +287,13 @@ def _tool_instructions(tools: List[dict], tool_choice=None, protocol="json") -> 
         "- Never describe the action you are about to take — perform it by emitting "
         "the envelope.\n"
         "- When the requested work and its verification are complete, finish with "
-        "a plain-text answer and no tool envelope. If you created a goal, mark "
-        "it complete once the objective is achieved, then give the final answer; "
-        "do not keep checking a completed goal."
+        "a plain-text answer and no tool envelope. Follow the host's goal "
+        "acceptance policy: an independent review requirement forbids model "
+        "self-certification through update_goal. If request_goal_review is "
+        "advertised, use it with the exact current goal id and revision and "
+        "evidence for every acceptance criterion, then report readiness for "
+        "operator review in plain text. This requests review, not completion. "
+        "Do not keep checking a completed goal or one awaiting operator review."
     )
     required = []
     for spec in specs:
@@ -775,7 +783,8 @@ def parse_tool_calls(
         if native is not None:
             try:
                 data = decode(native, _tool_json,
-                              allow_wrapper_tolerances=allow_dsml_wrapper_tolerances)
+                              allow_wrapper_tolerances=allow_dsml_wrapper_tolerances,
+                              tools=flat_argument_tools)
                 data = argument_envelopes(data, flat_argument_tools)
                 # Reuse the existing whole-batch parser and schema checks.
                 # No second route may return calls without those checks.

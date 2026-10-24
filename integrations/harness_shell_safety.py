@@ -5,7 +5,8 @@ from .harness import default_home, install_plugin_copy, profile_lock, render, wr
 
 IDENTITY = 'local-bridge-shell-safety'
 SOURCES = (Path(__file__).with_suffix('.mjs'), Path(__file__).with_name('harness_gh_checks.py'),
-           Path(__file__).with_name('harness_unittest.py'))
+           Path(__file__).with_name('harness_unittest.py'), Path(__file__).with_name('harness_read_context.mjs'),
+           Path(__file__).with_name('harness_goal_completion.mjs'))
 
 
 def patch_document(document, entry=None, allow_read_repair=None):

@@ -46,6 +46,8 @@ class ShellSafetyTests(unittest.TestCase):
             self.assertTrue(entry.is_relative_to(home / 'plugins'))
             self.assertTrue(entry.is_file() and entry.with_name('harness_gh_checks.py').is_file())
             self.assertTrue(entry.with_name('harness_unittest.py').is_file())
+            self.assertTrue(entry.with_name('harness_read_context.mjs').is_file())
+            self.assertTrue(entry.with_name('harness_goal_completion.mjs').is_file())
 
     def test_installer_refuses_symlinked_profile_and_uses_dsh_home(self):
         import os

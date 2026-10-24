@@ -19,7 +19,7 @@ project tools; the bridge sends messages to the selected provider. Website
 adapters do not require a separate provider API key.
 
 **Harness works independently: you do not need OpenCode to use it.**
-Everything documented here is on this fork's `main` branch.
+Local fixes and live verification are identified separately from published code below.
 
 **Security update, October 12, 2026:** the local `/v1` API now requires a bridge
 token. After updating, reconfigure your client using
@@ -34,7 +34,24 @@ not tested against live accounts in Harness, OpenCode or a browser.
 > restricted repeatedly, with the exact cause undetermined. A passing test does
 > not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
-**Current web-bridge status:** a fresh Harness session stopped at step four on
+**Current status, October 24:** request provenance and the independent goal
+review handoff were fixed offline (`harness-contract-v8`). Logging no longer
+turns omitted `thinking` into explicit `false`; a separate receipt records the
+effective dispatch settings. `request_goal_review` disarms automatic continuation
+without completing the goal. The operator accepts the result with
+`/bridge-goal-review` and a one-use `/bridge-goal-complete` command. The installed
+Harness completed a local fake-provider lifecycle covering two rounds, write/read,
+review readiness and restarts. This does not verify fresh DeepSeek output quality;
+autonomous web generation remains unverified. The fixes are installed in the
+working bridge and Harness; both were restarted. A local status command confirmed
+`harness-contract-v8`; rejecting an empty request verified exact parameter
+preservation in the running bridge without provider dispatch. The offline suite
+ran 997 tests with 68 skips and no failures. Original history, counters and pause
+were preserved; the goal was not continued. Harness appended only session-load
+lifecycle and local status-command events.
+[Request provenance and goal review](docs/HARNESS.en.md#request-provenance-and-goal-review-v8).
+
+**October 23 live check:** a fresh Harness session stopped at step four on
 October 23 because malformed DSML parameters were already present in DeepSeek's
 complete response. The previously completed goal and green CI do not establish
 reliable operation on arbitrary goals. The web transport sends textual
@@ -44,6 +61,81 @@ The installed CLI was checked offline with three successful actions followed by
 a damaged fourth reply: the entire bad batch is rejected, completed work stays
 intact, and resubmitting the same history does not generate again. This verifies
 replay protection; it does not fix the text generator.
+
+
+**October 24 goal-control check:** local `harness-contract-v7` prevents the model
+from closing the whole goal based on a partial report; separate
+[whole-scope acceptance](#whole-goal-completion-control) is required. 50 offline
+checks passed. After installation, one web-bridge continuation stopped on a
+malformed `create_goal.objective` tag in complete response #28. After the offline
+fix, the exact saved batch was recovered without generation: its original
+`create_goal` and Bash calls succeeded. The successor goal with 241 remaining
+rounds was left inactive. 159 parser/contract checks and 8 recovery checks passed
+offline. History and usage were preserved. Full autonomy remains unverified;
+these changes are local and were
+not published to `main` during this check.
+
+The exact spelling `<｜DSML｜ objective" string="true">…</｜DSML｜ parameter>`
+is now decoded only with DeepSeek wrapper tolerance enabled and **that literal
+field name** declared in an unambiguous object schema. Names, values and types
+are not guessed; the entire batch retains the existing schema checks. Truncated
+values, unknown fields, partially damaged attributes and quoted examples never
+become calls. Updating the parser alone neither redelivers an old reply nor
+resumes a goal.
+
+**Continuation after #28:** two further steps successfully read the plan/backlog
+and located related documents. At step three, complete response #34 expressed
+`read` arguments as attributes (`file_path="…" offset="192" limit="45"`) rather
+than DSML parameters. The original stream reconstructs the same text without
+truncation. Both decoders initially rejected the batch; the goal stopped without
+executing the call or regenerating. Prior history and usage were preserved;
+only actual usage from the three authorized steps was added. This run does not
+establish autonomous execution through completion.
+
+**Recovery of #34:** attributes are now accepted only as one complete record
+inside `invoke`, with a single explicitly declared scalar type for every field.
+Strings stay literal; numbers, booleans and null must parse as JSON and match the
+schema type. Unions, `$ref`, absent types, unknown/duplicate fields, mixed
+`parameter` records and truncated framing are rejected. All schema constraints
+and whole-batch validation remain mandatory; XML entities and escape sequences
+are not decoded. 167 parser/contract checks and 8 recovery checks passed offline.
+The saved `read` from #34 executed successfully once in Harness without generation;
+the goal remains inactive. History, usage and pauses were preserved. The normal
+profile was restored and the working bridge restarted with the fix.
+
+**Next continuation:** one Bash step succeeded, but response #38 at step two
+entered a repetition loop: 1,344 `description` attributes, 141,907 characters,
+and no closing `invoke`/`calls` tags. The provider ended it as `INCOMPLETE`
+(`length`), while the local stream capture is complete. No calls from that batch
+executed; the goal stopped without retry. Recovery was refused: discarding the
+tail and inventing closure is not allowed. This is a generation failure, not
+another accepted attribute spelling.
+
+**Offline protection against the #38 loop:** the prompt now requires one canonical
+DSML form, each field exactly once, and immediate invocation/batch closure.
+Historical compatible forms remain parser-only. For a reply starting with `calls`,
+the HTTP client stops reading on a repeated parameter declaration within one
+`invoke`, or more than 16 consecutive redundant parameter closers. The entire
+batch fails; the connection closes, the private prefix is retained, and existing
+replay protection and safety pauses remain in force. No repair request is sent.
+This bounds structural repetition, not every possible text loop; closing the
+connection does not guarantee that provider-side computation stops.
+206 tests passed offline. The exact saved #38 stopped at character 1,186 under
+three stream chunk sizes. No closure was invented and no call executed.
+The fix was then applied by restarting the working bridge from the updated tree;
+the new process returns `ok` from `/healthz`. In the same environment, 45 focused
+offline checks passed and exact #38 stops at character 1,186. History, profile,
+usage and pause records remain unchanged; the goal was not resumed and no live
+generation was performed during deployment.
+
+**One authorized live attempt after the fix:** response #40 from parent #36
+finished normally (`stop`) but contained malformed DSML closing tags. This reply
+did not loop; the whole batch was rejected, no tools were delivered, and the goal
+remains stopped. No further attempt or new chat was made. The exact stream was
+replayed offline; 33 tests passed. The Harness journal, profile and every history
+binding table were preserved. The budget recorded one generation and one HTTP
+request; counters were not reset, with expired entries pruned by the normal
+24-hour window. Successful autonomous operation after the fix is not yet verified.
 
 **Offline web-contract fixes, October 24:** an authorized Harness catalog
 upgrade now sends the new system instruction and complete schemas once, including
@@ -1052,6 +1144,119 @@ Verified offline against Harness 0.2.0-rc.2 contract fixtures: SSE, exact call I
 existing-conversation continuation and duplicate-step rejection without counter
 changes. This is not a live account check or a guarantee that arbitrary goals
 will complete.
+
+### Importing official API history into the web bridge
+
+Selecting **DeepSeek Expert · web** changes the route; it does not create a web
+conversation for existing API history. `History is unknown` after this switch
+requires an explicit import, not a budget reset or another goal resume.
+
+The local command `python -m server.history_import --request REQUEST.json
+--archive-root PRIVATE_ARCHIVE_DIR --source-provider deepseek-official` authorizes
+**one exact request** for 10 minutes. First retain and review the client's actual
+request while it is stopped. Resuming a goal may change that request; a ticket
+for the earlier request will then refuse it. Use a private, git-ignored archive
+directory that the current Harness workspace's `read` tool can access.
+
+Authorization is offline: it archives the complete request and every observed
+result. Only a later submission of **that same** request creates a web conversation
+and binds its response to the original Harness history. Existing links, rolling
+budgets and pauses survive. The ticket binds account, model, history, schemas and
+parameters; it is consumed before dispatch and cannot rearm after failure or
+restart. Format repair and truncated-output continuation are disabled. An exact
+repetition of an imported call rejects the entire new batch. The exception is
+`get_goal`, which reads current goal state after a resume. Goal mutations and
+all other calls retain replay protection; rejected replies are saved privately
+when diagnostics are enabled.
+
+Verified offline, including retained real history: 181 messages, all 91 results,
+a 72.6 KB prompt. One live probe on October 24 created one web conversation and
+received one reply; no tools executed because the guard incorrectly rejected
+`get_goal`. The cause was fixed offline: 145 tests and validation of the saved
+reply passed. Response #2 was then recovered after its prompt and reply exactly
+matched provider history. Harness successfully executed `bash` and `get_goal`
+once; the next model step was stopped locally. Locating the binding required two
+read requests, with no new generations or paid API calls. History and global
+counters were preserved, and the new continuation link was checked offline.
+This verifies one recovered step, not reliable long-running autonomous operation.
+Subsequent live probes exposed terminal duplicate DSML parameter closing tags in
+responses #4 and #6. Complete raw streams were retained; each failure stopped Harness
+before executing tools. History and accumulated usage were preserved.
+A structural decoder tolerance now accepts a terminal run of repeated closing
+tags for the last fully parsed parameter, before a named `invoke` closing tag.
+Both already supported markers, `｜DSML｜` and `｜｜DSML｜｜`, may be mixed at this
+boundary. No other spellings are introduced.
+Values are never repaired; schemas and the entire batch are validated before calls
+are returned. Repeats elsewhere, missing tags and unfinished replies are rejected.
+The run is not limited to a single duplicate: its length cannot change argument
+values. Offline verification: 135 tests and both exact saved replies. Response #4
+was recovered without generation: Harness successfully executed `bash` and `read`
+once each. Response #6 was then recovered without generation: one `bash` call
+completed once; all 478 previous links and usage counters were preserved.
+Recovery passed 8 offline checks; its new link retained three accepted replies.
+The single subsequent request returned #8 with mixed repeated closing tags,
+`</｜｜DSML｜｜ parameter>` and `</｜DSML｜ parameter>`. The former identical-marker
+requirement rejected the whole batch before execution. This inconsistency is fixed:
+the tolerance uses the same two markers as ordinary parameter boundaries.
+Offline verification: 137 tests, the exact complete stream for #8, unchanged
+`read` and `get_goal` arguments, schema validation and replay protection.
+Response #8 was recovered without generation: `read` and `get_goal` completed
+once, preserving all 479 prior links. The next two web replies parsed successfully:
+`bash` completed, then Harness's local “file has not been read” guard stopped
+an `edit` batch after an application restart. Neither file was written; the second
+`edit` was aborted before dispatch, with no generation retry. The goal is inactive.
+Reliable long-running autonomous operation remains unverified.
+With the updated shell plugin (`harness-contract-v6`), Harness appends runtime
+context with a fresh identifier after restart. It automatically reminds the model
+to perform a native `read` before `edit` or replacing an existing file, and wait
+for the successful result in a separate step. Historical reads and `bash/cat`
+do not qualify. This is a reminder, not a fabricated read observation: ignoring
+it still triggers the native refusal. File version checks, schemas and replay
+protection remain intact. Harness appends a normal context event without rewriting
+old messages, the system prompt, or counters. Offline checks on Harness `0.2.1-rc.3`
+cover restart → `read` → `edit`, refusal without a fresh read, and refusal when the
+file changes after reading. Install with
+`python -m integrations.harness_shell_safety --profile desktop`, then restart Harness;
+`/bridge-shell-status` reports `runtime read reminder active`.
+Live web-bridge verification completed three sequential steps: two successful
+native reads, then separate successful edits to `REPORT.ru.md` and `PROGRESS.md`.
+There were no errors or repeated earlier commands/tests. The bounded probe
+stopped the goal normally after three steps; this does not establish completion
+of the whole project. No paid API was used. The offline integration, history
+binding and protection suite passed 48 tests.
+The next continuation, without the probe step cap, reached a normal final reply:
+four web steps, `bash`, `get_goal`, and `update_goal`, with no errors or retries.
+Harness recorded `turn/end: completed` and goal completion; all 485 prior history
+links and 62 prior usage events were preserved. The verified result covers only
+`OWNER-NOTIFY-01`: the final reply explicitly excludes a full release and all
+product plans. A goal marked `complete` does not by itself establish fulfillment
+of its broader wording or long-running autonomous reliability.
+Details and limits: [Harness guide](docs/HARNESS.ru.md#перенос-api-истории).
+
+
+### Whole-goal completion control
+
+The `harness-contract-v7` shell plugin rejects model calls to
+`update_goal(action="complete")`. A successful tool, completed plan item or partial
+report does not establish completion of the entire objective. Rejection occurs
+**before** the native goal changes; the existing safety policy stops the turn
+without another request. The model should continue remaining authorized work
+without repeating completed actions.
+
+Final acceptance is separate: stop the turn, run `/bridge-goal-review`, compare
+the **entire** objective and every criterion with actual evidence, then use the
+shown `/bridge-goal-complete <token>`. The single-use review expires after five
+minutes and is bound to this session; new work, goal changes or restart invalidate
+it. Review disarms automatic continuation. Completion makes no provider request
+and does not reset history or counters.
+
+This is a conservative acceptance boundary, **not automated semantic verification**.
+The model cannot yet autonomously certify completion of the whole project.
+50 offline checks passed, including installed Harness `0.2.1-rc.3` with a mocked
+provider: completing one component could not close the broad goal, and no next
+request was issued. Install with
+`python -m integrations.harness_shell_safety --profile desktop`, restart Harness,
+and check `/bridge-shell-status` for `whole-goal completion review required`.
 
 ### Automatic context migration
 

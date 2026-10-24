@@ -108,7 +108,7 @@ try {
   const goals = {disarm: agent => { agent.activation = 'disarmed'; events.push('disarm'); }};
   const resolve = request => request;
   const commands = [];
-  const ctx = {goals, shell: {resolve}, commands: {register: command => commands.push(command)},
+  const ctx = {tools: {guard() {}, register() {}}, systemPrompt: {context() {}}, goals, shell: {resolve}, commands: {register: command => commands.push(command)},
     effect: fn => disposers.push(fn()), on: (event, fn) => {handlers[event] = fn;}};
   apply(ctx);
   const hardened = ctx.shell.resolve({command: 'true'});
@@ -131,9 +131,10 @@ try {
   assert.throws(() => handlers['tools/result']({name: 'read', agent: {status: 'running',
     cancel() { stopped = true; }}}, {isError: true}), /disarm failed/);
   assert.equal(stopped, true);
-  assert.equal((await commands[0].handler()).kind, 'success');
-  assert.match((await commands[0].handler()).text, /harness-contract-v5/);
-  assert.match((await commands[0].handler()).text, /read repair disabled/);
+  assert.equal((await commands.find(c => c.name === 'bridge-shell-status').handler()).kind, 'success');
+  assert.match((await commands.find(c => c.name === 'bridge-shell-status').handler()).text, /harness-contract-v8/);
+  assert.match((await commands.find(c => c.name === 'bridge-shell-status').handler()).text, /runtime read reminder active/);
+  assert.match((await commands.find(c => c.name === 'bridge-shell-status').handler()).text, /read repair disabled/);
   disposers.forEach(fn => fn());
   assert.equal(ctx.shell.resolve, resolve);
   // P3-11: cordis returns a fresh proxy for every method read. Teardown must

@@ -2,10 +2,12 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { registerReadContext } from './harness_read_context.mjs';
+import { registerGoalCompletionControl } from './harness_goal_completion.mjs';
 
 export const name = 'bridge-shell-safety';
-export const contractVersion = 'harness-contract-v5';
-export const inject = ['shell', 'tools', 'commands', 'goals'];
+export const contractVersion = 'harness-contract-v8';
+export const inject = ['shell', 'tools', 'commands', 'goals', 'systemPrompt'];
 
 // This is execution policy, not a rewrite of the model's shell source. Bash
 // retains its normal explicit if/! / && / || handling of expected failures.
@@ -89,6 +91,8 @@ export function failedResult(exec, result, allowReadRepair = false) {
 }
 
 export function apply(ctx, config = {}) {
+  registerReadContext(ctx);
+  registerGoalCompletionControl(ctx);
   const allowReadRepair = config.allowReadRepair === true;
   // Random, owner-only cache; no HOME/GH_CONFIG_DIR changes or credential copy.
   // Keep it until OS temp cleanup: background readers must not lose their files.
@@ -135,7 +139,7 @@ export function apply(ctx, config = {}) {
       const active = spec.command.startsWith('set -e -o pipefail\n') && spec.env.XDG_CACHE_HOME === cacheRoot
         && typeof ctx.goals.disarm === 'function';
       return {kind: active ? 'success' : 'error', text: active
-        ? `Shell safety active (${contractVersion}): errexit + pipefail; goal disarm before native stop on tool failure; FS_NOT_OBSERVED read repair ${allowReadRepair ? 'enabled' : 'disabled'}; explicit bridge_unittest PYTHON [args] reports completed assertion failures for repair, execution errors still stop; validated gh pr checks status; private temporary gh cache. No command or provider request was sent.`
+        ? `Shell safety active (${contractVersion}): runtime read reminder active; whole-goal completion review required; errexit + pipefail; goal disarm before native stop on tool failure; FS_NOT_OBSERVED read repair ${allowReadRepair ? 'enabled' : 'disabled'}; explicit bridge_unittest PYTHON [args] reports completed assertion failures for repair, execution errors still stop; validated gh pr checks status; private temporary gh cache. No command or provider request was sent.`
         : 'Shell safety is not active in the current executor. Do not resume until the profile is reloaded.'};
     }});
 }

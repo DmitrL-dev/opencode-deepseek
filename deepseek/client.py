@@ -37,6 +37,7 @@ from providers.access import ProviderRejected, rejection, guard, current_attempt
 from .auth import Session, get_session
 from .pow import DeepSeekPow, PowHeader
 from .stream_diagnostics import StreamCapture
+from .repetition import ToolRepetitionGuard, RepeatedToolFraming
 from . import refusals
 
 BASE = "https://chat.deepseek.com"
@@ -358,7 +359,13 @@ class _Stream:
                 raise ProviderRejected()
             self._client._diagnostic_phase = "parse_stream"
             observed = self._capture.wrap(resp)
-            yield from _parse_sse(bounded_lines(observed, self.access_attempt, started=stream_started), meta)
+            repetition = ToolRepetitionGuard()
+            for chunk in _parse_sse(bounded_lines(observed, self.access_attempt, started=stream_started), meta):
+                try:
+                    repetition.feed(chunk)
+                except RepeatedToolFraming as exc:
+                    raise DeepSeekStreamError('DeepSeek repeated tool framing') from exc
+                yield chunk
             if self.access_attempt is not None:
                 self.access_attempt.check()
             if time.monotonic() - stream_started >= MAX_SECONDS:
@@ -391,6 +398,7 @@ class DeepSeekStreamError(RuntimeError):
 
 
 _STREAM_FAILURE_CODES = {
+    "DeepSeek repeated tool framing": "stream_repeated_tool_framing",
     "DeepSeek changed completion status": "stream_changed_completion_status",
     "DeepSeek response status: ERROR": "stream_response_error",
     "DeepSeek response status: FAILED": "stream_response_failed",

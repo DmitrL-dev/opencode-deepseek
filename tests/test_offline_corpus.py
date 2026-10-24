@@ -60,16 +60,34 @@ class OfflineCorpusPolicyTests(unittest.TestCase):
                 self.assertEqual(self.run_case(expected={'kind': 'reject'}, **policy)
                                  ['failed_indices'], [0])
 
-    def test_damaged_parameter_is_refused_in_both_profiles_without_changing_values(self):
-        damaged = PACKET.replace('parameter name="target"', 'target"')
+    def test_complete_short_parameter_is_schema_bound_and_policy_explicit(self):
+        short = PACKET.replace('parameter name="target"', 'target"')
         for protocol in ('json', 'dsml'):
             for implementation in ('legacy', 'new'):
                 with self.subTest(protocol=protocol, implementation=implementation):
-                    result = self.run_case(reply=damaged, expected={'kind': 'reject'},
+                    expected = CALLS if protocol == 'dsml' else {'kind': 'reject'}
+                    result = self.run_case(reply=short, expected=expected,
                                            protocol=protocol, implementation=implementation)
                     self.assertEqual(result['failed_indices'], [])
-                    self.assertEqual(result['matched_outcomes']['calls'], 0)
-                    self.assertEqual(result['matched_outcomes']['reject'], 1)
+                    self.assertEqual(result['matched_outcomes']['calls'], int(protocol == 'dsml'))
+                    self.assertEqual(result['matched_outcomes']['reject'], int(protocol == 'json'))
+
+    def test_partial_unknown_and_wrong_type_parameters_remain_refused(self):
+        variants = [
+            PACKET.replace('parameter name="target"', 'name="target"'),
+            PACKET.replace('parameter name="target"', 'undeclared"'),
+            PACKET.replace('parameter name="target" string="true">/fixture/value',
+                           'target" string="false">42'),
+            PACKET.replace('</｜DSML｜ parameter>', ''),
+        ]
+        for reply in variants:
+            for protocol in ('json', 'dsml'):
+                for implementation in ('legacy', 'new'):
+                    with self.subTest(reply=reply, protocol=protocol, implementation=implementation):
+                        result = self.run_case(reply=reply, expected={'kind': 'reject'},
+                                               protocol=protocol, implementation=implementation)
+                        self.assertEqual(result['failed_indices'], [])
+                        self.assertEqual(result['matched_outcomes'], {'calls': 0, 'text': 0, 'reject': 1})
 
     def test_well_formed_envelope_still_checks_required_schema_fields(self):
         damaged = PACKET.replace('name="target"', 'name="undeclared"')

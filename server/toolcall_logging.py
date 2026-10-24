@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parent.parent
 LOG_DIR = ROOT / "logs"
 SEPARATOR = {
     "from_agent": "------------ from agent---------------",
+    "request_contract": "------------ request contract---------------",
+    "dispatch_contract": "------------ dispatch contract---------------",
     "to_provider": "------------ to provider---------------",
     "from_provider": "------------ from provider---------------",
     "to_agent": "------------ to agent---------------",

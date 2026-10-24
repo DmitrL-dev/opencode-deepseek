@@ -61,6 +61,8 @@ class ToolcallLoggingTests(unittest.TestCase):
             self.assertNotEqual(first, second)
             for direction, payload in (
                 ("from_agent", '{"messages": []}'),
+                ("request_contract", {"version": 1}),
+                ("dispatch_contract", {"version": 1}),
                 ("to_provider", "prompt\nexact"),
                 ("from_provider", "reply"),
                 ("to_agent", '{"choices": []}'),

@@ -243,14 +243,14 @@ class HarnessRuntimeTests(unittest.TestCase):
         attempt.complete()
         return Reply(answer, "owned-fixture:2")
 
-    def run_harness(self, prompt="Run the owned bridge fixture."):
+    def run_harness(self, prompt="Run the owned bridge fixture.", app_args=()):
         # Do not inherit account credentials, proxies, a user's DSH_HOME, or a
         # user's workspace .env. HOME is isolated as well as Harness storage.
         env = {key: os.environ[key] for key in ("PATH", "TMPDIR", "SYSTEMROOT", "ELECTRON_RUN_AS_NODE") if key in os.environ}
         env.update(HOME=str(self.root), DSH_HOME=str(self.root / "dsh"),
                    DSH_TELEMETRY_MODE="DISABLED", NO_PROXY="127.0.0.1,::1")
         result = subprocess.run(self.command + ["--profile", "headless", "--patch", str(self.overlay),
-                                               "--json", prompt],
+                                               "--json", *app_args, prompt],
                                 cwd=self.workspace, env=env, capture_output=True, text=True, timeout=90)
         # Only owned synthetic messages can enter this transcript.
         self.assertNotIn("MISSING_CREDENTIAL", result.stdout + result.stderr)

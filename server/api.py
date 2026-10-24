@@ -61,7 +61,7 @@ from .toolcall_logging import (
     record as record_toolcall_log,
     record_error as record_toolcall_error,
 )
-from .conversation_cache import conversation_cache, ConversationStateError
+from .conversation_cache import conversation_cache, ConversationStateError, UnknownHistoryError
 
 from .config import (
     MODEL_MAP,
@@ -335,7 +335,11 @@ def _chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
                                         'no request was sent.')
             attempt.check()  # Recheck a pause that happened while building a client.
             record_toolcall_log(trace, "to_provider", prompt)
-            reply = client.chat(prompt, req.conversation_id, model_type, effective_thinking(req), req.search)
+            from .request_contract import record_dispatch
+            thinking = effective_thinking(req)
+            receipt = record_dispatch(req, prompt, model_type, thinking)
+            record_toolcall_log(trace, "dispatch_contract", receipt)
+            reply = client.chat(prompt, req.conversation_id, model_type, thinking, req.search)
             record_toolcall_log(trace, "from_provider", reply.text)
             return reply
     except LoginRequired as exc:
@@ -491,12 +495,35 @@ def _conversation_tool_chat(prompt, req, model_type):
             scope = _conversation_scope(provider)
             conversation_token = _bound_conversation.set(binding)
         browser = provider != "deepseek" and provider_uses_browser(provider)
-        req, steps = conversation_cache.prepare(
-            req, scope=scope, claim=claim, compact_results=browser,
-            legacy_scopes=legacy,
-            allow_local_rollover=(provider == 'deepseek' and
-                os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') == '1'),
-            trace_path=original._toolcall_log_path)
+        try:
+            req, steps = conversation_cache.prepare(
+                req, scope=scope, claim=claim, compact_results=browser,
+                legacy_scopes=legacy,
+                allow_local_rollover=(provider == 'deepseek' and
+                    os.getenv('DEEPSEEK_CONTEXT_ROLLOVER', '0') == '1'),
+                trace_path=original._toolcall_log_path)
+        except UnknownHistoryError:
+            from .history_import import claim as claim_import, validate_new_calls
+            imported = claim_import(conversation_cache, original, scope) if provider == 'deepseek' else None
+            if imported is None:
+                raise
+            migrated, migration_prompt = imported
+            # The explicit ticket stays consumed on all failures. No automatic
+            # context rollover, format repair or output continuation in this path.
+            _check_cancelled()
+            reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
+            if not migrated.tools:
+                result = (reply, reply.text, None)
+            elif not _LEGACY:
+                from . import api_new
+                result = api_new.validate_tool_reply(reply, migrated, allow_continuation=False)
+            else:
+                result = _validate_tool_reply(reply, migrated, allow_continuation=False)
+            validate_new_calls(original, reply, result[2])
+            # Bind only the original Harness history, never a bootstrap alias.
+            conversation_cache.remember(original, *result, 0, scope=scope)
+            succeeded = True
+            return result
         if claim and steps >= conversation_cache.max_replies:
             # Migrate before dispatch: the capped conversation receives no request.
             # A failure in the new conversation cannot enter the refusal-retry path.
@@ -693,9 +720,13 @@ def _validate_tool_reply(reply: Reply, req: ChatCompletionRequest, *, allow_cont
 
 
 def _open_stream(client: DeepSeekClient, prompt: str, req: ChatCompletionRequest, model_type):
+    from .request_contract import record_dispatch
+    thinking = effective_thinking(req)
+    receipt = record_dispatch(req, prompt, model_type, thinking)
+    record_toolcall_log(req._toolcall_log_path, "dispatch_contract", receipt)
     return client.stream(
         prompt, conversation_id=req.conversation_id,
-        model=model_type, thinking=effective_thinking(req), search=req.search,
+        model=model_type, thinking=thinking, search=req.search,
     )
 
 
@@ -1073,7 +1104,8 @@ async def _chat_completions(req: ChatCompletionRequest):
         if trace is None:
             trace = new_toolcall_log(model_provider(req.model) if is_known_model(req.model) else req.model)
         req._toolcall_log_path = trace
-    record_toolcall_log(trace, "from_agent", req.model_dump_json(exclude_none=True))
+    from .request_contract import capture, request_payload
+    record_toolcall_log(trace, "from_agent", request_payload(req))
     if not req.messages:
         response = _error("`messages` must not be empty", status=400, err_type="invalid_request_error")
         record_toolcall_log(trace, "to_agent", response)
@@ -1140,6 +1172,7 @@ async def _chat_completions(req: ChatCompletionRequest):
 
     # A thread's model is fixed when it's created, so on resume we ignore `model`
     # (the OpenAI SDK always sends one) and let the existing thread's model stand.
+    record_toolcall_log(trace, "request_contract", capture(req))
     model_type = None if req.conversation_id else resolve_model_type(req.model)
     prompt = messages_to_prompt(
         req.messages, req.tools, req.tool_choice,

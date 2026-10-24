@@ -29,6 +29,10 @@ class ConversationStateError(RuntimeError):
     pass
 
 
+class UnknownHistoryError(ConversationStateError):
+    """No exact continuation link exists; only an explicit import may proceed."""
+
+
 def normalized(message):
     value = message.model_dump(exclude_none=True) if hasattr(message, 'model_dump') else dict(message)
     content = value.get('content')
@@ -222,7 +226,7 @@ class ConversationCache:
                 if matches:
                     key, (row, prior_contract) = next(iter(matches.items()))
             if not row:
-                raise ConversationStateError('History is unknown; automatic replay and new-chat fallback are disabled.')
+                raise UnknownHistoryError('History is unknown; automatic replay and new-chat fallback are disabled.')
             if row[1]:
                 raise ConversationStateError(
                     'History already consumed (previously used chat); automatic replay and new-chat fallback are disabled.')
