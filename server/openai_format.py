@@ -175,7 +175,9 @@ def _tool_choice_suffix(tool_choice, protocol="json") -> str:
                 f" Reply with ONLY the {envelope}.")
     if tool_choice == "none":
         return "\n\nDo NOT call any tools; answer in plain text."
-    return ""
+    return ("\n\nTool selection for this reply is automatic; decide from the current "
+            "task and observed results whether to call tools or answer in plain text. "
+            "Earlier per-reply tool choices do not apply.")
 
 
 def _tool_wire_rules(protocol):
@@ -499,8 +501,9 @@ def messages_to_prompt(
     on continuations (first turn still gets the full block).
 
     `tool_results_compact` (browser providers): a continuation that carries tool
-    results gets no tools reminder, and a single unambiguous result is sent as
-    just `Tool result (name): <content>` (no call_id, no echoed call).
+    results omits the schema reminder. IDs remain attached to the results.
+    The current tool-choice policy is always sent, even without a reminder;
+    an earlier turn's forced/forbidden choice must not govern the next reply.
     """
     from .config import tool_instructions_for_provider, tool_protocol_for_provider
 
@@ -528,10 +531,8 @@ def messages_to_prompt(
     bare_results = compact and not any(m.role == "assistant" and m.tool_calls for m in convo)
     tool_instr = ""
     if tools:
-        if compact:
-            tool_instr = ""
-        elif mode == "none" and tools_continuation:
-            tool_instr = ""
+        if compact or (mode == "none" and tools_continuation):
+            tool_instr = _tool_choice_suffix(tool_choice, protocol=protocol).strip()
         elif mode in ("light", "medium") and tools_continuation:
             tool_instr = _tool_reminder(tools, tool_choice, shapes=mode == "medium", protocol=protocol)
         else:

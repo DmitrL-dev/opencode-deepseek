@@ -44,6 +44,17 @@ The installed CLI was checked offline with three successful actions followed by
 a damaged fourth reply: the entire bad batch is rejected, completed work stays
 intact, and resubmitting the same history does not generate again. This verifies
 replay protection; it does not fix the text generator.
+
+**Offline web-contract fixes, October 24:** an authorized Harness catalog
+upgrade now sends the new system instruction and complete schemas once, including
+in compact mode. Every mode sends the current `tool_choice`; `auto` explicitly
+replaces the preceding reply's tool-selection policy. Verification covered 219
+tests and 35 pinned archived cases through the parser and API paths, with network
+access denied. These fixes prevent lost request constraints; they **do not repair
+the confirmed parameter damage in the latest DeepSeek response**. No account or
+working history was used for the test run.
+[Evidence and the remaining limitation](docs/WEB-CONTRACT.2026-10-24.md).
+
 For API-key users, the separate [official Harness route](#official-deepseek-api-in-harness-optional)
 completed a live native-tool task with all four tests passing.
 On October 24, the resumed installer-development goal also completed: its final
@@ -499,11 +510,13 @@ for example, checking CI that was previously `pending` again. An empty message d
 not clear this check. Replaying an already consumed history still fails before any
 provider request. Verified offline.
 
-The tool result the agent returns (for example the option you picked) goes to the
-provider as just `Tool result (name): <result JSON>`. It carries no tools reminder
-(`TOOL_INSTRUCTIONS_BROWSER` still applies to ordinary user messages), no repeated
-question or call and no bridge call id; results of several calls to the same tool keep
-the identifier mapping. Invalid-call outcome follows `TOOLCALL_INVALID_MODE` (above).
+In compact browser mode, an agent's tool result (for example the option you picked)
+is sent as `Tool result (name id="..."): <result>`. IDs retain result binding;
+multiple calls to the same tool also receive an exact call mapping. Complete schemas
+are normally omitted, but the current `tool_choice` follows the result even in
+`none` mode. `auto` explicitly replaces an earlier per-reply selection; task
+constraints and schema validation remain enforced. An authorized catalog upgrade
+sends complete schemas once. Invalid-call outcome follows `TOOLCALL_INVALID_MODE` (above).
 Verified offline.
 
 For DeepSeek, disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;
@@ -844,7 +857,11 @@ The command only reads the local DeepSeek session and scopes the upgrade to its
 account and the selected model; it does not sign in or contact the provider.
 
 The bridge verifies the full old history and tool results, then claims the
-**original** single-use link. It creates no extra replay ticket. New replies are
+**original** single-use link. It creates no extra replay ticket. That request
+sends complete current schemas and, if changed, the exact new leading system
+instruction. Compact mode and `none` cannot hide the contract upgrade. The next
+reply binds to the new contract; ordinary continuations do not resend prior work.
+New replies are
 validated against current schemas. Unregistered changes, ambiguous parents,
 consumed links and previously attempted migrations remain closed. Upgrading
 schemas does not reset conversation limits, rolling budgets or migration journals,

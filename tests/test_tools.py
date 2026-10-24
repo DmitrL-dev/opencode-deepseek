@@ -410,14 +410,17 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertIn("Tools remain available from earlier in this chat", browser_follow)
         self.assertIn("Available tools, given as JSON Schema", http_follow)
 
-    def test_browser_tool_result_continuation_sends_only_the_result(self):
+    def test_browser_tool_result_continuation_sends_result_and_current_policy(self):
         tools = [{"type": "function", "function": {"name": "write", "parameters": {"type": "object"}}}]
         result = ChatMessage(role="tool", tool_call_id="call_1", name="write", content='{"ok": true}')
         for mode in ("full", "medium", "light", "none"):
             with self.subTest(mode=mode):
                 sent = messages_to_prompt([result], tools=tools, tools_continuation=True,
                                           tool_instructions=mode, tool_results_compact=True)
-                self.assertEqual(sent, 'Tool result (write id="call_1"): {"ok": true}')
+                self.assertEqual(sent, 'Tool result (write id="call_1"): {"ok": true}\n\n'
+                    'Developer: Tool selection for this reply is automatic; decide from the current '
+                    'task and observed results whether to call tools or answer in plain text. '
+                    'Earlier per-reply tool choices do not apply.')
         # The reminder stays for a plain user message, and nothing changes without the flag.
         user = messages_to_prompt([ChatMessage(role="user", content="again")], tools=tools,
                                   tools_continuation=True, tool_instructions="light",

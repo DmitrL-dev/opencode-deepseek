@@ -185,6 +185,7 @@ class ConversationCache:
             trace_path = new_toolcall_log(model_provider(req.model))
         with self.connection() as db:
             record_toolcall_log(trace_path, 'search_chat', search)
+            prior_contract = None
             row = db.execute('SELECT cid, used, steps FROM links WHERE key=?', (key,)).fetchone()
             # A namespace upgrade must not orphan histories stored before it.
             # The legacy link is claimed exactly like a current one.
@@ -206,20 +207,20 @@ class ConversationCache:
                 # an explicit exact pair. Account, model, flags and every other
                 # message/argument/call ID stay identical under the normal
                 # digest. Claim the OLD row, never mint an alias.
-                matches = {key: row} if row is not None else {}
+                matches = {key: (row, None)} if row is not None else {}
                 try:
                     for old in conversation_schemas.candidates(db, req, identity):
                         old_key = self.key(old, old.messages[:end], identity)
                         old_row = db.execute('SELECT cid, used, steps FROM links WHERE key=?',
                                              (old_key,)).fetchone()
                         if old_row is not None:
-                            matches[old_key] = old_row
+                            matches[old_key] = (old_row, old)
                 except (ValueError, TypeError) as exc:
                     raise ConversationStateError('Local schema upgrade unavailable; no request sent.') from exc
                 if len(matches) > 1:
                     raise ConversationStateError('Ambiguous schema upgrade history; no request sent.')
                 if matches:
-                    key, row = next(iter(matches.items()))
+                    key, (row, prior_contract) = next(iter(matches.items()))
             if not row:
                 raise ConversationStateError('History is unknown; automatic replay and new-chat fallback are disabled.')
             if row[1]:
@@ -265,7 +266,15 @@ class ConversationCache:
             tail = [ChatMessage(role='assistant',
                      content='Previously requested calls: identifier mapping for the following results.',
                      tool_calls=[calls[cid] for cid in result_ids]), *tail]
-        return req.model_copy(update={'conversation_id': row[0], 'messages': tail}), row[2]
+        if (prior_contract is not None and req.messages[0].role == 'system'
+                and req.messages[0] != prior_contract.messages[0]):
+            # The exact pair was authorized for history matching. The provider
+            # must also see the NEW host instruction, not silently retain the old
+            # one. Send it once with the tail; never replay the preceding work.
+            tail = [req.messages[0], *tail]
+        prepared = req.model_copy(update={'conversation_id': row[0], 'messages': tail})
+        prepared._tool_contract_refresh = prior_contract is not None
+        return prepared, row[2]
 
     def release(self, claim):
         if not claim:

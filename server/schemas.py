@@ -49,6 +49,9 @@ class ChatMessage(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     _toolcall_log_path: object = PrivateAttr(default=None)
+    # Set only after claiming an explicitly authorized catalog upgrade. This
+    # transport hint is neither client input nor part of durable history hashes.
+    _tool_contract_refresh: bool = PrivateAttr(default=False)
 
     model: str = DEFAULT_MODEL
     messages: List[ChatMessage]

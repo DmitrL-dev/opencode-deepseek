@@ -104,3 +104,31 @@ class PromptContractTests(unittest.TestCase):
             self.assertNotIn('```tool_calls', prompt)
             self.assertNotIn('Current response wire format', prompt)
             self.assertIn('exact result', prompt)
+
+    def test_continuation_policy_is_delivered_even_without_a_schema_reminder(self):
+        result = ChatMessage(role='tool', tool_call_id='call_saved', name='bash', content='done')
+        choices = ((None, 'Tool selection for this reply is automatic'),
+                   ('auto', 'Tool selection for this reply is automatic'),
+                   ('none', 'Do NOT call any tools'),
+                   ('required', 'You MUST call one of the tools'),
+                   ({'type': 'function', 'function': {'name': 'bash'}},
+                    'You MUST call the tool `bash`'))
+        for protocol in ('json', 'dsml'):
+            for mode, compact in (('none', False), ('full', True), ('light', True)):
+                for choice, expected in choices:
+                    with self.subTest(protocol=protocol, mode=mode, compact=compact, choice=choice), \
+                            patch.object(config, 'DEEPSEEK_TOOL_PROTOCOL', protocol):
+                        prompt = messages_to_prompt([result], TOOLS, choice, provider='deepseek',
+                            tools_continuation=True, tool_instructions=mode,
+                            tool_results_compact=compact)
+                        self.assertIn(expected, prompt)
+                        self.assertGreater(prompt.index(expected), prompt.index('done'))
+                        self.assertNotIn('Available tools, given as JSON Schema', prompt)
+                        self.assertNotIn('ADVERTISED_TOOL_NAME', prompt)
+
+    def test_auto_overrides_previous_turn_policy_in_every_reminder_mode(self):
+        for mode in ('full', 'medium', 'light', 'none'):
+            with self.subTest(mode=mode):
+                prompt = messages_to_prompt([ChatMessage(role='user', content='Continue')],
+                    TOOLS, tools_continuation=True, tool_instructions=mode, provider='deepseek')
+                self.assertIn('Tool selection for this reply is automatic', prompt)

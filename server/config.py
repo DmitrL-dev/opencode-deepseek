@@ -35,7 +35,9 @@ def _tool_instructions_mode(name, default):
 #         (field names, nesting; no descriptions).
 # light — full block on the first provider-chat turn; short reminder afterward
 #         (recommended for browser tabs).
-# none  — like light on the first turn; no tools block on continuations.
+# none  — like light on the first turn; no schemas on continuations.
+# All modes send this reply's tool-choice policy. An explicitly authorized
+# catalog upgrade sends complete schemas once, even in compact browser mode.
 # HTTP (DeepSeek / Qwen API / Kimi direct / Gemini CLI) defaults to full.
 # Browser tab bridge defaults to light (smaller follow-up prompts).
 TOOL_INSTRUCTIONS_HTTP = _tool_instructions_mode("TOOL_INSTRUCTIONS_HTTP", "full")

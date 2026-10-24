@@ -211,10 +211,46 @@ class SchemaUpgradeTests(unittest.TestCase):
         self.assertEqual((prepared.conversation_id, steps), ('with-system:298', 200))
         self.assertEqual(prepared.tools, self.current)
         self.assertEqual(current.messages[0], new_system)
+        self.assertEqual(prepared.messages[0], new_system)
         old_request = current.model_copy(update={'tools': self.old,
             'messages': [old_system, *self.history]})
         with self.assertRaises(ConversationStateError):
             self.prepare(old_request, claim={})
+
+    def test_upgrade_sends_full_contract_even_when_reminders_are_disabled(self):
+        from server import api, config
+        from tests.support import isolated_access
+        isolated_access(self)
+        self.cache.max_replies = 1000
+        old_system = ChatMessage(role='system', content='Old exact host instruction')
+        new_system = ChatMessage(role='system', content='Current exact host instruction')
+        initial = self.initial.model_copy(update={'messages': [old_system, *self.initial.messages]})
+        self.cache.remember(initial, Reply('', 'upgrade:298'), '', self.calls, 8, scope=self.scope)
+        request = self.req.model_copy(update={'messages': [new_system, *self.history]})
+        register(self.cache, scope=self.scope, model=request.model, old=self.old, current=self.current,
+                 old_system=old_system.content, current_system=new_system.content)
+        before = request.model_dump()
+        with patch.object(api, 'conversation_cache', self.cache), \
+                patch.object(api, '_conversation_scope', return_value=self.scope), \
+                patch.object(api, 'get_client', return_value=Mock()), \
+                patch.object(config, 'TOOL_INSTRUCTIONS_HTTP', 'none'), \
+                patch.object(api, '_chat_with_retry', return_value=Reply('Done', 'upgrade:300')) as chat:
+            api._conversation_tool_chat('must be rebuilt', request, None)
+        chat.assert_called_once()
+        prompt, prepared, _ = chat.call_args.args
+        self.assertEqual(prepared.conversation_id, 'upgrade:298')
+        self.assertIn('System: ' + new_system.content, prompt)
+        self.assertNotIn(old_system.content, prompt)
+        for tool in self.current:
+            self.assertIn(json.dumps(tool['function']['parameters'], ensure_ascii=False), prompt)
+        self.assertIn('New Harness description', prompt)
+        self.assertEqual(request.model_dump(), before)
+        next_request = request.model_copy(update={'messages': [*request.messages,
+            ChatMessage(role='assistant', content='Done'), ChatMessage(role='user', content='Next')]})
+        prepared, steps = self.prepare(next_request, claim={})
+        self.assertEqual(steps, 10)
+        self.assertFalse(any(m.role == 'system' for m in prepared.messages))
+        self.assertFalse(prepared._tool_contract_refresh)
 
     def test_incomplete_system_pairs_cannot_authorize_changes(self):
         for kwargs in ({'old_system': 'old'}, {'current_system': 'new'},
@@ -223,6 +259,56 @@ class SchemaUpgradeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 register(self.cache, scope=self.scope, model=self.req.model,
                          old=self.old, current=self.current, **kwargs)
+
+    def test_catalog_only_upgrade_reaches_both_apis_and_transports_without_replay(self):
+        from server import api, config
+        from server.openai_format import ToolCallError
+        from tests.support import isolated_access
+        isolated_access(self)
+        for model in ('deepseek-expert', 'glm-web'):
+            for legacy in (True, False):
+                for mode in ('none', 'light', 'medium'):
+                    with self.subTest(model=model, legacy=legacy, mode=mode):
+                        cache = ConversationCache(Path(self.temp.name) / f'{model}-{legacy}-{mode}.db')
+                        initial = self.initial.model_copy(update={'model': model})
+                        cache.remember(initial, Reply('', 'fixture:2'), '', self.calls, 0, scope=self.scope)
+                        request = self.req.model_copy(update={'model': model})
+                        register(cache, scope=self.scope, model=model, old=self.old, current=self.current)
+                        with patch.object(api, 'conversation_cache', cache), \
+                                patch.object(api, '_conversation_scope', return_value=self.scope), \
+                                patch.object(api, 'get_client', return_value=Mock()), \
+                                patch.object(config, 'TOOL_INSTRUCTIONS_HTTP', mode), \
+                                patch.object(config, 'TOOL_INSTRUCTIONS_BROWSER', mode), \
+                                patch.object(api, '_LEGACY', legacy), \
+                                patch.object(api, '_chat_with_retry', return_value=Reply('Done', 'fixture:4')) as chat:
+                            api._conversation_tool_chat('rebuild this', request, None)
+                            chat.assert_called_once()
+                            prompt, prepared, _ = chat.call_args.args
+                            self.assertEqual(prepared.conversation_id, 'fixture:2')
+                            self.assertIn('New Harness description', prompt)
+                            for tool in self.current:
+                                self.assertIn(json.dumps(tool['function']['parameters'], ensure_ascii=False), prompt)
+                            self.assertNotIn('Explore fixture', prompt)
+                            # Neither the current nor the old catalog gets a new
+                            # ticket to redeliver the preceding result.
+                            for tools in (self.current, self.old):
+                                with self.assertRaisesRegex(ToolCallError, 'already consumed'):
+                                    api._conversation_tool_chat('', request.model_copy(update={'tools': tools}), None)
+                            chat.assert_called_once()
+                        with cache.connection() as db:
+                            self.assertEqual(sorted(db.execute('SELECT used, steps FROM links')),
+                                             [(0, 2), (1, 1)])
+
+    def test_client_cannot_request_a_contract_refresh_or_change_history_digest(self):
+        supplied = self.req.model_dump()
+        supplied['_tool_contract_refresh'] = True
+        request = ChatCompletionRequest.model_validate(supplied)
+        self.assertFalse(request._tool_contract_refresh)
+        self.assertNotIn('_tool_contract_refresh', request.model_dump())
+        self.authorize()
+        prepared, _ = self.prepare(claim={})
+        self.assertTrue(prepared._tool_contract_refresh)
+        self.assertNotIn('_tool_contract_refresh', prepared.model_dump())
 
     def test_uncertain_dispatch_remains_consumed_across_catalogs(self):
         from server import api

@@ -532,7 +532,9 @@ def _conversation_tool_chat(prompt, req, model_type):
             # Continuation of a saved provider chat: browser light mode may shorten tools.
             prompt = messages_to_prompt(
                 req.messages, req.tools, req.tool_choice,
-                tools_continuation=True, provider=provider, tool_results_compact=browser)
+                tools_continuation=True, provider=provider,
+                tool_instructions='full' if req._tool_contract_refresh else None,
+                tool_results_compact=browser and not req._tool_contract_refresh)
             model_type = None
         try:
             if not req.tools:
