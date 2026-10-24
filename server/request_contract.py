@@ -53,6 +53,16 @@ def restore(payload, receipt):
     return req
 
 
+def authorization_contract(req):
+    """Use the recovery receipt for authorization, excluding delivery mode only.
+
+    This is not a replay permit. The caller must also consume its durable ticket.
+    """
+    payload = request_payload(req)
+    payload.pop('stream', None)
+    return capture(ChatCompletionRequest.model_validate(payload))
+
+
 def record_dispatch(req, prompt, model_type, thinking):
     # The effective body is recorded immediately before client.chat(), not
     # reconstructed later from defaults after a reload or configuration change.

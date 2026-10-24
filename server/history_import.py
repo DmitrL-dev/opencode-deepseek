@@ -20,6 +20,7 @@ from .context_rollover import checkpoint
 from .openai_format import messages_to_prompt
 from .schemas import ChatMessage, ChatCompletionRequest
 from .tool_history import validate_tool_history
+from .request_contract import authorization_contract
 
 
 MAX_PROMPT = 131072
@@ -27,8 +28,9 @@ MAX_ARCHIVE = 16 * 1024 * 1024
 
 
 def request_key(req, scope):
-    # Streaming changes delivery only. Unlike a continuation link, authorization
-    # also binds tool_choice, sampling parameters and the output token limit.
+    # Stable anti-rearm identity, NOT proof of authorization. Preserve old keys
+    # so changing defaults cannot reopen an already consumed import. The stored
+    # contract separately binds field presence and effective transport settings.
     raw = json.dumps([scope, req.model_dump(exclude={'stream'}, exclude_none=True)],
                      sort_keys=True, ensure_ascii=False, separators=(',', ':'))
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -48,6 +50,10 @@ def _table(db):
                'key TEXT PRIMARY KEY, consumed INTEGER NOT NULL, created REAL NOT NULL, '
                'expires REAL NOT NULL, handoff_path TEXT NOT NULL, handoff_hash TEXT NOT NULL, '
                'archive_path TEXT NOT NULL, archive_hash TEXT NOT NULL)')
+    columns = {row[1] for row in db.execute('PRAGMA table_info(history_imports)')}
+    for column in ('contract_json', 'prompt_hash'):
+        if column not in columns:
+            db.execute(f'ALTER TABLE history_imports ADD COLUMN {column} TEXT')
 
 
 def _hash(data):
@@ -96,9 +102,12 @@ def authorize(cache, req, scope, root, *, source_provider, ttl_seconds=600):
             output.flush()
             os.fsync(output.fileno())
         now = time.time()
-        db.execute('INSERT INTO history_imports VALUES (?,0,?,?,?,?,?,?)',
+        db.execute('INSERT INTO history_imports '
+                   '(key,consumed,created,expires,handoff_path,handoff_hash,archive_path,archive_hash,contract_json,prompt_hash) '
+                   'VALUES (?,0,?,?,?,?,?,?,?,?)',
                    (key, now, now + ttl_seconds, filename, _hash(data), archive,
-                    _hash(Path(archive).read_bytes())))
+                    _hash(Path(archive).read_bytes()), json.dumps(authorization_contract(req), sort_keys=True),
+                    _hash(prompt.encode())))
     return {'key': key, 'archive': archive, 'expires_at': now + ttl_seconds,
             'prompt_bytes': len(prompt.encode()), 'network_requests': 0}
 
@@ -109,13 +118,19 @@ def claim(cache, req, scope):
     with cache.connection() as db:
         if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_imports'").fetchone():
             return None
+        columns = {row[1] for row in db.execute('PRAGMA table_info(history_imports)')}
+        if not {'contract_json', 'prompt_hash'} <= columns:
+            raise ConversationStateError('Legacy import has no verified request contract; no request sent.')
         row = db.execute('SELECT consumed,created,expires,handoff_path,handoff_hash,archive_path,archive_hash '
+                         ',contract_json,prompt_hash '
                          'FROM history_imports WHERE key=?', (key,)).fetchone()
         if row is None:
             return None
         now = time.time()
         if row[0] or not row[1] <= now < row[2]:
             raise ConversationStateError('History import is consumed or expired; no automatic replay.')
+        if row[7] != json.dumps(authorization_contract(req), sort_keys=True):
+            raise ConversationStateError('Import request contract changed or is unverified; no request sent.')
         _eligible(req)
         _read_private(row[5], row[6], MAX_ARCHIVE)
         text = _read_private(row[3], row[4], MAX_PROMPT).decode('utf-8')
@@ -124,6 +139,8 @@ def claim(cache, req, scope):
                                     tools_continuation=False, provider='deepseek')
         if len(prompt.encode()) > MAX_PROMPT:
             raise ConversationStateError('Import prompt exceeds the local limit; no request sent.')
+        if row[8] != _hash(prompt.encode()):
+            raise ConversationStateError('Import dispatch prompt changed; no request sent.')
         db.execute('UPDATE history_imports SET consumed=1 WHERE key=? AND consumed=0', (key,))
     return migrated, prompt
 

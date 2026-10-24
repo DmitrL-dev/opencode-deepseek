@@ -7,6 +7,7 @@ from deepseek.auth import write_private_json
 from .openai_format import ToolCallError, _text_of
 from .recovery_status import recovery_stopped
 from .schemas import ChatMessage
+from .request_contract import authorization_contract, request_payload
 
 
 class SavedTextRecovery:
@@ -38,6 +39,9 @@ class SavedTextRecovery:
                     or req.messages[end].role != 'user'
                     or _text_of(req.messages[end].content) != state['trigger']):
                 raise ToolCallError('Saved-text recovery is not authorized for this history.')
+            if (state.get('scope') != self.scope
+                    or state.get('request_contract') != authorization_contract(req)):
+                raise ToolCallError('Saved-text recovery contract changed or is unverified; no calls returned.')
             # Full schema validation happens BEFORE claiming the existing link.
             result = self.validate(Reply(state['reply'], None, 'stop'), req)
             if not result[2]:
@@ -49,7 +53,7 @@ class SavedTextRecovery:
             reply = Reply(reply.text, prepared.conversation_id, reply.finish_reason)
             state['phase'] = 'delivering'
             write_private_json(self.root / 'control.json', state)
-            write_private_json(self.root / 'request.json', req.model_dump())
+            write_private_json(self.root / 'request.json', request_payload(req))
             # No new upstream answer: carry the same CID and accepted-reply count.
             self.cache.remember(req, reply, content, calls, steps - 1, scope=self.scope)
             state.update(phase='delivered', expected_key=self.cache.key(req,

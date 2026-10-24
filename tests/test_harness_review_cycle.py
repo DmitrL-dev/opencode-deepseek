@@ -17,6 +17,24 @@ from server.request_contract import restore
 @unittest.skipUnless(os.getenv('RUN_HARNESS_FIXTURES') == '1', 'opt-in installed Harness fixture')
 class HarnessReviewCycleTests(unittest.TestCase):
     def test_read_write_partial_round_review_restart_and_acceptance(self):
+        self.run_cycle('json')
+
+    def test_dsml_read_write_partial_round_review_restart_and_acceptance(self):
+        self.run_cycle('dsml')
+
+    def run_cycle(self, protocol):
+        def wire(calls):
+            if protocol == 'json':
+                return block(calls)
+            parts = ['<｜DSML｜ calls>']
+            for call in calls:
+                parts.append(f'<｜DSML｜ invoke name="{call["name"]}">')
+                for name, value in call['arguments'].items():
+                    # JSON-valued DSML parameters preserve strings and types exactly.
+                    parts.append(f'<｜DSML｜ parameter name="{name}" string="false">'
+                                 + json.dumps(value) + '</｜DSML｜ parameter>')
+                parts.append('</｜DSML｜ invoke>')
+            return '\n'.join([*parts, '</｜DSML｜ calls>'])
         from tests.test_harness_runtime import HarnessRuntimeTests
         case=HarnessRuntimeTests('test_text_uses_one_streamed_request')
         self.addCleanup(case.doCleanups);case.setUp();case.install_shell_safety_fixture()
@@ -36,21 +54,21 @@ class HarnessReviewCycleTests(unittest.TestCase):
             self.assertTrue(args[2], 'effective thinking must survive the Harness route')
             self.assertNotIn('mark it complete once the objective is achieved',prompt)
             if step==1:
-                answer=block([{'name':'read','arguments':{'file_path':str(case.workspace/'fixture.txt')}}])
+                answer=wire([{'name':'read','arguments':{'file_path':str(case.workspace/'fixture.txt')}}])
             elif step==2:
                 self.assertIn('HARNESS_OWNED_FILE_73',prompt)
-                answer=block([{'name':'write','arguments':{'file_path':str(case.workspace/'report.md'),'content':'VERIFIED_FIXTURE\n'}}])
+                answer=wire([{'name':'write','arguments':{'file_path':str(case.workspace/'report.md'),'content':'VERIFIED_FIXTURE\n'}}])
             elif step==3:
-                answer=block([{'name':'read','arguments':{'file_path':str(case.workspace/'report.md')}}])
+                answer=wire([{'name':'read','arguments':{'file_path':str(case.workspace/'report.md')}}])
             elif step==4:
                 self.assertIn('VERIFIED_FIXTURE',prompt)
                 answer='The owned file is verified; independent review has not yet been requested.'
             elif step==5:
-                answer=block([{'name':'get_goal','arguments':{}}])
+                answer=wire([{'name':'get_goal','arguments':{}}])
             elif step==6:
                 result=[m for m in case.calls[-1]['messages'] if m['role']=='tool'][-1]
                 value=json.loads(result['content']);goal=value.get('goal',value)
-                answer=block([{'name':'request_goal_review','arguments':{'goal_id':goal['id'],
+                answer=wire([{'name':'request_goal_review','arguments':{'goal_id':goal['id'],
                     'revision':goal['revision'],'evidence':'Read the fixture, wrote report.md once and read back VERIFIED_FIXTURE.'}}])
             else:
                 self.assertIn('Awaiting independent operator review',prompt)
@@ -73,7 +91,7 @@ class HarnessReviewCycleTests(unittest.TestCase):
             reports.append(events)
             return next(e for e in events if e.get('type')=='fixture/end')
 
-        with patch.object(config,'DEEPSEEK_TOOL_THINKING',True), patch.object(api,'record_toolcall_log',side_effect=record), \
+        with patch.object(config,'DEEPSEEK_TOOL_PROTOCOL',protocol), patch.object(config,'DEEPSEEK_TOOL_THINKING',True), patch.object(api,'record_toolcall_log',side_effect=record), \
                 patch.object(api,'_FORMAT_REPAIR',False),patch.object(api,'_MAX_CONTINUATIONS',0):
             first=run()
             self.assertEqual(first['reason'],'awaiting_review')
@@ -102,7 +120,9 @@ class HarnessReviewCycleTests(unittest.TestCase):
                 elif direction=='request_contract':
                     restored=restore(request,content)
                     self.assertTrue(config.effective_thinking(restored));verified+=1
-                elif direction=='dispatch_contract':self.assertTrue(content['effective']['thinking'])
+                elif direction=='dispatch_contract':
+                    self.assertTrue(content['effective']['thinking'])
+                    self.assertEqual(content['effective']['tool_protocol'], protocol)
             self.assertEqual(verified,7)
             calls=[e['event']['data']['name'] for run_events in reports for e in run_events
                    if e.get('type')=='fixture/event' and e['event']['type']=='tool/call']

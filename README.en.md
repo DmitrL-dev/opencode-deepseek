@@ -34,6 +34,20 @@ not tested against live accounts in Harness, OpenCode or a browser.
 > restricted repeatedly, with the exact cause undetermined. A passing test does
 > not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
+**Authorization and recovery contract, offline:** history import and saved-answer
+delivery share a contract binding exact field presence, effective `thinking`,
+the tool protocol and schemas. Import also verifies the dispatch prompt hash.
+Contract changes stop the operation; legacy permits without verified provenance
+are rejected and never automatically rearmed. Existing history keys and consumed
+permits are preserved. Recovery keeps omitted parameters omitted; account,
+parameter or configuration changes do not authorize saved-answer delivery.
+The installed Harness lifecycle is now checked separately with DSML and JSON:
+read, one write, verification, acceptance and restarts. This uses a local fixture
+provider, not a live generation reliability test. The fixes have been applied
+to the running bridge and the bridge restarted; local `/healthz` responds.
+History, counters, pauses and the Harness profile are byte-for-byte unchanged.
+The goal was not resumed and no account requests were made.
+
 **Current status, October 24:** request provenance and the independent goal
 review handoff were fixed offline (`harness-contract-v8`). Logging no longer
 turns omitted `thinking` into explicit `false`; a separate receipt records the
@@ -50,6 +64,15 @@ ran 997 tests with 68 skips and no failures. Original history, counters and paus
 were preserved; the goal was not continued. Harness appended only session-load
 lifecycle and local status-command events.
 [Request provenance and goal review](docs/HARNESS.en.md#request-provenance-and-goal-review-v8).
+
+**Subsequent v8 live check:** one explicitly authorized retry from response #36
+received #42 with confirmed `thinking=true`. The complete saved stream
+(`finish_reason=stop`) already contains a malformed parameter closing tag:
+`</｜｜DSML｜｜DSML｜ parameter>`. The entire batch was rejected, no tools executed,
+and no further retry occurred. Parameter preservation worked, but DSML output
+reliability remains unresolved. The goal is stopped; old history and pause were
+preserved, and counters recorded one generation and one HTTP request. No paid
+API was used.
 
 **October 23 live check:** a fresh Harness session stopped at step four on
 October 23 because malformed DSML parameters were already present in DeepSeek's

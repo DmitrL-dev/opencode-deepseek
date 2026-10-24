@@ -127,8 +127,10 @@ class HarnessRuntimeTests(unittest.TestCase):
                                + value + '</｜DSML｜ parameter>\n')
             invocation += '</｜DSML｜ invoke>\n'
             if step == 4:
+                # Shorthand parameter names are supported with explicit schemas.
+                # An unknown string/type flag cannot be normalized or inferred.
                 invocation += ('<｜DSML｜ invoke name="read">\n'
-                               '<｜DSML｜ file_path" string="true">PRIVATE_DAMAGED_TARGET'
+                               '<｜DSML｜ parameter name="file_path" string="unknown">PRIVATE_DAMAGED_TARGET'
                                '</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n')
             answer = '<｜DSML｜ calls>\n' + invocation + '</｜DSML｜ calls>'
             if step == 4:

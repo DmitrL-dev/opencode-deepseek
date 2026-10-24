@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from chat_protocol import Reply
 from providers.access import current_attempt, ProviderRejected
-from server import api
+from server import api, config
 from server.conversation_cache import ConversationStateError
 from server.history_import import authorize, claim, request_key, validate_new_calls, main
 from server.schemas import ChatCompletionRequest, ChatMessage
@@ -108,6 +108,72 @@ class HistoryImportTests(unittest.TestCase):
             result = self.run_request()
         self.assertEqual(result[2][0]['function']['name'], 'read')
         self.assertEqual(self.client.chat.call_count, 1)
+
+    def test_omitted_thinking_cannot_be_claimed_as_explicit_false(self):
+        for default in (True, False):
+            with self.subTest(default=default), patch.object(config, 'DEEPSEEK_TOOL_THINKING', default):
+                req = self.req.model_copy(update={'user': str(default)})
+                self.authorize(req)
+                changed = req.model_copy(update={'thinking': False})
+                with self.assertRaisesRegex(ConversationStateError, 'contract'):
+                    claim(self.cache, changed, 'isolated')
+                self.assertIsNotNone(claim(self.cache, req, 'isolated'))
+                with self.assertRaisesRegex(ConversationStateError, 'consumed'):
+                    claim(self.cache, changed, 'isolated')
+        self.assert_old_state()
+
+    def test_effective_settings_change_cannot_claim_or_rearm(self):
+        self.authorize()
+        for name, value in [('DEEPSEEK_TOOL_THINKING', True), ('DEEPSEEK_TOOL_PROTOCOL', 'dsml'),
+                            ('TOOL_INSTRUCTIONS_HTTP', 'light')]:
+            with self.subTest(setting=name), patch.object(config, name, value):
+                with self.assertRaisesRegex(ConversationStateError, 'contract'):
+                    claim(self.cache, self.req, 'isolated')
+                with self.assertRaisesRegex(ConversationStateError, 'cannot be rearmed'):
+                    self.authorize()
+        self.assertIsNotNone(claim(self.cache, self.req, 'isolated'))
+
+    def test_legacy_ticket_is_not_upgraded_or_rearmed(self):
+        self.authorize()
+        with self.cache.connection() as db:
+            db.execute('UPDATE history_imports SET contract_json=NULL,prompt_hash=NULL')
+        with self.assertRaisesRegex(ConversationStateError, 'unverified'):
+            claim(self.cache, self.req, 'isolated')
+        with self.assertRaisesRegex(ConversationStateError, 'cannot be rearmed'):
+            self.authorize()
+        self.assert_old_state()
+
+    def test_prompt_drift_stops_without_consuming_or_dispatch(self):
+        self.authorize()
+        from server.history_import import messages_to_prompt
+        with patch('server.history_import.messages_to_prompt', side_effect=lambda *a, **k: messages_to_prompt(*a, **k) + '\nchanged'):
+            with self.assertRaisesRegex(ConversationStateError, 'dispatch prompt changed'):
+                claim(self.cache, self.req, 'isolated')
+        self.assertIsNotNone(claim(self.cache, self.req, 'isolated'))
+        self.client.chat.assert_not_called()
+
+    def test_old_table_upgrade_keeps_legacy_ticket_unusable(self):
+        self.authorize()
+        with self.cache.connection() as db:
+            db.execute('ALTER TABLE history_imports RENAME TO imported_new')
+            db.execute('CREATE TABLE history_imports AS SELECT key,consumed,created,expires,'
+                       'handoff_path,handoff_hash,archive_path,archive_hash FROM imported_new')
+            db.execute('DROP TABLE imported_new')
+            before = db.execute('SELECT * FROM history_imports').fetchone()
+        with self.assertRaisesRegex(ConversationStateError, 'Legacy'):
+            claim(self.cache, self.req, 'isolated')
+        other = self.req.model_copy(update={'user': 'separate-reviewed-request'})
+        self.authorize(other)
+        with self.assertRaisesRegex(ConversationStateError, 'unverified'):
+            claim(self.cache, self.req, 'isolated')
+        with self.assertRaisesRegex(ConversationStateError, 'cannot be rearmed'):
+            self.authorize()
+        self.assertIsNotNone(claim(self.cache, other, 'isolated'))
+        with self.cache.connection() as db:
+            after = db.execute('SELECT * FROM history_imports WHERE key=?', (before[0],)).fetchone()
+        self.assertEqual(after[:8], before)
+        self.assertEqual(after[8:], (None, None))
+        self.assert_old_state()
 
     def test_repeated_action_rejects_whole_batch_without_new_binding(self):
         self.authorize()
