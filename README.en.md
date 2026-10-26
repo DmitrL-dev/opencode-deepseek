@@ -34,6 +34,16 @@ not tested against live accounts in Harness, OpenCode or a browser.
 > restricted repeatedly, with the exact cause undetermined. A passing test does
 > not guarantee the next task. [Account safety](docs/ACCOUNT_SAFETY.md).
 
+**Current status, October 26:** tool-call handling now uses one path for every
+provider; the temporary `TOOLCALL_LEGACY` switch and the second path are removed.
+Live traces from October 23–24 (`DEEPSEEK_TOOL_PROTOCOL=dsml`): 27 of 39 model
+steps succeeded (69%); almost every failure was damaged tool-call markup. The web
+bridge is therefore meant for work with a human in the loop, not for long
+autonomous goals; see [Operating the web bridge](#operating-the-web-bridge).
+Measure reliability with `python -m server.trace_report logs`. The working bridge
+runs with `TOOLCALL_FORMAT_REPAIR=1` (one format correction at the cost of an
+extra generation); its effect on live accounts is not yet measured.
+
 **Authorization and recovery contract, offline:** history import and saved-answer
 delivery share a contract binding exact field presence, effective `thinking`,
 the tool protocol and schemas. Import also verifies the dispatch prompt hash.
@@ -48,7 +58,7 @@ to the running bridge and the bridge restarted; local `/healthz` responds.
 History, counters, pauses and the Harness profile are byte-for-byte unchanged.
 The goal was not resumed and no account requests were made.
 
-**Current status, October 24:** request provenance and the independent goal
+**Status, October 24:** request provenance and the independent goal
 review handoff were fixed offline (`harness-contract-v8`). Logging no longer
 turns omitted `thinking` into explicit `false`; a separate receipt records the
 effective dispatch settings. `request_goal_review` disarms automatic continuation
