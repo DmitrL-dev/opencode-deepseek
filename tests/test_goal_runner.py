@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -23,7 +24,15 @@ state.write_text(json.dumps(calls))
 with open(os.environ['FAKE_BRIDGE_LOG'], 'a') as log:
     log.write('[toolcalls] format_correction=requested\n')
 end = json.loads(os.environ['FAKE_ENDS'])[len(calls) - 1]
-print(json.dumps({'type': 'session', 'sessionId': 'session-fake'}))
+print(json.dumps({'type': 'session', 'sessionId': 'session-fake'}), flush=True)
+if os.environ.get('FAKE_BACKGROUND'):
+    import subprocess
+    subprocess.Popen(['/bin/sh', '-c', 'sleep 2; echo late > ' + os.environ['FAKE_LATE']])
+if end['kind'] == 'hang':
+    # A tool command that would keep changing the project after its parent died.
+    import subprocess, time
+    subprocess.Popen(['/bin/sh', '-c', 'sleep 2; echo late > ' + os.environ['FAKE_LATE']])
+    time.sleep(30)
 print(json.dumps({'type': 'tool_call', 'tool': 'read'}))
 print(json.dumps({'type': 'tool_result', 'status': 'completed'}))
 print(json.dumps({'type': 'status', 'phase': 'step_end'}))
@@ -56,7 +65,8 @@ class GoalRunnerTests(unittest.TestCase):
 
     def run_goal(self, ends, max_resumes=2, **kwargs):
         with patch.dict(os.environ, {'FAKE_STATE': str(self.state), 'FAKE_ENDS': json.dumps(ends),
-                                     'FAKE_BRIDGE_LOG': str(self.bridge_log)}):
+                                     'FAKE_BRIDGE_LOG': str(self.bridge_log),
+                                     'FAKE_LATE': str(self.work / 'late.txt')}):
             return goal_runner.run('Implement SPEC.md', self.work, dsh=str(self.dsh),
                                    max_resumes=max_resumes, base_url='http://127.0.0.1:1/v1',
                                    model='deepseek-expert', runs_root=self.root / 'runs',
@@ -115,6 +125,52 @@ class GoalRunnerTests(unittest.TestCase):
         self.assertIn('--session-id', call['argv'])
         self.assertTrue((run_dir / 'events-2.jsonl').exists())
         self.assertFalse((run_dir / 'bridge.patch.yml').exists())
+
+    def test_timeout_stops_every_process_started_by_harness(self):
+        result = self.run_goal([{'kind': 'hang'}], attempt_timeout=2)
+        self.assertEqual((result['status'], result['resumes']), ('timeout', 0))
+        time.sleep(3)
+        self.assertFalse((self.work / 'late.txt').exists())
+
+    def test_interrupt_stops_the_tree_and_keeps_a_continuable_summary(self):
+        real_wait = goal_runner._wait
+
+        def interrupted(proc, timeout):
+            time.sleep(1)
+            raise KeyboardInterrupt
+        with patch.object(goal_runner, '_wait', side_effect=interrupted):
+            result = self.run_goal([{'kind': 'hang'}])
+        self.assertIs(goal_runner._wait, real_wait)
+        self.assertEqual(result['status'], 'interrupted')
+        self.assertEqual(result['session'], 'session-fake')
+        summary = json.loads((Path(result['run_dir']) / 'summary.json').read_text())
+        self.assertEqual(summary['session'], 'session-fake')
+        self.assertFalse((Path(result['run_dir']) / 'bridge.patch.yml').exists())
+        time.sleep(3)
+        self.assertFalse((self.work / 'late.txt').exists())
+
+    def test_continue_with_a_broken_summary_is_a_clean_error(self):
+        run_dir = self.root / 'runs' / 'broken'
+        run_dir.mkdir(parents=True)
+        for content in ('{"session": "session-fake"}', 'not json', '[]'):
+            (run_dir / 'summary.json').write_text(content)
+            with self.subTest(content=content), self.assertRaises(SystemExit) as stop, \
+                    patch('sys.stderr'):
+                goal_runner.main(['--continue', str(run_dir), '--dsh', str(self.dsh)])
+            self.assertEqual(stop.exception.code, 2)
+        self.assertFalse(self.state.exists())
+
+    def test_background_commands_do_not_outlive_a_finished_run(self):
+        os.environ['FAKE_BACKGROUND'] = '1'
+        self.addCleanup(os.environ.pop, 'FAKE_BACKGROUND')
+        result = self.run_goal([{'kind': 'completed'}])
+        self.assertEqual(result['status'], 'completed')
+        time.sleep(3)
+        self.assertFalse((self.work / 'late.txt').exists())
+
+    def test_test_rule_applies_only_to_python_unittest_projects(self):
+        self.assertIn('Python unittest', goal_runner.TEST_RULE)
+        self.assertIn('other test runners', goal_runner.TEST_RULE)
 
 
 if __name__ == '__main__':

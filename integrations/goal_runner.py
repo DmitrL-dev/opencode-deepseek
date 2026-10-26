@@ -14,6 +14,7 @@ Goal acceptance remains manual; --continue resumes a stopped run after review.
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,10 +26,12 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DSH = '/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh'
 BRIDGE_LOG = ROOT / 'session' / 'harness-bridge.log'
 RESUMABLE = frozenset({'model_format', 'model_schema', 'model_incomplete'})
-TEST_RULE = ('Run tests only with `bridge_unittest python3 discover -s tests` or '
-             '`bridge_unittest python3 -v tests.test_module`: the arguments after the interpreter '
-             'go to unittest, never add `-m unittest`. Failing assertions are reported for repair; '
-             'a test error, an import error or any other failing shell command stops the task.')
+TEST_RULE = ('Any failing shell command stops the task. For Python unittest suites, run tests '
+             'only with `bridge_unittest python3 discover -s tests` or '
+             '`bridge_unittest python3 -v tests.test_module` (use the project virtualenv python '
+             'if it has one): the arguments after the interpreter go to unittest, never add '
+             '`-m unittest`. It reports failing assertions for repair; test errors and import '
+             'errors still stop the task. With other test runners a failing run stops the task.')
 RESUME = ('Continue the same task from where it stopped. Your previous reply was not '
           'executed because its tool call was invalid; nothing from it ran. ' + TEST_RULE)
 
@@ -81,6 +84,33 @@ def stop_category(end):
     return 'unknown'
 
 
+def _wait(proc, timeout):
+    """Exit code, or None after a timeout."""
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+def _stop_tree(proc):
+    """Stop dsh and every command left in its process group, even after dsh exits."""
+    # macOS reports EPERM instead of ESRCH for a group of exiting processes.
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        proc.wait()
+        return  # the group is empty
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    proc.wait()
+
+
 def _log_offset(bridge_log):
     try:
         return Path(bridge_log).stat().st_size
@@ -131,15 +161,24 @@ def run(task, workdir, *, dsh, max_resumes, base_url, model, runs_root=None, att
             command = [dsh, '--profile', 'headless', '--patch', str(overlay), '--json']
             if session:
                 command += ['--session-id', session]
+            interrupted = False
             with events.open('wb') as out, (run_dir / 'stderr.log').open('ab') as err:
+                # A new session gives dsh its own process group, so a timeout
+                # or Ctrl-C can stop the tool commands it started as well.
+                proc = subprocess.Popen(command + [prompt], cwd=workdir, env=env, stdout=out,
+                                        stderr=err, start_new_session=True)
                 try:
-                    code = subprocess.run(command + [prompt], cwd=workdir, env=env, stdout=out,
-                                          stderr=err, timeout=attempt_timeout).returncode
-                except subprocess.TimeoutExpired:
-                    code = None
+                    code = _wait(proc, attempt_timeout)
+                except KeyboardInterrupt:
+                    code, interrupted = None, True
+                finally:
+                    _stop_tree(proc)
             summary = read_events(events)
             session = summary['session'] or session
-            category = 'timeout' if code is None else stop_category(summary['end'])
+            if interrupted:
+                category = 'interrupted'
+            else:
+                category = 'timeout' if code is None else stop_category(summary['end'])
             attempts.append({'exit': code, 'stop': category, 'steps': summary['steps'],
                              'tools': dict(summary['tools']), 'final': summary['final']})
             if category in RESUMABLE and len(attempts) <= max_resumes and session:
@@ -181,7 +220,8 @@ def main(argv=None):
     try:
         if args.resume:
             previous = json.loads((args.resume / 'summary.json').read_text())
-            if not previous.get('session'):
+            if (not isinstance(previous, dict) or not isinstance(previous.get('session'), str)
+                    or not isinstance(previous.get('workdir'), str)):
                 parser.error('that run has no Harness session to continue')
             result = run(task.strip() or 'Continue the task.', Path(previous['workdir']),
                          model=previous.get('model', args.model), run_dir=args.resume,

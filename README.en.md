@@ -919,9 +919,11 @@ bin/ds-goal --continue session/goal-runs/<run> "Fix the failing test and finish"
 `venv/bin/python` in the repository root. Each run gets its own Harness home in
 `session/goal-runs/`: the bridge route, shell safety and no subagents. The
 `desktop` profile is unchanged; the file holding the bridge token is removed after
-the run. The task gets a rule to run tests with `bridge_unittest python3 discover -s tests`:
-failing assertions go back to the model for repair, while import errors and other
-failing commands stop the task.
+the run. The task gets a rule: any failing command stops the task, and Python
+unittest suites run through `bridge_unittest python3 discover -s tests`, so failing
+assertions go back to the model for repair; import errors still stop it. After
+the run, a timeout (`--timeout`) or Ctrl-C, every command Harness started is
+stopped as well, background ones included.
 
 Only a stop caused by the model's own reply (format, schema, unfinished reply) is
 resumed automatically — with a new "continue" message in the same session, never
@@ -929,7 +931,9 @@ by replaying a stored reply, at most `--max-resumes` times (default 2). Each res
 is an extra account request. Shell safety, budget, pause and history stops are not
 resumed: review the project and continue with `--continue`. At the end a summary
 prints the status, resume and format-correction counts, model steps and their
-success rate; the full summary is the run's `summary.json`.
+success rate; the full summary is the run's `summary.json`. Corrections and steps
+are counted across the whole bridge during the run, so concurrent work in another
+client lands in the same numbers.
 Verified offline against a fake Harness and on a live account on October 26: a
 four-stage task finished after one manual `--continue`, and its tests pass.
 
