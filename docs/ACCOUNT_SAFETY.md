@@ -144,11 +144,18 @@ local refusal behavior, not that live website automation is permitted or safe.
 ## DeepSeek load containment and conversation reuse
 
 The October 10 account restriction showed that bounded task success did not
-establish account safety. Keep `TOOLCALL_FORMAT_REPAIR=0` and
-`TOOLCALL_MAX_CONTINUATIONS=0`: format errors
+establish account safety. The conservative setting is `TOOLCALL_FORMAT_REPAIR=0`
+and `TOOLCALL_MAX_CONTINUATIONS=0`: format errors
 stop locally, with no additional model generation and no soft notice path. The
 following changes are qualified using offline transports and an isolated Harness
 CLI, not by further requests to the restricted account.
+
+Two explicit opt-ins trade extra account requests for fewer stops. Since October 26
+the working bridge runs with `TOOLCALL_FORMAT_REPAIR=1` by operator choice: one
+format correction per invalid reply. `bin/ds-goal` adds at most `--max-resumes`
+(default 2) "continue" messages after a stop caused by the model's own reply; it
+never resumes shell, budget, pause or history stops and never replays a stored
+reply. Use `--max-resumes 0` to keep a run stop-only.
 
 Stateless OpenAI clients continue a saved provider conversation when their
 non-system history matches a delivered reply. This applies to DeepSeek and to

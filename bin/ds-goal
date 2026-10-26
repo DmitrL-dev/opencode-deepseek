@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Run one Harness task headless through the local bridge, with bounded resumes.
+# Install once:  mkdir -p ~/bin && ln -sf "$(pwd)/bin/ds-goal" ~/bin/ds-goal
+#   ds-goal --dir ~/work/project "Implement SPEC.md"
+#   ds-goal --continue session/goal-runs/RUN "Fix the failing test and finish"
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  SOURCE_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  if [[ "$SOURCE" != /* ]]; then
+    SOURCE="$SOURCE_DIR/$SOURCE"
+  fi
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+PY="${DS_GOAL_PYTHON:-$ROOT/venv/bin/python}"
+if [ ! -x "$PY" ]; then
+  echo "No bridge Python at $PY; set DS_GOAL_PYTHON to the bridge virtualenv python." >&2
+  exit 2
+fi
+PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}" exec "$PY" -m integrations.goal_runner "$@"

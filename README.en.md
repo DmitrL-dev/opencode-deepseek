@@ -906,6 +906,33 @@ as model steps. Traces from October 23–24 (`DEEPSEEK_TOOL_PROTOCOL=dsml`): 27 
 is small and has no `json` data for that period. At this rate a 10-step goal
 finishes without a stop about 2.5% of the time.
 
+#### One-command tasks: `ds-goal`
+
+`bin/ds-goal` runs one Harness task headless and resumes it after a format failure:
+
+```bash
+DS_GOAL_PYTHON=/path/to/venv/bin/python bin/ds-goal --dir ~/work/project "Implement SPEC.md"
+bin/ds-goal --continue session/goal-runs/<run> "Fix the failing test and finish"
+```
+
+`DS_GOAL_PYTHON` is the bridge environment's interpreter; it defaults to
+`venv/bin/python` in the repository root. Each run gets its own Harness home in
+`session/goal-runs/`: the bridge route, shell safety and no subagents. The
+`desktop` profile is unchanged; the file holding the bridge token is removed after
+the run. The task gets a rule to run tests with `bridge_unittest python3 discover -s tests`:
+failing assertions go back to the model for repair, while import errors and other
+failing commands stop the task.
+
+Only a stop caused by the model's own reply (format, schema, unfinished reply) is
+resumed automatically — with a new "continue" message in the same session, never
+by replaying a stored reply, at most `--max-resumes` times (default 2). Each resume
+is an extra account request. Shell safety, budget, pause and history stops are not
+resumed: review the project and continue with `--continue`. At the end a summary
+prints the status, resume and format-correction counts, model steps and their
+success rate; the full summary is the run's `summary.json`.
+Verified offline against a fake Harness and on a live account on October 26: a
+four-stage task finished after one manual `--continue`, and its tests pass.
+
 ### If Harness stops
 
 | Message / symptom | Check |

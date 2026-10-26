@@ -91,7 +91,11 @@ def classify(body):
         return {'tool_calls': 'calls', 'stop': 'text'}.get(finish, 'unknown')
     if error.get('type') != 'invalid_tool_response':
         return 'request_refused'
-    message = str(error.get('message') or '')
+    return error_category(str(error.get('message') or ''))
+
+
+def error_category(message):
+    """Who produced an invalid_tool_response: model_* or bridge_state."""
     if message.startswith(_REPAIR_FAILED):
         # The bridge prefixes the corrected reply's own error: classify that.
         message = message[len(_REPAIR_FAILED):]
@@ -105,9 +109,12 @@ def classify(body):
     return 'bridge_state'
 
 
-def report(log_dir):
+def report(log_dir, since=None):
+    """Summarize traces; with ``since`` (epoch seconds) only newer files."""
     days, total = {}, Counter()
     for path in sorted(Path(log_dir).glob('*.log')):
+        if since is not None and path.stat().st_mtime < since:
+            continue
         day = path.name[:4] if path.name[:4].isdigit() else 'unknown'
         for body in _responses(path.read_text(encoding='utf-8', errors='replace')):
             outcome = classify(body)

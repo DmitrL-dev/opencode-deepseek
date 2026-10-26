@@ -26,7 +26,7 @@ jobs:
       - name: Load the real PoW WASM module
         run: python -c "from deepseek.pow import DeepSeekPow; DeepSeekPow()"
       - run: python -m unittest discover -s tests -t . -v
-      - run: bash -n ds bin/ds-chat
+      - run: bash -n ds bin/ds-chat bin/ds-goal
       - run: node --check .opencode/plugin/deepseek-tool-discipline.js
       - run: node --check browser/opencode-controller.user.js && node --check browser/opencode-observer.user.js
       - name: Verify manual Safari session transfer offline
