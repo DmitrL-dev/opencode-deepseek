@@ -703,9 +703,9 @@ Replay a private corpus with reviewed expectations and pinned SHA-256 hashes:
 `python -m server.offline_corpus session/protocol-corpus.json`.
 This manifest is private, prepared during diagnostic review and not shipped in
 the repository; parser output alone must not establish the expected result.
-Each case can pin `protocol: "json" | "dsml"` and
-`implementation: "legacy" | "new"`. Missing fields preserve the original
-`json` / `legacy` policy, independently of `.env`. Pin immutable diagnostic
+Each case can pin `protocol: "json" | "dsml"`; without it `json` applies,
+independently of `.env`. The `implementation` field accepts only `legacy`: the
+second implementation no longer exists. Pin immutable diagnostic
 copies with SHA-256, rather than the overwritten `last-toolcall-error.json`.
 `matched_outcomes` separately counts accepted batches, plain text and expected
 refusals. A passing refusal check proves that a bad batch stops, not that a goal
@@ -870,6 +870,31 @@ rejected without execution. Prompt guidance does not guarantee model compliance.
 
 Verified offline against saved replies without another generation. The fix does
 not resume a stopped goal, replay an old reply, or reset history or counters.
+
+### Operating the web bridge
+
+The web bridge is meant for work with a human in the loop. Autonomous Harness
+goals on the web generator are unproven: DeepSeek periodically returns damaged
+tool-call markup, and such a step stops with `invalid_tool_response` without
+running tools. The bridge does not guess repairs and does not accept new damaged
+markup spellings (the rule is in [AGENTS.md](AGENTS.md)).
+
+Recommended mode:
+
+- short goals, with a human checking the result of each stage;
+- after a stop, check the state manually and continue with a new message;
+- `TOOLCALL_FORMAT_REPAIR=1` allows one format correction in the same
+  conversation at the cost of an extra generation on the account
+  (see [ACCOUNT_SAFETY](docs/ACCOUNT_SAFETY.md)); off by default.
+
+Reliability is measured from live traces. With `TOOLCALL_LOG=1`,
+`python -m server.trace_report logs` counts step outcomes offline and reports the
+share of successful model steps (`model_step_success`) per day; trace content is
+never printed. Bridge-state refusals and invalid client requests are not counted
+as model steps. Traces from October 23–24 (`DEEPSEEK_TOOL_PROTOCOL=dsml`): 27 of
+39 model steps succeeded (69%); 11 of 12 failures were damaged markup. The sample
+is small and has no `json` data for that period. At this rate a 10-step goal
+finishes without a stop about 2.5% of the time.
 
 ### If Harness stops
 
