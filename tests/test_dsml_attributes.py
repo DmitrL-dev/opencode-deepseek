@@ -5,12 +5,11 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.dsml import decode
 from server.openai_format import ToolCallError, _tool_json
 from server.schemas import ChatCompletionRequest
 from server.tool_protocol import validate_reply
-from server.tool_protocol_new import validate_reply as validate_new
 
 TOOLS = [{'function': {'name': 'read', 'parameters': {
     'type': 'object', 'properties': {'file_path': {'type': 'string'},
@@ -28,12 +27,12 @@ def batch(*records):
 
 class AttributeTests(unittest.TestCase):
     def parse(self, text, tools=TOOLS, **options):
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             with self.subTest(validator=validator.__module__):
                 yield validator(text, tools, allow_dsml_wrapper_tolerances=True, **options)
 
     def rejected(self, text, tools=TOOLS, **options):
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             with self.subTest(validator=validator.__module__), self.assertRaises(ToolCallError):
                 validator(text, tools, allow_dsml_wrapper_tolerances=True, **options)
 
@@ -104,7 +103,7 @@ class AttributeTests(unittest.TestCase):
             self.rejected(text)
 
     def test_provider_finish_opt_in_choice_and_quoted_examples(self):
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             with self.assertRaises(ToolCallError): validator(batch(), TOOLS)
         with self.assertRaises(ValueError): decode(batch(), _tool_json, allow_wrapper_tolerances=True)
         for options in ({'provider': 'qwen'}, {'finish_reason': 'length'}, {'finish_reason': None},
@@ -116,7 +115,7 @@ class AttributeTests(unittest.TestCase):
 
     def test_api_contracts_no_partial_delivery_or_regeneration(self):
         req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=TOOLS)
-        for validator, module in [(api._validate_tool_reply, api), (api_new.validate_tool_reply, api_new)]:
+        for validator, module in [(api._validate_tool_reply, api)]:
             with patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
                     patch.object(module, 'save_tool_failure') as saved, \
                     patch.object(api, '_chat_with_retry', side_effect=AssertionError('No generation')):

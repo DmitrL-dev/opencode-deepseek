@@ -1,9 +1,9 @@
-"""TOOLCALL_LEGACY=1 (api/tool_protocol) vs 0 (api_new/tool_protocol_new)."""
+"""Single tool pipeline (api/tool_protocol): strict, never demotes or notices."""
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest, ChatMessage
 from server.api import looks_truncated
@@ -39,71 +39,22 @@ class ToolLegacyApiTests(unittest.TestCase):
             model='claude-web', tools=[WRITE],
             messages=[ChatMessage(role='user', content='write')])
 
-    def chat(self, replies, *, legacy, invalid_mode='text'):
-        with patch.object(api, '_LEGACY', legacy), \
-                patch.object(api, '_FORMAT_REPAIR', False), \
-                patch.object(api_new, '_INVALID_MODE', invalid_mode), \
+    def chat(self, replies):
+        with patch.object(api, '_FORMAT_REPAIR', False), \
                 patch.object(api, '_chat_with_retry', side_effect=replies) as chat:
             return api._conversation_tool_chat('p', self.req, None), chat
 
-    def test_legacy_ignores_invalid_mode_text(self):
+    def test_invalid_reply_raises(self):
         bad = block([{"name": "write", "arguments": {"file_path": "/x"}}])
         with self.assertRaises(ToolCallError):
-            self.chat([Reply(bad, 'claude:1')], legacy=True, invalid_mode='text')
+            self.chat([Reply(bad, 'claude:1')])
 
-    def test_new_path_can_return_bridge_notice(self):
-        bad = block([{"name": "write", "arguments": {"file_path": "/x"}}])
-        (reply, content, calls), chat = self.chat(
-            [Reply(bad, 'claude:1')], legacy=False, invalid_mode='text')
-        self.assertEqual(chat.call_count, 1)
-        self.assertIsNone(calls)
-        self.assertIsNotNone(reply.bridge_notice)
-        self.assertIn('BRIDGE_TOOL_NOT_EXECUTED', content)
-
-    def test_legacy_mid_message_tool_fence_errors_without_demote(self):
+    def test_mid_message_tool_fence_errors_without_demote(self):
         advice = ('How to prompt:\n```tool_calls\n'
                   '[{"arguments": {"file_path": "/x"}}]\n```\nDone.')
         with self.assertRaises(ToolCallError) as ctx:
-            self.chat([Reply(advice, 'claude:1')], legacy=True)
+            self.chat([Reply(advice, 'claude:1')])
         self.assertIn('Unsupported tool-call markup', str(ctx.exception))
-
-    def test_new_path_demotes_advice(self):
-        advice = ('How to prompt:\n```tool_calls\n'
-                  '[{"arguments": {"file_path": "/x"}}]\n```\nDone.')
-        (_, content, calls), chat = self.chat([Reply(advice, 'claude:1')], legacy=False)
-        self.assertEqual(chat.call_count, 1)
-        self.assertIsNone(calls)
-        self.assertIn('```text', content)
-        self.assertNotIn('```tool_calls', content)
-
-    def test_new_path_exposes_ordered_parts_for_streaming(self):
-        first = block([{"name": "write", "arguments": {"file_path": "/a", "content": "a"}}])
-        second = block([{"name": "write", "arguments": {"file_path": "/b", "content": "b"}}])
-        text = 'text1\n' + first + '\ntext2\n' + second + '\ntext3'
-        (reply, content, calls), chat = self.chat([Reply(text, 'claude:1')], legacy=False)
-        self.assertEqual(chat.call_count, 1)
-        self.assertEqual(content, 'text1\n\ntext2\n\ntext3')
-        self.assertEqual(len(calls), 2)
-        self.assertEqual([part['type'] for part in reply.parts],
-                         ['text', 'tool_call', 'text', 'tool_call', 'text'])
-        self.assertEqual([part['text'] for part in reply.parts if part['type'] == 'text'],
-                         ['text1', 'text2', 'text3'])
-
-    def test_new_path_demotes_on_deepseek_too(self):
-        advice = ('How to prompt:\n```tool_calls\n'
-                  '[{"arguments": {"file_path": "/x"}}]\n```\nDone.')
-        req = self.req.model_copy(update={'model': 'deepseek-chat'})
-        fake = Mock()
-        with patch.object(api, '_LEGACY', False), \
-                patch.object(api, '_FORMAT_REPAIR', False), \
-                patch.object(api, 'get_client', return_value=fake), \
-                patch.object(api, '_chat_with_retry',
-                             side_effect=[Reply(advice, 'ds:1')]) as chat:
-            _, content, calls = api._conversation_tool_chat('p', req, None)
-        self.assertEqual(chat.call_count, 1)
-        self.assertIsNone(calls)
-        self.assertIn('```text', content)
-        self.assertNotIn('```tool_calls', content)
 
 
 if __name__ == '__main__':

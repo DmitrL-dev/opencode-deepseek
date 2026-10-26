@@ -4,11 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest
 from server.tool_protocol import validate_reply
-from server.tool_protocol_new import validate_reply as validate_new
 
 TOOLS = [{'function': {'name': 'fixture.save', 'parameters': {
     'type': 'object', 'properties': {'path': {'type': 'string'},
@@ -27,7 +26,7 @@ PACKET = '<｜DSML｜ calls>\n' + SAVE + '\n' + INSPECT + '\n</DSML｜ calls>'
 
 class DsmlNamedCloserTests(unittest.TestCase):
     def test_known_named_closers_preserve_all_values_and_empty_call(self):
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             with self.subTest(api=validate.__module__):
                 _, calls = validate(PACKET, TOOLS, allow_dsml_wrapper_tolerances=True)
                 self.assertEqual([c['function']['name'] for c in calls],
@@ -54,7 +53,7 @@ class DsmlNamedCloserTests(unittest.TestCase):
                PACKET.replace(TEXT, 'literal </DSML｜ invoke>'),
                PACKET.replace('name="path"', 'name="unknown"'),
                PACKET.replace('name="fixture.inspect"', 'name="unknown"')]
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             for text in bad:
                 with self.subTest(api=validate.__module__, text=text), self.assertRaises(ToolCallError):
                     validate(text, TOOLS, allow_dsml_wrapper_tolerances=True)
@@ -63,19 +62,19 @@ class DsmlNamedCloserTests(unittest.TestCase):
         for text in ('```xml\n' + PACKET + '\n```',
                      '\n'.join('> ' + line for line in PACKET.splitlines()),
                      '\n'.join('    ' + line for line in PACKET.splitlines())):
-            for validate in (validate_reply, validate_new):
+            for validate in (validate_reply,):
                 _, calls = validate(text, TOOLS, allow_dsml_wrapper_tolerances=True)
                 self.assertIsNone(calls)
         value = 'literal </DSML｜ invoke> and </DSML｜ calls>'
         encoded = json.dumps(value, ensure_ascii=False).replace('<', '\\u003c').replace('>', '\\u003e')
         text = PACKET.replace('name="body" string="true">' + TEXT,
                               'name="body" string="false">' + encoded)
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             _, calls = validate(text, TOOLS, allow_dsml_wrapper_tolerances=True)
             self.assertEqual(json.loads(calls[0]['function']['arguments'])['body'], value)
 
     def test_finish_provider_choice_and_schema_remain_required(self):
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             for options in ({'finish_reason': 'length'}, {'provider': 'qwen'},
                             {'tool_choice': 'none'}, {'tool_choice': {
                                 'type': 'function', 'function': {'name': 'fixture.inspect'}}}):
@@ -84,7 +83,7 @@ class DsmlNamedCloserTests(unittest.TestCase):
 
     def test_saved_shape_needs_no_format_repair_in_either_api(self):
         request = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=TOOLS)
-        for validate in (api._validate_tool_reply, api_new.validate_tool_reply):
+        for validate in (api._validate_tool_reply,):
             with self.subTest(api=validate.__module__), \
                     patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
                     patch.object(api, '_chat_with_retry', side_effect=AssertionError('No generation')):

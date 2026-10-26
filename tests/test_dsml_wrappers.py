@@ -4,11 +4,10 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest
 from server.tool_protocol import validate_reply
-from server.tool_protocol_new import validate_reply as validate_new
 from tests.test_dsml import OPEN, CLOSE, batch, invoke
 
 GENERIC_END = '</｜｜DSML｜｜>'
@@ -36,7 +35,7 @@ class DsmlWrapperTests(unittest.TestCase):
 
     def test_one_adjacent_repeated_header_and_untyped_invocation_close_preserve_inputs(self):
         raw = variant(action())
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             with self.subTest(validator=validator.__module__):
                 with self.assertRaises(ToolCallError):
                     validator(raw, TOOLS)
@@ -78,7 +77,7 @@ class DsmlWrapperTests(unittest.TestCase):
                    '<blockquote>\n'+raw+'\n</blockquote>',
                    raw.replace('owned fixture', GENERIC_END),
                    raw.replace('string="true"', 'string="false"', 1)]
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             for value in invalid:
                 with self.subTest(validator=validator.__module__, value=value):
                     try:
@@ -103,7 +102,7 @@ class DsmlWrapperTests(unittest.TestCase):
 
     def test_selected_native_api_validates_saved_shape_without_a_new_generation(self):
         request = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=TOOLS)
-        for validator in (api._validate_tool_reply, api_new.validate_tool_reply):
+        for validator in (api._validate_tool_reply,):
             with self.subTest(validator=validator.__module__), \
                     patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
                     patch.object(api, '_chat_with_retry', side_effect=AssertionError('No generation')):

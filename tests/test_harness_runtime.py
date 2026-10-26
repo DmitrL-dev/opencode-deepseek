@@ -477,7 +477,7 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(len(self.prompts), 1)
 
-    def check_native_dsml_chain_stops_atomically(self, legacy):
+    def test_native_dsml_chain_preserves_work_on_damaged_fourth_step(self):
         from server import config, diagnostics
         import httpx
         from tests import TEST_API_TOKEN
@@ -485,7 +485,6 @@ class HarnessRuntimeTests(unittest.TestCase):
         self.behavior = 'dsml_chain_then_damage'
         failure_file = self.root / 'private' / 'last.json'
         with patch.object(config, 'DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
-                patch.object(api, '_LEGACY', legacy), \
                 patch.object(api, '_FORMAT_REPAIR', False), \
                 patch.object(api, '_MAX_CONTINUATIONS', 0), \
                 patch.object(diagnostics, 'FAILURE_FILE', failure_file), \
@@ -531,12 +530,6 @@ class HarnessRuntimeTests(unittest.TestCase):
             self.assertEqual(failure_file.read_bytes(), saved_before)
             self.assertEqual((self.workspace / 'report.md').read_text(), FILE_PAYLOAD)
             self.assertFalse((self.workspace / 'should-not-exist').exists())
-
-    def test_native_dsml_chain_preserves_work_on_damaged_fourth_step(self):
-        self.check_native_dsml_chain_stops_atomically(legacy=False)
-
-    def test_legacy_dsml_chain_preserves_work_on_damaged_fourth_step(self):
-        self.check_native_dsml_chain_stops_atomically(legacy=True)
 
     def test_transient_http_failure_is_not_retried(self):
         self.behavior = "503"

@@ -94,8 +94,7 @@ from .schemas import ChatCompletionRequest, ChatMessage
 
 _log = logging.getLogger(__name__)
 
-# Main-era continuation probe (as in openai_format at 60f860a). openai_format.looks_truncated
-# is now mid-message for TOOLCALL_LEGACY=0 / api_new; keep start-of-reply here for LEGACY=1.
+# Continuation probe: only a reply that starts with a tool block may be continued.
 _TOOL_START_RE = re.compile(r"\A```tool_calls[ \t]*\r?\n")
 _CLOSING_TOOL_FENCE_RE = re.compile(r"(?m)^```[ \t]*\r?$")
 
@@ -364,12 +363,7 @@ if _MAX_CONTINUATIONS < 0:
 # One opt-in format correction in the same DeepSeek conversation. This is
 # separate from transport retries and output-limit continuation; neither a
 # rejection nor an uncertain/truncated generation qualifies.
-# With TOOLCALL_LEGACY=0, repair uses api_new.browser_repair_prompt for every provider.
 _FORMAT_REPAIR = os.getenv("TOOLCALL_FORMAT_REPAIR", "0") == "1"
-
-# Temporary switch: 1 = main-era path in this file + tool_protocol.py (default);
-# 0 = tool-rework in api_new.py + tool_protocol_new.py. Will be removed.
-_LEGACY = os.getenv("TOOLCALL_LEGACY", "1") == "1"
 
 _FORMAT_REPAIR_PROMPT = (
     "No tools were executed from your previous reply: it was empty or its tool-call format was invalid. "
@@ -514,9 +508,6 @@ def _conversation_tool_chat(prompt, req, model_type):
             reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
             if not migrated.tools:
                 result = (reply, reply.text, None)
-            elif not _LEGACY:
-                from . import api_new
-                result = api_new.validate_tool_reply(reply, migrated, allow_continuation=False)
             else:
                 result = _validate_tool_reply(reply, migrated, allow_continuation=False)
             validate_new_calls(original, reply, result[2])
@@ -544,10 +535,6 @@ def _conversation_tool_chat(prompt, req, model_type):
             reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
             if not migrated.tools:
                 result = (reply, reply.text, None)
-            elif not _LEGACY:
-                from . import api_new
-                result = api_new.validate_tool_reply(
-                    reply, migrated, allow_continuation=False)
             else:
                 result = _validate_tool_reply(reply, migrated, allow_continuation=False)
             # Only the new conversation starts at one reply. Old rows and all
@@ -566,11 +553,6 @@ def _conversation_tool_chat(prompt, req, model_type):
         try:
             if not req.tools:
                 result = _plain_conversation_reply(prompt, req, model_type)
-            elif not _LEGACY:
-                from . import api_new
-                result = api_new.tool_chat_or_notice(
-                    prompt, req, model_type, provider,
-                    api_new.executed_calls(original.messages))
             else:
                 result = _tool_chat_with_retry(prompt, req, model_type)
         except ProviderRejected as exc:
@@ -603,10 +585,6 @@ def _conversation_tool_chat(prompt, req, model_type):
             migrated_reply = _chat_with_retry(migration_prompt, migrated, resolve_model_type(original.model))
             if not migrated.tools:
                 result = (migrated_reply, migrated_reply.text, None)
-            elif not _LEGACY:
-                from . import api_new
-                result = api_new.validate_tool_reply(
-                    migrated_reply, migrated, allow_continuation=False)
             else:
                 result = _validate_tool_reply(migrated_reply, migrated, allow_continuation=False)
         conversation_cache.remember(original, *result, steps, scope=scope)
@@ -631,7 +609,7 @@ def _conversation_tool_chat(prompt, req, model_type):
 
 
 def _tool_chat_with_retry(prompt: str, req: ChatCompletionRequest, model_type):
-    """Main-era path (TOOLCALL_LEGACY=1): DeepSeek-only format repair; always raise."""
+    """DeepSeek-only format repair; an invalid reply always raises."""
     reply = _chat_with_retry(prompt, req, model_type)
     try:
         return _validate_tool_reply(reply, req)

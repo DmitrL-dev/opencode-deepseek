@@ -38,7 +38,6 @@ def status_with_conversation_limit(guard):
         'stream_capture_storage': storage_status(FAILURE_FILE.parent / 'failed-tool-streams'),
         'tool_thinking_default': DEEPSEEK_TOOL_THINKING,
         'tool_contract': {'deepseek_protocol': DEEPSEEK_TOOL_PROTOCOL,
-                          'legacy': api._LEGACY,
                           'format_repair': api._FORMAT_REPAIR,
                           'max_continuations': api._MAX_CONTINUATIONS}}
 

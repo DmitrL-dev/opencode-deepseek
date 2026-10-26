@@ -260,44 +260,42 @@ class SchemaUpgradeTests(unittest.TestCase):
                 register(self.cache, scope=self.scope, model=self.req.model,
                          old=self.old, current=self.current, **kwargs)
 
-    def test_catalog_only_upgrade_reaches_both_apis_and_transports_without_replay(self):
+    def test_catalog_only_upgrade_reaches_both_transports_without_replay(self):
         from server import api, config
         from server.openai_format import ToolCallError
         from tests.support import isolated_access
         isolated_access(self)
         for model in ('deepseek-expert', 'glm-web'):
-            for legacy in (True, False):
-                for mode in ('none', 'light', 'medium'):
-                    with self.subTest(model=model, legacy=legacy, mode=mode):
-                        cache = ConversationCache(Path(self.temp.name) / f'{model}-{legacy}-{mode}.db')
-                        initial = self.initial.model_copy(update={'model': model})
-                        cache.remember(initial, Reply('', 'fixture:2'), '', self.calls, 0, scope=self.scope)
-                        request = self.req.model_copy(update={'model': model})
-                        register(cache, scope=self.scope, model=model, old=self.old, current=self.current)
-                        with patch.object(api, 'conversation_cache', cache), \
-                                patch.object(api, '_conversation_scope', return_value=self.scope), \
-                                patch.object(api, 'get_client', return_value=Mock()), \
-                                patch.object(config, 'TOOL_INSTRUCTIONS_HTTP', mode), \
-                                patch.object(config, 'TOOL_INSTRUCTIONS_BROWSER', mode), \
-                                patch.object(api, '_LEGACY', legacy), \
-                                patch.object(api, '_chat_with_retry', return_value=Reply('Done', 'fixture:4')) as chat:
-                            api._conversation_tool_chat('rebuild this', request, None)
-                            chat.assert_called_once()
-                            prompt, prepared, _ = chat.call_args.args
-                            self.assertEqual(prepared.conversation_id, 'fixture:2')
-                            self.assertIn('New Harness description', prompt)
-                            for tool in self.current:
-                                self.assertIn(json.dumps(tool['function']['parameters'], ensure_ascii=False), prompt)
-                            self.assertNotIn('Explore fixture', prompt)
-                            # Neither the current nor the old catalog gets a new
-                            # ticket to redeliver the preceding result.
-                            for tools in (self.current, self.old):
-                                with self.assertRaisesRegex(ToolCallError, 'already consumed'):
-                                    api._conversation_tool_chat('', request.model_copy(update={'tools': tools}), None)
-                            chat.assert_called_once()
-                        with cache.connection() as db:
-                            self.assertEqual(sorted(db.execute('SELECT used, steps FROM links')),
-                                             [(0, 2), (1, 1)])
+            for mode in ('none', 'light', 'medium'):
+                with self.subTest(model=model, mode=mode):
+                    cache = ConversationCache(Path(self.temp.name) / f'{model}-{mode}.db')
+                    initial = self.initial.model_copy(update={'model': model})
+                    cache.remember(initial, Reply('', 'fixture:2'), '', self.calls, 0, scope=self.scope)
+                    request = self.req.model_copy(update={'model': model})
+                    register(cache, scope=self.scope, model=model, old=self.old, current=self.current)
+                    with patch.object(api, 'conversation_cache', cache), \
+                            patch.object(api, '_conversation_scope', return_value=self.scope), \
+                            patch.object(api, 'get_client', return_value=Mock()), \
+                            patch.object(config, 'TOOL_INSTRUCTIONS_HTTP', mode), \
+                            patch.object(config, 'TOOL_INSTRUCTIONS_BROWSER', mode), \
+                            patch.object(api, '_chat_with_retry', return_value=Reply('Done', 'fixture:4')) as chat:
+                        api._conversation_tool_chat('rebuild this', request, None)
+                        chat.assert_called_once()
+                        prompt, prepared, _ = chat.call_args.args
+                        self.assertEqual(prepared.conversation_id, 'fixture:2')
+                        self.assertIn('New Harness description', prompt)
+                        for tool in self.current:
+                            self.assertIn(json.dumps(tool['function']['parameters'], ensure_ascii=False), prompt)
+                        self.assertNotIn('Explore fixture', prompt)
+                        # Neither the current nor the old catalog gets a new
+                        # ticket to redeliver the preceding result.
+                        for tools in (self.current, self.old):
+                            with self.assertRaisesRegex(ToolCallError, 'already consumed'):
+                                api._conversation_tool_chat('', request.model_copy(update={'tools': tools}), None)
+                        chat.assert_called_once()
+                    with cache.connection() as db:
+                        self.assertEqual(sorted(db.execute('SELECT used, steps FROM links')),
+                                         [(0, 2), (1, 1)])
 
     def test_client_cannot_request_a_contract_refresh_or_change_history_digest(self):
         supplied = self.req.model_dump()

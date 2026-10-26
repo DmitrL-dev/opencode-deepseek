@@ -209,8 +209,8 @@ after a manual website check; see [account safety](ACCOUNT_SAFETY.md). All
 providers have account limits, including Chinese models. Tool continuations can
 consume another message.
 
-Defaults remain `TOOLCALL_FORMAT_REPAIR=0`, `TOOLCALL_MAX_CONTINUATIONS=0` and
-`TOOLCALL_INVALID_MODE=error`. The bridge resumes saved conversations and sends only new results; unknown history stops without creating a new chat. Rolling budgets and a configurable conversation cap (20 accepted replies by default) still apply. Historical checks below do not establish readiness for unlimited tasks.
+Defaults remain `TOOLCALL_FORMAT_REPAIR=0` and `TOOLCALL_MAX_CONTINUATIONS=0`;
+invalid calls always fail explicitly. The bridge resumes saved conversations and sends only new results; unknown history stops without creating a new chat. Rolling budgets and a configurable conversation cap (20 accepted replies by default) still apply. Historical checks below do not establish readiness for unlimited tasks.
 
 For unattended DeepSeek goals, optionally set `TOOLCALL_FORMAT_REPAIR=1` in
 the bridge process environment and restart the bridge. After a normally
@@ -303,7 +303,7 @@ large live Expert task has not been qualified after these changes.
 
 `CONVERSATION_MAX_REPLIES` separately controls the conversation cap (default 20, range 1–1000). It counts accepted replies, not all upstream generations: format correction also consumes the rolling budget. After raising it and restarting, exact saved history can continue in the same conversation. Counters and one-use protection are preserved; unknown or edited histories remain rejected.
 
-An empty or whitespace-only tool-mode reply is rejected instead of reported as success. With `TOOLCALL_FORMAT_REPAIR=1`, normal completion permits one correction in the same conversation; a second empty reply follows `TOOLCALL_INVALID_MODE` (`error` by default — explicit failure; `text` — Bridge notice). Output limits, refusals and `tool_choice=none` never trigger correction.
+An empty or whitespace-only tool-mode reply is rejected instead of reported as success. With `TOOLCALL_FORMAT_REPAIR=1`, normal completion permits one correction in the same conversation; a second empty reply is an explicit failure. Output limits, refusals and `tool_choice=none` never trigger correction.
 
 ### Local budget commands
 

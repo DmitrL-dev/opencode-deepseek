@@ -3,8 +3,8 @@
 Usage: python -m server.offline_corpus session/protocol-corpus.json
 The manifest pins source hashes and expected calls; it is private, not a fixture
 to publish. Output contains counts only, never source, commands or arguments.
-Each case selects protocol=json|dsml and implementation=legacy|new explicitly;
-omitted fields retain the original json/legacy policy, not the local .env.
+Each case selects protocol=json|dsml explicitly; an omitted field keeps json,
+not the local .env. The only implementation is legacy; others are failures.
 """
 import hashlib
 import json
@@ -13,7 +13,6 @@ import sys
 
 from .openai_format import ToolCallError
 from .tool_protocol import validate_reply
-from .tool_protocol_new import validate_reply as validate_new_reply
 
 
 def _outcome(data, item):
@@ -23,13 +22,12 @@ def _outcome(data, item):
         raise ValueError('Invalid corpus diagnostic')
     protocol = item.get('protocol', 'json')
     implementation = item.get('implementation', 'legacy')
-    if (protocol not in ('json', 'dsml') or implementation not in ('legacy', 'new')
+    if (protocol not in ('json', 'dsml') or implementation != 'legacy'
             or not isinstance(item['provider'], str) or not item['provider']):
         raise ValueError('Invalid corpus validation policy')
-    validate = validate_reply if implementation == 'legacy' else validate_new_reply
     native = protocol == 'dsml'
     try:
-        content, calls = validate(
+        content, calls = validate_reply(
             data['reply'], data['tools'], data.get('tool_choice'),
             finish_reason=data['finish_reason'], provider=item['provider'],
             allow_dsml_preamble=native, allow_dsml_wrapper_tolerances=native,

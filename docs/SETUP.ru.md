@@ -461,41 +461,16 @@ fenced-блока `tool_calls` ([server/openai_format.py](../server/openai_forma
 [server/tool_protocol.py](../server/tool_protocol.py)). Без валидного вызова
 агент получает обычный текст и **ничего не выполняет**.
 
-Временный `TOOLCALL_LEGACY` (по умолчанию `1`):
+Все провайдеры используют один контракт в `server/api.py` + `server/tool_protocol.py`.
+Развёрнутый конспект: [toolcall-format-repair.md](toolcall-format-repair.md).
 
-| | `TOOLCALL_LEGACY=1` (default, как main) | `TOOLCALL_LEGACY=0` (tool-rework) |
-|--|----------------------------------------|----------------------------------|
-| Код | `server/api.py` + `server/tool_protocol.py` | `server/api_new.py` + `server/tool_protocol_new.py` |
-| Провайдеры | Один контракт для всех | Тот же единый контракт для всех (в т.ч. DeepSeek) |
-| Блоки | Один протокол-блок (допуски main-era / DeepSeek) | Несколько верхнеуровневых `` ```tool_calls `` где угодно |
-| Совет под видом вызова | Ошибка пакета | Demote → fence `text`; не repair |
-| Невалидный вызов | Всегда `invalid_tool_response` | `TOOLCALL_INVALID_MODE` (`error` / `text`) |
-| Format repair | Только DeepSeek, main-era промпт | Pointed repair для любого провайдера |
-| Continuation при `length` | Незакрытый fence с начала ответа | Незакрытый top-level fence где угодно |
-
-Флаг будет удалён; `TOOLCALL_INVALID_MODE` действует только при `LEGACY=0`.
-Подробности demote, `bridge_notice` и repeat — в [README.md](../README.md);
-развёрнутые конспекты:
-[toolcall-format-repair-legacy.md](toolcall-format-repair-legacy.md) (`LEGACY=1`) и
-[toolcall-format-repair.md](toolcall-format-repair.md) (`LEGACY=0`).
-
-#### `TOOLCALL_LEGACY=0` (единый контракт)
-
-Для **любого** провайдера, включая DeepSeek: вызовом является только верхнеуровневый
-fenced-блок `tool_calls`; demote «совета»; каждый оставшийся блок обязан быть
-валидным; при `FORMAT_REPAIR=1` — одна pointed-коррекция (каталог / форма
-аргументов); иначе исход задаёт `INVALID_MODE`. Отдельного freeze-парсера DeepSeek
-и ветки «остальные» нет.
-
-#### `TOOLCALL_LEGACY=1` (как на main)
-
-Путь main-era в `api` / `tool_protocol`: один блок на весь ответ, допуски historically DeepSeek
+Один блок на весь ответ, допуски historically DeepSeek
 (отсутствие закрывающей ограды, лишняя `}`, DSML-closers, flat arguments →
 `arguments`, восстановление одного `]`), repair только для DeepSeek, всегда
 `invalid_tool_response`. Если модель пишет прозу вместо вызова, opencode печатает
 текст и **ничего не выполняет**.
 
-Что сохранено в main-era парсере:
+Что гарантирует парсер:
 
 - только один полный блок `tool_calls`, занимающий весь ответ, превращается
   в вызовы; JSON в прозе, XML/DSML и псевдовызовы остаются обычным текстом;
@@ -527,19 +502,10 @@ fenced-блок `tool_calls`; demote «совета»; каждый оставш
 без содержимого аргументов. Вызовы из такого ответа не выдаются; мост не чинит
 команды догадками и по умолчанию не повторяет запрос автоматически.
 
-При `LEGACY=0` и `TOOLCALL_FORMAT_REPAIR=1`: после штатно завершённого невалидного
-ответа — один pointed-запрос в той же беседе для любого провайдера (unknown →
-каталог; schema → форма аргументов). Совет без `name` или unknown+проза уже
-сброшен в `text` и коррекцию не получает. Вторая ошибка → `TOOLCALL_INVALID_MODE`.
-При `LEGACY=1` repair остаётся только DeepSeek (main-era промпт). По умолчанию
-выключено; автономность не гарантируется.
-
-`TOOLCALL_INVALID_MODE` (`error` по умолчанию, либо `text`; только `LEGACY=0`):
-исход невалидного вызова после проверки или одной неудачной коррекции для
-**любого** провайдера. `error` — `invalid_tool_response`; `text` — живой чат
-провайдера плюс явный неуспех шага для агента (`BRIDGE_TOOL_NOT_EXECUTED` в
-content, `bridge_notice`, `refusal`; следующий ход в закладку как
-`Tool result (имя): …`). Подробности — [README.md](../README.md).
+При `TOOLCALL_FORMAT_REPAIR=1` после штатно завершённого невалидного ответа
+DeepSeek допускается одна коррекция в той же беседе. По умолчанию выключено;
+автономность не гарантируется. Невалидный вызов всегда завершается
+`invalid_tool_response`.
 
 Для локального воспроизведения ошибок задайте `TOOLCALL_DIAGNOSTICS=1`.
 Последний невалидный ответ и объявленные схемы инструментов атомарно сохраняются
@@ -731,10 +697,8 @@ opencode run --model local-qwen/qwen3.8-max "Объясни этот проек�
 | `QWEN_ENABLED` | `0` | Включить модели Qwen Chat на том же `/v1` |
 | `QWEN_MODELS` | `qwen3.8-omni-flash`, `qwen3.8-max`, `qwen3.7-plus` | JSON: публичный id → wire-модель сайта (HTTP-транспорт) |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Отдельный постоянный профиль Qwen Chat |
-| `TOOLCALL_LEGACY` | `1` | Временно: `1` — main-era для всех; `0` — единый tool-rework для всех (будет удалён) |
-| `TOOLCALL_MAX_CONTINUATIONS` | `0` | Лимит продолжений при обрыве по длине; при `LEGACY=0` — незакрытый fence где угодно |
-| `TOOLCALL_FORMAT_REPAIR` | `0` | `1` — одна коррекция (`LEGACY=1`: только DeepSeek; `LEGACY=0`: DeepSeek / browser) |
-| `TOOLCALL_INVALID_MODE` | `error` | Только при `LEGACY=0`: `error` / `text` (notice + `bridge_notice`) |
+| `TOOLCALL_MAX_CONTINUATIONS` | `0` | Лимит продолжений при обрыве по длине (ответ начинается незакрытым fence) |
+| `TOOLCALL_FORMAT_REPAIR` | `0` | `1` — одна коррекция формата, только DeepSeek |
 | `TOOLCALL_DEBUG` | — | `1` — писать в лог сырой ответ модели, если вызов не распознан |
 
 Пример:

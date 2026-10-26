@@ -554,76 +554,18 @@ in `light`. Continuation prompts are longer. A reply like `{"question": ..., "op
 is rejected with "Tool arguments do not satisfy the advertised schema". No extra
 generation.
 
-Temporary switch `TOOLCALL_LEGACY` (default `1`): `1` — main-era contract for
-**every** provider (`server/api.py` + `server/tool_protocol.py`: one block,
-DeepSeek-only repair, always `invalid_tool_response`; will be removed); `0` — one
-tool-rework path in `server/api_new.py` + `server/tool_protocol_new.py` for **every**
-provider, including DeepSeek (demote, multi-block, pointed repair,
-`TOOLCALL_INVALID_MODE`). Summary in
+Every provider uses one call contract (`server/api.py` + `server/tool_protocol.py`):
+one complete `tool_calls` block occupying the whole reply, DeepSeek tolerances
+without guessing arguments, and an invalid call always ends as
+`invalid_tool_response`. Summary in
 [SETUP §5](docs/SETUP.en.md#5-why-the-model-doesnt-make-edits-emulated-tool-calling);
-longer notes (Russian):
-[`docs/toolcall-format-repair-legacy.md`](docs/toolcall-format-repair-legacy.md)
-(`LEGACY=1`) and
-[`docs/toolcall-format-repair.md`](docs/toolcall-format-repair.md) (`LEGACY=0`).
-In both modes, a complete native DeepSeek DSML reply retains the shared schema,
-finish and `tool_choice` checks, without an extra generation.
-With `TOOLCALL_LEGACY=0`, tool calls are handled like in any agent. Only a top-level
-fenced `tool_calls` block is a call, wherever it stands in the message. Prose, text
-after the block, several blocks, arrays without that fence (also inside a
-```` ```json ```` block) and quoted blocks are plain text. This includes examples
-inside `~~~`, fences of four or more backticks, and code indented by four spaces
-or a tab: their tools are never executed. Verified offline; no live account was
-used for these checks. Before validate/repair the
-bridge may demote advice mistagged as a call: if a block has no call-level `name`
-(JSON whole or broken) or the name is unknown and there is accompanying prose, the
-opening fence is relabeled from `tool_calls` to `text` and the agent gets ordinary
-successful `content` — no repair and no `TOOLCALL_INVALID_MODE`. Otherwise every
-remaining block must be valid: broken JSON (including a known tool name), an unknown
-name with no prose, or arguments off-schema stop the whole message (repair /
-`TOOLCALL_INVALID_MODE`); there is no silent validate pass. When every block is
-valid, all calls run in order: the agent receives them as `tool_calls` and the rest
-of the message, with the call blocks cut out, as ordinary content. With
-`stream: true` text and calls arrive as separate frames in the original order
-(`text1`, `call1`, `text2`, `call2`, `text3`); `stream: false` still returns one
-`content` and one `tool_calls` array. `tool_choice: none` never turns text into
-an error. Verified offline.
+longer notes (Russian): [`docs/toolcall-format-repair.md`](docs/toolcall-format-repair.md).
+A complete native DeepSeek DSML reply passes the same schema, finish and
+`tool_choice` checks, with no extra generation.
 
-With `TOOLCALL_FORMAT_REPAIR=1` (off by default), under `LEGACY=0` an erroneous call
-gets one pointed correction in the same chat (one extra generation): for an unknown
-tool the full list of tools with their argument shapes (field names, nesting, `?` =
-optional; not shortened), for wrong arguments that tool's argument shape (no values).
-No second correction is requested. If the corrected reply is valid the agent sees only
-the final call, with no notice. What happens next is `TOOLCALL_INVALID_MODE` (below).
-Under `LEGACY=1`, repair remains DeepSeek-only (main-era prompt). Verified offline.
-
-`TOOLCALL_INVALID_MODE` (default `error`; only when `LEGACY=0`): what to do with an
-invalid call after validation or after one failed correction — for **any** provider,
-including DeepSeek. With `error` the agent gets
-`invalid_tool_response` (fail-closed). With `text` — HTTP success and a live provider
-chat, but an explicit failed tool step for the agent:
-
-- `content`: raw reply plus `Bridge notice: BRIDGE_TOOL_NOT_EXECUTED: …` (tool name at
-  most; no schemas or values);
-- top-level `bridge_notice` (`executed: false`, `code`, `kind`, `tool`, `as_tool_error`
-  shaped like a tool-role error);
-- `message.refusal`: the same notice text (for clients that honor refusal);
-- the next user message is sent to the provider tab as
-  `Tool result (name): <notice>` plus the follow-up — as if the tool returned an error.
-
-Executable `tool_calls` are not invented on reject (the agent would run them). Even with
-`text`, these still error: `tool_choice` required/specific tool, a reply without a
-conversation id, and an unfinished reply. Mistagged advice (no call-level name, or
-unknown name with prose) is demoted to a `text` fence before this path.
-Verified offline.
-
-A call that repeats, with identical arguments, the call whose result the request
-carries (the model answers a tool result with the same call again) is not executed a
-second time: with `TOOLCALL_INVALID_MODE=text` the agent gets the same kind of message
-(raw reply plus a line saying the call repeats the one just executed); with `error` it
-raises. A nonempty new user message after the tool result starts a separate action:
-for example, checking CI that was previously `pending` again. An empty message does
-not clear this check. Replaying an already consumed history still fails before any
-provider request. Verified offline.
+With `TOOLCALL_FORMAT_REPAIR=1` (off by default), an erroneous DeepSeek reply gets
+one format correction in the same conversation. A second correction is never
+requested. Verified offline.
 
 In compact browser mode, an agent's tool result (for example the option you picked)
 is sent as `Tool result (name id="..."): <result>`. IDs retain result binding;
@@ -631,7 +573,7 @@ multiple calls to the same tool also receive an exact call mapping. Complete sch
 are normally omitted, but the current `tool_choice` follows the result even in
 `none` mode. `auto` explicitly replaces an earlier per-reply selection; task
 constraints and schema validation remain enforced. An authorized catalog upgrade
-sends complete schemas once. Invalid-call outcome follows `TOOLCALL_INVALID_MODE` (above).
+sends complete schemas once.
 Verified offline.
 
 For DeepSeek, disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;

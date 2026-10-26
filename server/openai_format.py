@@ -987,8 +987,7 @@ def completion_response(model: str, content: str, prompt: str,
     """A full (non-streaming) OpenAI chat.completion object.
 
     `conversation_id` is an extra top-level field (outside OpenAI's schema) you
-    send back to resume the conversation. When `bridge_notice` is set (invalid
-    tool under TOOLCALL_INVALID_MODE=text), the message also carries OpenAI
+    send back to resume the conversation. When `bridge_notice` is set, the message also carries OpenAI
     `refusal` and a top-level `bridge_notice` for agent-side step failure.
     """
     pt, ct = _est_tokens(prompt), _est_tokens(content or "")

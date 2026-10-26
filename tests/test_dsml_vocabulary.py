@@ -4,7 +4,6 @@ import unittest
 
 from server.openai_format import ToolCallError
 from server.tool_protocol import validate_reply
-from server.tool_protocol_new import validate_reply as validate_new
 
 TOOLS = [{'type': 'function', 'function': {'name': name, 'parameters': {
     'type': 'object', 'properties': {key: {'type': 'string'} for key in keys},
@@ -27,7 +26,7 @@ class DsmlVocabularyTests(unittest.TestCase):
         return validate_reply(text, TOOLS, allow_dsml_wrapper_tolerances=True, **kwargs)
 
     def test_complete_known_spellings_preserve_every_call_and_argument(self):
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             _, calls = validator(MIXED, TOOLS, allow_dsml_wrapper_tolerances=True)
             self.assertEqual([c['function']['name'] for c in calls], ['bash', 'glob'])
             self.assertEqual(json.loads(calls[0]['function']['arguments']), {
@@ -66,7 +65,7 @@ class DsmlVocabularyTests(unittest.TestCase):
 </｜DSML｜｜ parameter name="path" string="true">fixture</｜DSML｜｜ parameter>
 </｜DSML｜｜ invoke>
 </｜DSML｜ calls>'''
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             with self.subTest(validator=validator.__module__), self.assertRaises(ToolCallError):
                 validator(raw, TOOLS, allow_dsml_wrapper_tolerances=True,
                           allow_dsml_preamble=True)

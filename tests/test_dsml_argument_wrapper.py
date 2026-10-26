@@ -4,13 +4,12 @@ import json
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.dsml import decode
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest
 from server.tool_schema import validate_arguments
 from server.tool_protocol import validate_reply
-from server.tool_protocol_new import validate_reply as validate_new
 
 TOOLS = [{'type':'function','function':{'name':name,'parameters':{
     'type':'object','properties':{key:{'type':'string'} for key in keys},
@@ -28,14 +27,14 @@ PACKET = '''<｜｜DSML｜｜ calls>
 
 class DsmlArgumentWrapperTests(unittest.TestCase):
     def test_extra_json_brace_rejects_entire_batch_including_valid_first_call(self):
-        for validate in (validate_reply,validate_new):
+        for validate in (validate_reply,):
             for native in (False,True):
                 with self.subTest(api=validate.__module__,native=native),self.assertRaises(ToolCallError):
                     validate(PACKET,TOOLS,allow_dsml_wrapper_tolerances=native)
 
     def test_complete_typed_input_object_uses_the_same_advertised_schema(self):
         raw=PACKET.replace('"}}','"}')
-        for validate in (validate_reply,validate_new):
+        for validate in (validate_reply,):
             with self.subTest(api=validate.__module__):
                 _, calls = validate(raw,TOOLS,allow_dsml_wrapper_tolerances=True)
                 self.assertEqual([c['function']['name'] for c in calls], ['get_goal', 'bash'])
@@ -66,8 +65,7 @@ class DsmlArgumentWrapperTests(unittest.TestCase):
         validate_arguments('bash', arguments, tools)
         validate_arguments('read', decoded[1]['arguments'], tools)
         request = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=tools)
-        for validate, module in ((api._validate_tool_reply, api),
-                                 (api_new.validate_tool_reply, api_new)):
+        for validate, module in ((api._validate_tool_reply, api),):
             with self.subTest(contract=module.__name__), \
                     patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'json'), \
                     patch.object(module, 'save_tool_failure') as saved, \

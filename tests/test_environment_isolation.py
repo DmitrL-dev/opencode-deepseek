@@ -20,7 +20,7 @@ class EnvironmentIsolationTests(unittest.TestCase):
             "  'deepseek': config.DEEPSEEK_ENABLED,\n"
             "  'qwen': config.QWEN_ENABLED,\n"
             "  'models': sorted(config.MODEL_MAP),\n"
-            "  'legacy': os.environ.get('TOOLCALL_LEGACY'),\n"
+            "  'repair': os.environ.get('TOOLCALL_FORMAT_REPAIR'),\n"
             "  'rate': config.RATE_LIMIT_PER_MINUTE,\n"
             "  'pause': os.environ.get('PROVIDER_ACCESS_PAUSE'),\n"
             "  'leaked': sorted(k for k in tests.configured_keys(\n"
@@ -32,7 +32,6 @@ class EnvironmentIsolationTests(unittest.TestCase):
             "QWEN_ENABLED": "1",
             "QWEN_TRANSPORT": "browser",
             "GROK_ENABLED": "1",  # flag name is built dynamically in config
-            "TOOLCALL_LEGACY": "1",
             "TOOLCALL_FORMAT_REPAIR": "1",
             "TOOL_INSTRUCTIONS_HTTP": "none",
             "PROVIDER_ACCESS_PAUSE": "0",
@@ -47,7 +46,7 @@ class EnvironmentIsolationTests(unittest.TestCase):
         self.assertFalse(observed["deepseek"])
         self.assertFalse(observed["qwen"])
         self.assertEqual(observed["models"], [])
-        self.assertIsNone(observed["legacy"])
+        self.assertIsNone(observed["repair"])
         self.assertEqual(observed["rate"], 30)
         self.assertIsNone(observed["pause"])
         self.assertEqual(observed["leaked"], [])
@@ -58,7 +57,7 @@ class EnvironmentIsolationTests(unittest.TestCase):
             documented = configured_keys(ROOT / ".env.example")
         self.assertTrue(documented)
         self.assertIn("DEEPSEEK_ENABLED", documented)
-        self.assertIn("TOOLCALL_LEGACY", documented)
+        self.assertIn("TOOLCALL_FORMAT_REPAIR", documented)
         # The guard test above proves removal; this only keeps the source of
         # truth (the example file) from silently losing documented settings.
         self.assertEqual({key for key in documented if not key.isupper()}, set())

@@ -102,13 +102,6 @@ class HistoryImportTests(unittest.TestCase):
         self.assertIsNone(claim(self.cache, self.req, 'different-account'))
         self.assertIsNotNone(claim(self.cache, self.req.model_copy(update={'stream': True}), 'isolated'))
 
-    def test_new_validator_preserves_schema_checks_and_binds_valid_reply(self):
-        self.authorize()
-        with patch.object(api, '_LEGACY', False):
-            result = self.run_request()
-        self.assertEqual(result[2][0]['function']['name'], 'read')
-        self.assertEqual(self.client.chat.call_count, 1)
-
     def test_omitted_thinking_cannot_be_claimed_as_explicit_false(self):
         for default in (True, False):
             with self.subTest(default=default), patch.object(config, 'DEEPSEEK_TOOL_THINKING', default):
@@ -222,19 +215,16 @@ class HistoryImportTests(unittest.TestCase):
             with self.assertRaises(api.ToolCallError):
                 validate_new_calls(req, Reply('fixture', 'new:2'), [call])
 
-    def test_schema_failure_is_not_repaired_in_either_parser(self):
-        for legacy in (True, False):
-            with self.subTest(legacy=legacy):
-                req = self.req.model_copy(update={'user': str(legacy)})
-                self.authorize(req)
-                self.client.chat.side_effect = None
-                self.client.chat.return_value = Reply(block([
-                    {'name': 'read', 'arguments': {'wrong_path': 'next.txt'}}]), 'new:2')
-                before = self.client.chat.call_count
-                with patch.object(api, '_LEGACY', legacy), patch.object(api, '_FORMAT_REPAIR', True):
-                    with self.assertRaises(api.ToolCallError):
-                        self.run_request(req)
-                self.assertEqual(self.client.chat.call_count, before + 1)
+    def test_schema_failure_is_not_repaired(self):
+        self.authorize()
+        self.client.chat.side_effect = None
+        self.client.chat.return_value = Reply(block([
+            {'name': 'read', 'arguments': {'wrong_path': 'next.txt'}}]), 'new:2')
+        before = self.client.chat.call_count
+        with patch.object(api, '_FORMAT_REPAIR', True):
+            with self.assertRaises(api.ToolCallError):
+                self.run_request()
+        self.assertEqual(self.client.chat.call_count, before + 1)
 
     def test_duplicate_authorization_restart_and_concurrent_claim_never_rearm(self):
         self.authorize()

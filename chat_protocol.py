@@ -9,7 +9,7 @@ class Reply:
     text: str
     conversation_id: str
     finish_reason: str = "stop"
-    # Optional structured notice for TOOLCALL_INVALID_MODE=text (agent-visible).
+    # Optional structured notice (agent-visible); no current path sets it.
     bridge_notice: Optional[dict] = None
     # Ordered text/tool_call parts for streaming; None keeps the legacy framing.
     parts: Optional[list] = None

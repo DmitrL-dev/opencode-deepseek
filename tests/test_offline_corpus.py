@@ -41,7 +41,7 @@ class OfflineCorpusPolicyTests(unittest.TestCase):
         return result
 
     def test_explicit_dsml_policy_matches_each_reply_contract(self):
-        for implementation in ('legacy', 'new'):
+        for implementation in ('legacy',):
             with self.subTest(implementation=implementation):
                 result = self.run_case(protocol='dsml', implementation=implementation)
                 self.assertEqual(result['failed_indices'], [])
@@ -55,7 +55,8 @@ class OfflineCorpusPolicyTests(unittest.TestCase):
 
     def test_invalid_policy_is_a_failed_check_not_an_expected_refusal(self):
         for policy in ({'protocol': 'automatic'}, {'implementation': 'guess'},
-                       {'protocol': True}, {'implementation': None}):
+                       {'protocol': True}, {'implementation': None},
+                       {'implementation': 'new'}):
             with self.subTest(policy=policy):
                 self.assertEqual(self.run_case(expected={'kind': 'reject'}, **policy)
                                  ['failed_indices'], [0])
@@ -63,7 +64,7 @@ class OfflineCorpusPolicyTests(unittest.TestCase):
     def test_complete_short_parameter_is_schema_bound_and_policy_explicit(self):
         short = PACKET.replace('parameter name="target"', 'target"')
         for protocol in ('json', 'dsml'):
-            for implementation in ('legacy', 'new'):
+            for implementation in ('legacy',):
                 with self.subTest(protocol=protocol, implementation=implementation):
                     expected = CALLS if protocol == 'dsml' else {'kind': 'reject'}
                     result = self.run_case(reply=short, expected=expected,
@@ -82,7 +83,7 @@ class OfflineCorpusPolicyTests(unittest.TestCase):
         ]
         for reply in variants:
             for protocol in ('json', 'dsml'):
-                for implementation in ('legacy', 'new'):
+                for implementation in ('legacy',):
                     with self.subTest(reply=reply, protocol=protocol, implementation=implementation):
                         result = self.run_case(reply=reply, expected={'kind': 'reject'},
                                                protocol=protocol, implementation=implementation)

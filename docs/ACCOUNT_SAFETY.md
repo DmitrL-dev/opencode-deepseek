@@ -144,8 +144,8 @@ local refusal behavior, not that live website automation is permitted or safe.
 ## DeepSeek load containment and conversation reuse
 
 The October 10 account restriction showed that bounded task success did not
-establish account safety. Keep `TOOLCALL_FORMAT_REPAIR=0`,
-`TOOLCALL_MAX_CONTINUATIONS=0`, and `TOOLCALL_INVALID_MODE=error`: format errors
+establish account safety. Keep `TOOLCALL_FORMAT_REPAIR=0` and
+`TOOLCALL_MAX_CONTINUATIONS=0`: format errors
 stop locally, with no additional model generation and no soft notice path. The
 following changes are qualified using offline transports and an isolated Harness
 CLI, not by further requests to the restricted account.

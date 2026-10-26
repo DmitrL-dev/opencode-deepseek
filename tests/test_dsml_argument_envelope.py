@@ -5,11 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest
 from server.tool_protocol import validate_reply
-from server.tool_protocol_new import validate_reply as validate_new
 from tests.test_dsml import batch, invoke
 
 
@@ -33,7 +32,7 @@ class DsmlArgumentEnvelopeTests(unittest.TestCase):
                  for name in names]
         raw = batch(*(wrapped(values, name) for name in names))
         before = copy.deepcopy(tools)
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             with self.subTest(api=validate.__module__):
                 _, calls = validate(raw, tools)
                 self.assertEqual([c['function']['name'] for c in calls], list(names))
@@ -44,21 +43,21 @@ class DsmlArgumentEnvelopeTests(unittest.TestCase):
     def test_declared_arguments_field_is_never_unwrapped(self):
         schema = tool(properties={'arguments': {'type': 'object'}}, required=['arguments'])
         value = {'value': 'literal field data'}
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             _, calls = validate(batch(wrapped(value)), [schema])
             self.assertEqual(json.loads(calls[0]['function']['arguments']), {'arguments': value})
 
     def test_zero_required_fields_leave_permissive_data_untouched(self):
         schema = tool(required=[], additionalProperties=True)
         value = {'value': 'literal data, not an unambiguous envelope'}
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             _, calls = validate(batch(wrapped(value)), [schema])
             self.assertEqual(json.loads(calls[0]['function']['arguments']), {'arguments': value})
 
     def test_json_call_arguments_do_not_use_dsml_envelope_decoding(self):
         raw = '```tool_calls\n' + json.dumps([{
             'name': 'custom', 'arguments': {'arguments': {'value': 'x'}}}]) + '\n```'
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             with self.subTest(api=validate.__module__), self.assertRaises(ToolCallError):
                 validate(raw, [tool()])
 
@@ -71,7 +70,7 @@ class DsmlArgumentEnvelopeTests(unittest.TestCase):
                                  ('value', 'different', True)]),
                invoke('custom', [('arguments', '{"value":"x","value":"y"}', False)]),
                invoke('custom', [('arguments', '{"value":NaN}', False)])]
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             for raw in bad:
                 with self.subTest(api=validate.__module__, raw=raw), self.assertRaises(ToolCallError):
                     validate(batch(wrapped({'value': 'good'}), raw), tools)
@@ -84,14 +83,14 @@ class DsmlArgumentEnvelopeTests(unittest.TestCase):
                  [tool(unevaluatedProperties=False)],
                  [tool(**{'$ref': 'https://invalid.example/schema'})],
                  [tool(**{'x-unknown-applicator': {}})], [base, copy.deepcopy(base)], []]
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             for tools in cases:
                 with self.subTest(api=validate.__module__, tools=tools), self.assertRaises(ToolCallError):
                     validate(batch(wrapped({'value': 'x'})), tools)
 
     def test_provider_finish_choice_and_quotes_still_gate_the_whole_batch(self):
         raw = batch(wrapped({'value': 'x'}))
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             for options in ({'provider': 'qwen'}, {'finish_reason': 'length'},
                             {'tool_choice': 'none'}, {'tool_choice': {
                                 'type': 'function', 'function': {'name': 'other'}}}):
@@ -107,8 +106,7 @@ class DsmlArgumentEnvelopeTests(unittest.TestCase):
     def test_invalid_later_call_never_delivers_valid_envelope_or_requests_repair(self):
         raw = batch(wrapped({'value': 'valid'}), invoke('custom', [('value', '42', False)]))
         request = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=[tool()])
-        for validate, module in ((api._validate_tool_reply, api),
-                                 (api_new.validate_tool_reply, api_new)):
+        for validate, module in ((api._validate_tool_reply, api),):
             with self.subTest(api=module.__name__), \
                     patch.object(module, 'save_tool_failure') as saved, \
                     patch.object(api, '_chat_with_retry', side_effect=AssertionError('No generation')):

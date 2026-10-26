@@ -6,7 +6,6 @@ import unittest
 from server.dsml import decode
 from server.openai_format import ToolCallError, _tool_json
 from server.tool_protocol import validate_reply
-from server.tool_protocol_new import validate_reply as validate_new
 
 TOOLS = [
     {'function': {'name': 'create_goal', 'parameters': {'type': 'object', 'properties': {
@@ -35,12 +34,12 @@ def packet(key='objective', value=OBJECTIVE, flag='true'):
 
 class ShortParameterTests(unittest.TestCase):
     def check(self, text, tools=TOOLS, **kwargs):
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             with self.subTest(validator=validate.__module__):
                 yield validate(text, tools, allow_dsml_wrapper_tolerances=True, **kwargs)
 
     def rejected(self, text, tools=TOOLS, **kwargs):
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             with self.subTest(validator=validate.__module__), self.assertRaises(ToolCallError):
                 validate(text, tools, allow_dsml_wrapper_tolerances=True, **kwargs)
 
@@ -61,7 +60,7 @@ class ShortParameterTests(unittest.TestCase):
             self.assertEqual(json.loads(calls[0]['function']['arguments'])['objective'], value)
 
     def test_no_opt_in_no_schema_no_normal_stop(self):
-        for validate in (validate_reply, validate_new):
+        for validate in (validate_reply,):
             with self.assertRaises(ToolCallError): validate(packet(), TOOLS)
         with self.assertRaises(ValueError): decode(packet(), _tool_json, allow_wrapper_tolerances=True)
         for finish in ['length', 'content_filter', None]: self.rejected(packet(), finish_reason=finish)

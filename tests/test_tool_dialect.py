@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new, config
+from server import api, config
 from server.openai_format import ToolCallError, messages_to_prompt
 from server.schemas import ChatCompletionRequest, ChatMessage
 from tests.test_dsml import batch, invoke
@@ -90,7 +90,7 @@ class ToolDialectTests(unittest.TestCase):
                      invoke('bash', [('command', 'git status --short', True),
                                      ('description', 'Inspect fixture', True)]))
         req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=[goal, *FLAT_TOOLS])
-        for validator in (api._validate_tool_reply, api_new.validate_tool_reply):
+        for validator in (api._validate_tool_reply,):
             with self.subTest(validator=validator.__module__):
                 _, _, calls = validator(Reply(text, 'fixture:2'), req)
                 self.assertEqual([c['function']['name'] for c in calls], ['create_goal', 'bash'])
@@ -104,10 +104,10 @@ class ToolDialectTests(unittest.TestCase):
         text = batch(invoke('bash', [('command', encoded, False),
                                       ('description', 'Inspect fixture', True)]))
         req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=FLAT_TOOLS)
-        for validator in (api._validate_tool_reply, api_new.validate_tool_reply):
+        for validator in (api._validate_tool_reply,):
             with self.subTest(validator=validator.__module__), \
                     patch.object(api, '_chat_with_retry', side_effect=AssertionError('No generation')), \
-                    patch('server.api.save_tool_failure'), patch('server.api_new.save_tool_failure'):
+                    patch('server.api.save_tool_failure'):
                 _, _, calls = validator(Reply(text, 'fixture:2'), req)
                 self.assertEqual(json.loads(calls[0]['function']['arguments'])['command'], command)
                 with self.assertRaises(ToolCallError):
@@ -122,11 +122,11 @@ class ToolDialectTests(unittest.TestCase):
                 + invoke('bash', [('command', 'pwd', True), ('description', 'Inspect', True)])
                 + '\n</｜｜DSML｜｜ calls>')
         req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=FLAT_TOOLS)
-        for entry in (api._tool_chat_with_retry, api_new.tool_chat_with_retry):
+        for entry in (api._tool_chat_with_retry,):
             with self.subTest(entry=entry.__module__), \
                     patch.object(api, '_chat_with_retry', return_value=Reply(text, 'fixture:2')) as upstream, \
                     patch.object(api, '_FORMAT_REPAIR', False), \
-                    patch('server.api.save_tool_failure'), patch('server.api_new.save_tool_failure'):
+                    patch('server.api.save_tool_failure'):
                 with self.assertRaises(ToolCallError):
                     entry('fixture prompt', req, 'expert')
                 self.assertEqual(upstream.call_count, 1)

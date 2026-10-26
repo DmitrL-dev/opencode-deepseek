@@ -413,40 +413,15 @@ fenced `tool_calls` block ([server/openai_format.py](../server/openai_format.py)
 [server/tool_protocol.py](../server/tool_protocol.py)). Without a valid call the
 agent gets ordinary text and **executes nothing**.
 
-Temporary `TOOLCALL_LEGACY` (default `1`):
+Every provider uses one contract in `server/api.py` + `server/tool_protocol.py`.
+Longer notes (Russian): [toolcall-format-repair.md](toolcall-format-repair.md).
 
-| | `TOOLCALL_LEGACY=1` (default, main-era) | `TOOLCALL_LEGACY=0` (tool-rework) |
-|--|----------------------------------------|----------------------------------|
-| Code | `server/api.py` + `server/tool_protocol.py` | `server/api_new.py` + `server/tool_protocol_new.py` |
-| Providers | One contract for everyone | Same single contract for everyone (incl. DeepSeek) |
-| Blocks | One protocol block (main-era / DeepSeek tolerances) | Several top-level `` ```tool_calls `` blocks anywhere |
-| Advice mistagged as a call | Package error | Demote to a `text` fence; no repair |
-| Invalid call | Always `invalid_tool_response` | `TOOLCALL_INVALID_MODE` (`error` / `text`) |
-| Format repair | DeepSeek only, main-era prompt | Pointed repair for every provider |
-| Continuation on `length` | Unclosed fence at reply start | Unclosed top-level fence anywhere |
-
-The flag will be removed; `TOOLCALL_INVALID_MODE` applies only when `LEGACY=0`.
-Demote, `bridge_notice`, and repeat details are in [README.en.md](../README.en.md);
-longer notes (Russian):
-[toolcall-format-repair-legacy.md](toolcall-format-repair-legacy.md) (`LEGACY=1`) and
-[toolcall-format-repair.md](toolcall-format-repair.md) (`LEGACY=0`).
-
-#### `TOOLCALL_LEGACY=0` (single contract)
-
-For **every** provider, including DeepSeek: only a top-level fenced `tool_calls`
-block is a call; mistagged advice is demoted; every remaining block must validate;
-with `FORMAT_REPAIR=1` one pointed correction (catalog / argument shape); otherwise
-`INVALID_MODE` decides the outcome. There is no DeepSeek freeze parser and no
-separate “other providers” fork under this path.
-
-#### `TOOLCALL_LEGACY=1` (main-era)
-
-Main-era path in `api` / `tool_protocol`: one whole-reply block, historical DeepSeek tolerances (missing
+One whole-reply block, historical DeepSeek tolerances (missing
 closing fence, extra `}`, DSML closers, flat fields → `arguments`, restoring one
 `]`), DeepSeek-only repair, always `invalid_tool_response`. If the model writes
 prose instead of a call, opencode prints the text and **executes nothing**.
 
-What the main-era parser keeps:
+What the parser guarantees:
 
 - only one complete `tool_calls` block occupying the entire reply becomes
   calls; JSON in prose, XML/DSML, and pseudo-calls remain ordinary text;
@@ -479,19 +454,9 @@ Malformed JSON errors report a fixed category and a line/column within the JSON
 payload, without exposing arguments. No calls from that reply are returned and
 by default the malformed response is not automatically repaired or replayed.
 
-With `LEGACY=0` and `TOOLCALL_FORMAT_REPAIR=1`, one pointed correction in the same
-conversation is allowed after a normally completed invalid reply for any provider
-(unknown → catalog; schema → argument shape). Advice with no `name` or
-unknown+prose is already demoted to `text` and is not corrected. A second failure
-follows `TOOLCALL_INVALID_MODE` (below). With `LEGACY=1`, repair remains
-DeepSeek-only (main-era prompt). Off by default; autonomy is not guaranteed.
-
-`TOOLCALL_INVALID_MODE` (`error` by default, or `text`; `LEGACY=0` only): outcome
-for an invalid call after validation or one failed correction, for **any**
-provider. `error` raises `invalid_tool_response`; `text` keeps the provider chat
-alive and marks an explicit failed step for the agent (`BRIDGE_TOOL_NOT_EXECUTED`
-in content, `bridge_notice`, `refusal`; next user turn reaches the tab as
-`Tool result (name): …`). Details in [README.en.md](../README.en.md).
+With `TOOLCALL_FORMAT_REPAIR=1`, one correction in the same DeepSeek conversation
+is allowed after a normally completed invalid reply. Off by default; autonomy is
+not guaranteed. An invalid call always ends as `invalid_tool_response`.
 
 For private reproduction of invalid tool replies, set `TOOLCALL_DIAGNOSTICS=1`.
 The last failed reply and advertised tool schemas are saved atomically to
@@ -683,10 +648,8 @@ variables take precedence.
 | `QWEN_ENABLED` | `0` | Enable Qwen Chat models on the same `/v1` endpoint |
 | `QWEN_MODELS` | `qwen3.8-omni-flash`, `qwen3.8-max`, `qwen3.7-plus` | JSON map of public id → website wire model (HTTP transport) |
 | `QWEN_PROFILE_DIR` | `session/qwen/profile` | Separate persistent Qwen Chat profile |
-| `TOOLCALL_LEGACY` | `1` | Temporary: `1` — main-era for all; `0` — one tool-rework for all (will be removed) |
-| `TOOLCALL_MAX_CONTINUATIONS` | `0` | Continuation budget on output limit; with `LEGACY=0` — unclosed fence anywhere |
-| `TOOLCALL_FORMAT_REPAIR` | `0` | `1` — one correction (`LEGACY=1`: DeepSeek only; `LEGACY=0`: DeepSeek / browser) |
-| `TOOLCALL_INVALID_MODE` | `error` | Only when `LEGACY=0`: `error` / `text` (notice + `bridge_notice`) |
+| `TOOLCALL_MAX_CONTINUATIONS` | `0` | Continuation budget on output limit (reply starts with an unclosed fence) |
+| `TOOLCALL_FORMAT_REPAIR` | `0` | `1` — one format correction, DeepSeek only |
 | `TOOLCALL_DEBUG` | — | `1` — log the raw model reply when a call can't be parsed |
 
 Example:

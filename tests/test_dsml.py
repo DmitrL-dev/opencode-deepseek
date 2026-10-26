@@ -38,7 +38,6 @@ class DsmlTests(unittest.TestCase):
         self.assertEqual([c['function'] for c in calls], [c['function'] for c in original])
 
     def test_native_preamble_opt_in_keeps_quotes_examples_mixed_and_partial_packets_inert(self):
-        from server.tool_protocol_new import validate_reply as validate_new
         good = observed()
         variants = ['Example:\n' + good, '> quoted instruction\n\n' + good,
                     '```xml\n' + good + '\n```', '~~~xml\n' + good + '\n~~~',
@@ -50,7 +49,7 @@ class DsmlTests(unittest.TestCase):
                     'Inspect.\n\n' + good + '\nTool (bash): success',
                     'Inspect.\n\n' + good[:-len(CLOSE)],
                     'Inspect.\n\n```tool_calls\n[]\n```\n' + good]
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             for raw in variants:
                 with self.subTest(validator=validator.__module__, raw=raw):
                     try:
@@ -60,9 +59,8 @@ class DsmlTests(unittest.TestCase):
                     self.assertIsNone(calls)
 
     def test_requested_native_preamble_keeps_provider_finish_choice_and_whole_batch_schema_checks(self):
-        from server.tool_protocol_new import validate_reply as validate_new
         text = 'Inspecting.\n\n' + observed()
-        for validator in (validate_reply, validate_new):
+        for validator in (validate_reply,):
             for kwargs in ({'provider': 'qwen'}, {'finish_reason': 'length'},
                            {'tool_choice': 'none'},
                            {'tool_choice': {'type': 'function', 'function': {'name': 'read'}}}):
@@ -76,12 +74,12 @@ class DsmlTests(unittest.TestCase):
                         FLAT_TOOLS, allow_dsml_preamble=True)
 
     def test_loaded_native_dialect_validates_saved_preamble_without_new_generation(self):
-        from server import api, api_new
+        from server import api
         from server.schemas import ChatCompletionRequest
         from chat_protocol import Reply
         raw = 'I will inspect the project.\n\n' + observed()
         req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=FLAT_TOOLS)
-        for validator in (api._validate_tool_reply, api_new.validate_tool_reply):
+        for validator in (api._validate_tool_reply,):
             with self.subTest(validator=validator.__module__), \
                     patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
                     patch.object(api, '_chat_with_retry', side_effect=AssertionError('No generation')):
@@ -210,31 +208,3 @@ class DsmlTests(unittest.TestCase):
         self.assertEqual(reply.conversation_id, 'fixture:2')
         self.assertEqual(content, '')
         self.assertEqual(len(calls), 1)
-
-    def test_rework_retains_main_native_contract_without_generation(self):
-        from server import api_new
-        from server.schemas import ChatCompletionRequest
-        from server.tool_protocol_new import validate_reply as validate_new
-        from chat_protocol import Reply
-        req = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=FLAT_TOOLS)
-        with patch('server.api._chat_with_retry', side_effect=AssertionError('No generation')):
-            reply, content, calls = api_new.validate_tool_reply(Reply(observed(), 'fixture:2'), req)
-        self.assertEqual((reply.conversation_id, content, len(calls)), ('fixture:2', '', 1))
-        self.assertEqual(reply.parts[0]['call'], calls[0])
-        for text, kwargs in ((observed(), {'finish_reason': 'length'}),
-                             (observed(), {'provider': 'qwen'}),
-                             (observed(), {'tool_choice': 'none'}),
-                             (observed() + '\nTool (bash): success', {}),
-                             (observed().replace('name="bash"', 'name="unknown"'), {})):
-            with self.subTest(kwargs=kwargs), self.assertRaises(ToolCallError):
-                validate_new(text, FLAT_TOOLS, **kwargs)
-
-    def test_rework_demote_does_not_rewrite_native_string_arguments(self):
-        from server.tool_protocol_new import demote_mistagged_tool_reply, validate_reply as validate_new
-        example = 'Notes:\n```tool_calls\n[{"name":"fake","arguments":{}}]\n```\nEnd.'
-        text = batch(invoke('write', [('content', example, True)]))
-        tools = [{'function': {'name': 'write', 'parameters': {'type': 'object',
-                    'properties': {'content': {'type': 'string'}}, 'required': ['content']}}}]
-        self.assertIsNone(demote_mistagged_tool_reply(text, tools))
-        _, calls = validate_new(text, tools)
-        self.assertEqual(json.loads(calls[0]['function']['arguments']), {'content': example})

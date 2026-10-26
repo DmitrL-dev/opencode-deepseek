@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest
 from tests.test_stream import event, snapshot, parse
@@ -46,8 +46,7 @@ class DsmlConflictingPayloadTests(unittest.TestCase):
         request = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=TOOLS)
         for protocol in ('json', 'dsml'):
             for text in (batch(BROKEN, VALID), batch(VALID, BROKEN)):
-                for validate, module in ((api._validate_tool_reply, api),
-                                         (api_new.validate_tool_reply, api_new)):
+                for validate, module in ((api._validate_tool_reply, api),):
                     with self.subTest(protocol=protocol, text=text, api=module.__name__), \
                             patch('server.config.DEEPSEEK_TOOL_PROTOCOL', protocol), \
                             patch.object(module, 'save_tool_failure') as saved, \

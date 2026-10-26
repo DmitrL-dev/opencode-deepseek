@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest
 from tests.test_stream import event, snapshot, parse
@@ -46,7 +46,7 @@ class DsmlStreamBoundaryTests(unittest.TestCase):
     def test_both_api_contracts_reject_without_repair_or_partial_calls(self):
         text, meta = parse(fragmented_payload())
         request = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=FLAT_TOOLS)
-        for validate, module in ((api._validate_tool_reply, api), (api_new.validate_tool_reply, api_new)):
+        for validate, module in ((api._validate_tool_reply, api),):
             with self.subTest(contract=module.__name__), \
                     patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
                     patch.object(module, 'save_tool_failure') as saved, \

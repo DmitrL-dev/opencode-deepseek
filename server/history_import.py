@@ -145,9 +145,17 @@ def claim(cache, req, scope):
     return migrated, prompt
 
 
+def canonical_call(name, arguments):
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            pass
+    return name, json.dumps(arguments, sort_keys=True, ensure_ascii=False)
+
+
 def validate_new_calls(original, reply, calls):
     """The first imported step cannot reissue any exact observed action."""
-    from .api_new import canonical_call
     from .diagnostics import save_tool_failure
     from .openai_format import ToolCallError
     observed = {m.tool_call_id for m in original.messages if m.role == 'tool'}

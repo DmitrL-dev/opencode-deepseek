@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_protocol import Reply
-from server import api, api_new
+from server import api
 from server.openai_format import ToolCallError
 from server.schemas import ChatCompletionRequest
 from tests.test_stream import event, snapshot, parse
@@ -39,8 +39,7 @@ class DsmlParameterDamageTests(unittest.TestCase):
                                    '</｜｜DSML｜｜ description"', 1)]
         for broken in mutations:
             for text in (batch(broken, CALL), batch(CALL, broken)):
-                for validate, module in ((api._validate_tool_reply, api),
-                                         (api_new.validate_tool_reply, api_new)):
+                for validate, module in ((api._validate_tool_reply, api),):
                     with self.subTest(broken=broken, text=text, api=module.__name__), \
                             patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
                             patch.object(module, 'save_tool_failure') as saved, \
@@ -55,8 +54,7 @@ class DsmlParameterDamageTests(unittest.TestCase):
     def test_exact_omitted_prefix_is_schema_bound_in_both_api_contracts(self):
         request = ChatCompletionRequest(model='deepseek-expert', messages=[], tools=TOOLS)
         text = batch(CALL.replace(PREFIX + 'target"', 'target"', 1))
-        for validate, module in ((api._validate_tool_reply, api),
-                                 (api_new.validate_tool_reply, api_new)):
+        for validate, module in ((api._validate_tool_reply, api),):
             with self.subTest(api=module.__name__), \
                     patch('server.config.DEEPSEEK_TOOL_PROTOCOL', 'dsml'), \
                     patch.object(module, 'save_tool_failure') as saved, \
