@@ -66,6 +66,14 @@ class TraceReportTests(unittest.TestCase):
         self.assertEqual(result['model_step_success'], 0.25)
         self.assertNotIn(SECRET, json.dumps(result))
 
+    def test_failed_format_correction_is_classified_by_its_own_error(self):
+        prefix = 'The single format correction also failed; no further correction was requested. '
+        self.assertEqual(classify(error(prefix + 'Invalid or incomplete DSML tool envelope; no calls')),
+                         'model_format')
+        self.assertEqual(classify(error(prefix + 'Tool arguments do not satisfy the advertised schema')),
+                         'model_schema')
+        self.assertEqual(classify(error(prefix + 'Something new')), 'model_format')
+
     def test_days_come_from_trace_names(self):
         self.trace('1023100000-deepseek.log', [frame(finish='tool_calls')])
         self.trace('1024100000-deepseek-1.log', [error('Unsupported tool-call markup; no calls were returned')])

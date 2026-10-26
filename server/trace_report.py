@@ -33,6 +33,7 @@ _CATEGORIES = (
         'The provider reached its output limit', 'The provider did not finish',
         'Could not finish the truncated', 'The format correction did not finish')),
 )
+_REPAIR_FAILED = 'The single format correction also failed; no further correction was requested. '
 MODEL_OUTCOMES = ('calls', 'text', 'model_format', 'model_schema', 'model_incomplete')
 
 
@@ -91,6 +92,13 @@ def classify(body):
     if error.get('type') != 'invalid_tool_response':
         return 'request_refused'
     message = str(error.get('message') or '')
+    if message.startswith(_REPAIR_FAILED):
+        # The bridge prefixes the corrected reply's own error: classify that.
+        message = message[len(_REPAIR_FAILED):]
+        for category, prefixes in _CATEGORIES:
+            if message.startswith(prefixes):
+                return category
+        return 'model_format'
     for category, prefixes in _CATEGORIES:
         if message.startswith(prefixes):
             return category
