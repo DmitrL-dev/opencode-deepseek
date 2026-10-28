@@ -51,6 +51,10 @@ class BrowserFailureSafetyTests(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('node'), 'Node required')
     def test_stale_dom_cannot_complete_a_new_request(self):
-        run = subprocess.run(['node', str(Path(__file__).with_name('controller_stall_fixture.cjs'))],
-                             capture_output=True, text=True, timeout=10)
+        try:
+            run = subprocess.run(['node', str(Path(__file__).with_name('controller_stall_fixture.cjs'))],
+                                 capture_output=True, text=True, timeout=10)
+        except subprocess.TimeoutExpired as error:
+            self.fail('stall fixture hung under the host event loop: '
+                      + ((error.stdout or '') + (error.stderr or '')))
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)

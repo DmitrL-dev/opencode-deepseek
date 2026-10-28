@@ -16,10 +16,17 @@ const helperAt = section.indexOf('  const geminiHtmlToMarkdown');
 const helpers = helperAt < 0 ? '' : section.slice(helperAt);
 section = helperAt < 0 ? section : section.slice(0, helperAt);
 section = section.slice(0, section.lastIndexOf('\n  }'));
+// Some CI Node builds expose a non-overridable host performance/setTimeout on
+// the VM global. Sync waits plus a real clock then busy-spin until Python's
+// 10s kill. Bind through private names so the extracted slice cannot see them.
+if (!/\bperformance\.now\(\)/.test(section) || !/\bsetTimeout\b/.test(section)) {
+  console.error('stall section no longer uses performance.now/setTimeout');
+  process.exit(2);
+}
+section = section
+  .replace(/\bperformance\.now\(\)/g, '__fixtureNow()')
+  .replace(/\bawait new Promise\(resolve => setTimeout\(resolve, 100\)\)/g, 'await __fixtureWait()');
 (async () => {
-  // Sync setTimeout(fn) + a non-mock performance.now busy-spins microtasks and
-  // starves timers (Python's 10s kill was the only exit). Always yield to the
-  // host macrotask queue and advance the fixture clock on every wait.
   const watchdog = hostSetTimeout(() => {
     console.error('stall fixture watchdog: loop did not finish');
     process.exit(2);
@@ -30,11 +37,12 @@ section = section.slice(0, section.lastIndexOf('\n  }'));
     const context = vm.createContext({
       site: {provider, stalls: true, path: /^\/chat\//}, dispatching: true,
       pending: {id: 'owned-job', sawCapture: true}, job: {id: 'owned-job', prompt: 'NEW_PROMPT'},
-      deadline, performance: {now: () => clock},
-      setTimeout: fn => {
+      deadline,
+      __fixtureNow: () => clock,
+      __fixtureWait: () => {
         if (++waits > 40) throw new Error('stall fixture wait budget exceeded');
         clock += 1000;
-        hostSetTimeout(fn, 0);
+        return new Promise(resolve => hostSetTimeout(resolve, 0));
       },
       TextEncoder, btoa,
       location: {pathname: '/chat/owned'},
