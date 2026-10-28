@@ -37,7 +37,7 @@ def _tool_instructions_mode(name, default):
 #         (recommended for browser tabs).
 # none  — like light on the first turn; no schemas on continuations.
 # All modes send this reply's tool-choice policy. An explicitly authorized
-# catalog upgrade sends complete schemas once, even in compact browser mode.
+# catalog upgrade sends complete schemas once (tool_instructions=full).
 # HTTP (DeepSeek / Qwen API / Kimi direct / Gemini CLI) defaults to full.
 # Browser tab bridge defaults to light (smaller follow-up prompts).
 TOOL_INSTRUCTIONS_HTTP = _tool_instructions_mode("TOOL_INSTRUCTIONS_HTTP", "full")

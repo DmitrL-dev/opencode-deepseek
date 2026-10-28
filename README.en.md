@@ -577,13 +577,13 @@ With `TOOLCALL_FORMAT_REPAIR=1` (off by default), an erroneous DeepSeek reply ge
 one format correction in the same conversation. A second correction is never
 requested. Verified offline.
 
-In compact browser mode, an agent's tool result (for example the option you picked)
-is sent as `Tool result (name id="..."): <result>`. IDs retain result binding;
-multiple calls to the same tool also receive an exact call mapping. Complete schemas
-are normally omitted, but the current `tool_choice` follows the result even in
-`none` mode. `auto` explicitly replaces an earlier per-reply selection; task
-constraints and schema validation remain enforced. An authorized catalog upgrade
-sends complete schemas once.
+A tool-result tail into an existing chat uses mode `none` (current `tool_choice`
+policy only) and is sent as `Tool result (name): <result>`; `id` is attached only
+when several results share a tool name. Complete schemas are omitted on that
+tail; an authorized catalog upgrade sends complete schemas once
+(`tool_instructions=full`). Automatic `auto` policy text is included in
+`full`/`medium` only; `light`/`none` continuations omit it. Task constraints and
+schema validation remain enforced.
 Verified offline.
 
 For DeepSeek, disabling `TOOLCALL_FORMAT_REPAIR` prevents an extra format-correction generation;

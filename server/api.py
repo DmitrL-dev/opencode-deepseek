@@ -523,11 +523,11 @@ def _conversation_tool_chat(prompt, req, model_type):
             handoff, archive = checkpoint(original, req.conversation_id,
                 conversation_cache.path.parent / 'context-checkpoints', local_limit=True,
                 max_text_bytes=131072 - len(messages_to_prompt([], original.tools,
-                    original.tool_choice, tools_continuation=False, provider=provider).encode('utf-8')) - 1024)
+                    original.tool_choice, conversation_continuation=False, provider=provider).encode('utf-8')) - 1024)
             migrated = original.model_copy(update={'conversation_id': None,
                 'messages': [ChatMessage(role='user', content=handoff)]})
             migration_prompt = messages_to_prompt(migrated.messages, migrated.tools,
-                migrated.tool_choice, tools_continuation=False, provider=provider)
+                migrated.tool_choice, conversation_continuation=False, provider=provider)
             if len(migration_prompt.encode('utf-8')) > 131072:
                 raise ConversationStateError('Migration prompt exceeds local limit; no new chat.')
             conversation_cache.claim_rollover(claim, req.conversation_id, archive)
@@ -543,12 +543,18 @@ def _conversation_tool_chat(prompt, req, model_type):
             succeeded = True
             return result
         if req is not original:
-            # Continuation of a saved provider chat: browser light mode may shorten tools.
+            # Continuation of a saved provider chat: tool-result tails use none
+            # (choice policy only); catalog upgrades force full schemas once.
+            if req._tool_contract_refresh:
+                tool_instructions = 'full'
+            elif any(m.role == 'tool' for m in req.messages):
+                tool_instructions = 'none'
+            else:
+                tool_instructions = None
             prompt = messages_to_prompt(
                 req.messages, req.tools, req.tool_choice,
-                tools_continuation=True, provider=provider,
-                tool_instructions='full' if req._tool_contract_refresh else None,
-                tool_results_compact=browser and not req._tool_contract_refresh)
+                conversation_continuation=True, provider=provider,
+                tool_instructions=tool_instructions)
             model_type = None
         try:
             if not req.tools:
@@ -570,11 +576,11 @@ def _conversation_tool_chat(prompt, req, model_type):
             handoff, archive = checkpoint(original, req.conversation_id,
                                           conversation_cache.path.parent / 'context-checkpoints',
                 max_text_bytes=131072 - len(messages_to_prompt([], original.tools,
-                    original.tool_choice, tools_continuation=False, provider=provider).encode('utf-8')) - 1024)
+                    original.tool_choice, conversation_continuation=False, provider=provider).encode('utf-8')) - 1024)
             migrated = original.model_copy(update={'conversation_id': None,
                 'messages': [ChatMessage(role='user', content=handoff)]})
             migration_prompt = messages_to_prompt(migrated.messages, migrated.tools,
-                migrated.tool_choice, tools_continuation=False, provider=provider)
+                migrated.tool_choice, conversation_continuation=False, provider=provider)
             if len(migration_prompt.encode('utf-8')) > 131072:
                 raise ConversationStateError('Migration prompt exceeds local limit; no new chat.')
             conversation_cache.claim_rollover(claim, req.conversation_id, archive)
@@ -1154,7 +1160,7 @@ async def _chat_completions(req: ChatCompletionRequest):
     model_type = None if req.conversation_id else resolve_model_type(req.model)
     prompt = messages_to_prompt(
         req.messages, req.tools, req.tool_choice,
-        tools_continuation=bool(req.conversation_id),
+        conversation_continuation=bool(req.conversation_id),
         provider=model_provider(req.model),
     )
 
