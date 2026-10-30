@@ -73,15 +73,20 @@ class RepetitionTests(unittest.TestCase):
                 for i in range(0, len(text), width): guard.feed(text[i:i+width])
 
     def test_prompt_has_one_canonical_form_and_no_repair_example(self):
-        for mode in ('full', 'medium', 'light'):
+        with patch.object(config, 'DEEPSEEK_TOOL_PROTOCOL', 'dsml'):
+            prompt = messages_to_prompt([ChatMessage(role='user', content='Continue')],
+                TOOLS, provider='deepseek', conversation_continuation=True, tool_instructions='full')
+        self.assertEqual(prompt.count('<｜DSML｜ calls>'), 1)
+        self.assertIn('each argument name exactly once', prompt)
+        self.assertIn('close calls exactly once and stop', prompt)
+        self.assertNotIn('an alternative is', prompt)
+        self.assertIn('not an alternative output format', prompt)
+        for mode in ('medium', 'light'):
             with patch.object(config, 'DEEPSEEK_TOOL_PROTOCOL', 'dsml'):
-                prompt = messages_to_prompt([ChatMessage(role='user', content='Continue')],
-                    TOOLS, provider='deepseek', tools_continuation=True, tool_instructions=mode)
-            self.assertEqual(prompt.count('<｜DSML｜ calls>'), 1)
-            self.assertIn('each argument name exactly once', prompt)
-            self.assertIn('close calls exactly once and stop', prompt)
-            self.assertNotIn('an alternative is', prompt)
-            self.assertIn('not an alternative output format', prompt)
+                follow = messages_to_prompt([ChatMessage(role='user', content='Continue')],
+                    TOOLS, provider='deepseek', conversation_continuation=True, tool_instructions=mode)
+            self.assertNotIn('<｜DSML｜ calls>', follow)
+            self.assertIn('Tools remain available from earlier in this chat', follow)
 
     def test_live_client_closes_stream_saves_prefix_and_never_retries(self):
         with tempfile.TemporaryDirectory() as directory, \

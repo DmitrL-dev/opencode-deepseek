@@ -165,7 +165,7 @@ def _forced_tool_name(tool_choice) -> Optional[str]:
     return None
 
 
-def _tool_choice_suffix(tool_choice, protocol="json") -> str:
+def _tool_choice_suffix(tool_choice, protocol="json", mode: str = "full") -> str:
     envelope = "complete DSML calls envelope" if protocol == "dsml" else "fenced tool_calls block"
     if _forced_tool_name(tool_choice) is not None:
         return (f"\n\nYou MUST call the tool `{_forced_tool_name(tool_choice)}` now."
@@ -175,12 +175,16 @@ def _tool_choice_suffix(tool_choice, protocol="json") -> str:
                 f" Reply with ONLY the {envelope}.")
     if tool_choice == "none":
         return "\n\nDo NOT call any tools; answer in plain text."
-    return ("\n\nTool selection for this reply is automatic; decide from the current "
-            "task and observed results whether to call tools or answer in plain text. "
-            "Earlier per-reply tool choices do not apply.")
+    if mode in ("full", "medium"):
+        return ("\n\nTool selection for this reply is automatic; decide from the current "
+                "task and observed results whether to call tools or answer in plain text. "
+                "Earlier per-reply tool choices do not apply.")
+    return ""
 
 
-def _tool_wire_rules(protocol):
+def _tool_wire_rules(protocol, mode: str = "full"):
+    if mode != "full":
+        return ""
     if protocol == "dsml":
         return (
             "To call tools, your ENTIRE reply must be one complete native DSML "
@@ -279,8 +283,8 @@ def _tool_instructions(tools: List[dict], tool_choice=None, protocol="json") -> 
         "When calling tools, follow these rules:\n"
         f"- Stop your response immediately after the {closing}. "
         "Do not simulate a tool result, execution receipt, validation message, "
-        "or another user/assistant turn. Never append a `Tool (...):` line or "
-        "invent a call_id. Wait for the host to return the actual result before "
+        "or another user/assistant turn. Never append a `Tool result (...):` line "
+        "or invent an id. Wait for the host to return the actual result before "
         "describing success or failure.\n"
         f"- The {envelope} must be the WHOLE reply. Never write any "
         "text, plan, explanation, or reasoning before or after it.\n"
@@ -431,14 +435,14 @@ def _schema_sketch(schema, depth: int = 0) -> str:
     return str(kind) if kind else "any"
 
 
-def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False, protocol="json") -> str:
+def _tool_reminder(tools: List[dict], tool_choice=None, mode: str = "medium", protocol="json") -> str:
     """Short follow-up block: `light` (names only) or `medium` (+ argument shapes)."""
     specs = _tool_specs(tools)
     if not specs:
         return ""
     names = ", ".join(spec["name"] for spec in specs)
     shape_block = ""
-    if shapes:
+    if mode not in ("light", "none"):
         lines = []
         for spec in specs:
             sketch = _schema_sketch(spec["parameters"])
@@ -451,11 +455,15 @@ def _tool_reminder(tools: List[dict], tool_choice=None, shapes: bool = False, pr
             + shape_block
             + "Prefer the latest tool results over older plans. When no action "
             "remains, reply in plain text. Never simulate a tool result.\n\n"
-            + _tool_wire_rules(protocol) + _tool_choice_suffix(tool_choice, protocol))
+            + _tool_wire_rules(protocol, mode=mode)
+            + _tool_choice_suffix(tool_choice, protocol, mode=mode))
 
 
-def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = False,
-                    protocol="json") -> str:
+def _tool_result_label(m: ChatMessage, call_names: dict) -> str:
+    return m.name or call_names.get(m.tool_call_id, "tool")
+
+
+def _render_message(m: ChatMessage, call_names: dict, *, attach_result_ids: bool = False) -> str:
     content = _text_of(m.content)
     if m.role == "assistant" and m.tool_calls:
         calls = []
@@ -478,40 +486,40 @@ def _render_message(m: ChatMessage, call_names: dict, compact_results: bool = Fa
         content = f"{content}\n{call_txt}" if content else call_txt
         return f"Assistant: {content}"
     if m.role == "tool":
-        label = m.name or call_names.get(m.tool_call_id, "tool")
-        if compact_results:
-            # Preserve the request's tool_call_id so the provider can bind this result.
-            call_id = f' id="{m.tool_call_id}"' if m.tool_call_id else ""
-            return f"Tool result ({label}{call_id}): {content}"
-        return f"Tool ({label}, call_id={m.tool_call_id or 'unknown'}): {content}"
+        label = _tool_result_label(m, call_names)
+        # Bridge-minted call ids mean nothing to the provider unless several
+        # results share a tool name and need the matching historical `"id"`.
+        call_id = f' id="{m.tool_call_id}"' if attach_result_ids and m.tool_call_id else ""
+        return f"Tool result ({label}{call_id}): {content}"
     label = _ROLE_LABELS.get(m.role, m.role.capitalize())
     return f"{label}: {content}"
 
 
 def messages_to_prompt(
     messages: List[ChatMessage], tools: List[dict] = None, tool_choice=None,
-    *, tools_continuation: bool = False, provider: str = None,
-    tool_instructions: str = None, tool_results_compact: bool = False,
+    *, conversation_continuation: bool = False, provider: str = None,
+    tool_instructions: str = None,
 ) -> str:
-    """Flatten a chat history into a single prompt DeepSeek can answer.
+    """Flatten a chat history into a single prompt the provider can answer.
 
     A lone user message (no system prompt, no tools) is sent verbatim. Otherwise
     the history is serialised with role labels and a trailing 'Assistant:' cue.
     When `tools` are given, their spec and the required reply format are injected
-    as the LAST block, immediately before the 'Assistant:' cue: DeepSeek's web
-    chat follows the instruction closest to its own turn far more reliably.
+    as the LAST block, immediately before the 'Assistant:' cue: the provider's
+    web chat follows the instruction closest to its own turn far more reliably.
 
-    `tools_continuation=True` means this turn resumes an existing provider chat.
+    `conversation_continuation=True` means this turn resumes an existing provider chat.
     Mode comes from `tool_instructions`, else TOOL_INSTRUCTIONS_BROWSER/HTTP via
     `provider` (defaults to full when neither is set). full → complete schemas
     every turn; medium → short reminder plus each tool's argument shape on
     continuations; light → short reminder (names only); none → no tools block
-    on continuations (first turn still gets the full block).
-
-    `tool_results_compact` (browser providers): a continuation that carries tool
-    results omits the schema reminder. IDs remain attached to the results.
-    The current tool-choice policy is always sent, even without a reminder;
-    an earlier turn's forced/forbidden choice must not govern the next reply.
+    on continuations (first turn still gets the full block). Callers that deliver
+    a tool-result tail into an existing chat pass none; an authorized catalog
+    upgrade passes full once. The current tool-choice policy is always sent,
+    even without a reminder. Result ids are attached only when several results
+    share a tool name; otherwise the bridge-minted id is omitted. A tool-result
+    continuation without a re-listed call mapping omits the trailing
+    'Assistant:' cue.
     """
     from .config import tool_instructions_for_provider, tool_protocol_for_provider
 
@@ -532,17 +540,12 @@ def messages_to_prompt(
         else:
             convo.append(m)
 
-    compact = bool(tool_results_compact and tools_continuation
-                   and any(m.role == "tool" for m in convo))
-    # Without a re-listed call block (see ConversationCache.prepare) the
-    # results are unambiguous and are sent bare.
-    bare_results = compact and not any(m.role == "assistant" and m.tool_calls for m in convo)
     tool_instr = ""
     if tools:
-        if compact or (mode == "none" and tools_continuation):
-            tool_instr = _tool_choice_suffix(tool_choice, protocol=protocol).strip()
-        elif mode in ("light", "medium") and tools_continuation:
-            tool_instr = _tool_reminder(tools, tool_choice, shapes=mode == "medium", protocol=protocol)
+        if mode == "none" and conversation_continuation:
+            tool_instr = _tool_choice_suffix(tool_choice, protocol=protocol, mode=mode).strip()
+        elif mode in ("light", "medium") and conversation_continuation:
+            tool_instr = _tool_reminder(tools, tool_choice, mode=mode, protocol=protocol)
         else:
             tool_instr = _tool_instructions(tools, tool_choice, protocol=protocol)
 
@@ -559,12 +562,21 @@ def messages_to_prompt(
             fn = call.get("function") or {}
             if isinstance(fn, dict) and call.get("id"):
                 call_names[call["id"]] = fn.get("name", "tool")
-    lines.extend(_render_message(m, call_names, bare_results, protocol=protocol) for m in convo)
+    tool_labels = [_tool_result_label(m, call_names) for m in convo if m.role == "tool"]
+    attach_result_ids = len(tool_labels) != len(set(tool_labels))
+    lines.extend(
+        _render_message(m, call_names, attach_result_ids=attach_result_ids) for m in convo)
     if tool_instr:
         # Mark the injected tool block as a developer instruction at the point
         # it is actually included; do not change empty/other instruction paths.
         lines.append("Developer: " + tool_instr)
-    if not bare_results:
+    # Without a re-listed call block (see ConversationCache.prepare) a
+    # tool-result continuation is sent bare (no trailing Assistant: cue).
+    if not (
+        conversation_continuation
+        and any(m.role == "tool" for m in convo)
+        and not any(m.role == "assistant" and m.tool_calls for m in convo)
+    ):
         lines.append("Assistant:")
     return "\n\n".join(lines)
 

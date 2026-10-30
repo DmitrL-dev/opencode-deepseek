@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OpenCode signed-in tab controller
 // @namespace    opencode-local-bridge
-// @version      0.3.35
+// @version      0.3.36
 // @description  Opt-in local jobs in your existing signed-in browser tab.
 // @match        https://chat.z.ai/*
 // @match        https://grok.com/*
@@ -216,7 +216,18 @@
 
   const visible = element => !!element && element.getClientRects().length > 0
     && getComputedStyle(element).visibility === "visible" && !element.closest('[inert], [aria-hidden=true]');
-  const editor = () => Array.from(document.querySelectorAll(site.input)).find(visible);
+  // Some composers mark an ancestor aria-hidden while dialogs/tool chips are open;
+  // still require a laid-out, non-inert, non-display:none control. Opt in with
+  // site.editorIgnoreAriaHidden when the shell itself stays aria-hidden.
+  const editorVisible = element => {
+    if (!element || element.getClientRects().length === 0) return false;
+    const style = getComputedStyle(element);
+    if (style.visibility === "hidden" || style.display === "none") return false;
+    if (element.closest("[inert]")) return false;
+    if (!site.editorIgnoreAriaHidden && element.closest("[aria-hidden=true]")) return false;
+    return true;
+  };
+  const editor = () => Array.from(document.querySelectorAll(site.input)).find(editorVisible);
   const block = node => node.nodeType === Node.ELEMENT_NODE && /^(P|DIV|LI|PRE|BLOCKQUOTE)$/.test(node.tagName);
   function editorText(node) {
     if (node.nodeType === Node.TEXT_NODE) return node.textContent;
@@ -347,17 +358,22 @@
     ".send-button-container, [class*='send-button-container']",
   )).find(visible) || null;
   const sendArmed = button => {
-    if (!button || button.disabled || button.getAttribute("aria-disabled") === "true"
-        || button.classList.contains("disabled")) return false;
+    if (!button || button.disabled || button.getAttribute("aria-disabled") === "true") {
+      return false;
+    }
+    // Class "disabled" can linger after the attribute is removed; the attribute
+    // is the source of truth when site.sendIgnoreDisabledClass is set.
+    if (!site.sendIgnoreDisabledClass && button.classList.contains("disabled")) return false;
     const wrap = button.closest(".chat-prompt-send-button, .send-button-container")
       || button.parentElement;
     if (wrap) {
       const style = getComputedStyle(wrap);
       if (style.pointerEvents === "none" || Number(style.opacity) < 0.5) return false;
-      if (wrap.classList.contains("disabled")) return false;
+      if (!site.sendIgnoreDisabledClass && wrap.classList.contains("disabled")) return false;
     }
     const style = getComputedStyle(button);
-    if (style.pointerEvents === "none" || Number(style.opacity) < 0.5) return false;
+    if (style.pointerEvents === "none") return false;
+    if (!site.sendIgnoreDisabledClass && Number(style.opacity) < 0.5) return false;
     return true;
   };
   const activateClick = element => {
@@ -693,7 +709,9 @@
       return;
     }
     // The extension can run before the SPA hydrates its signed-in editor.
-    for (let attempt = 0; !input && enabled && attempt < 50; attempt++) {
+    // Some sites also remount the composer between turns / while tool UI is open.
+    const editorWait = Number.isFinite(site.editorWaitAttempts) ? site.editorWaitAttempts : 50;
+    for (let attempt = 0; !input && enabled && attempt < editorWait; attempt++) {
       if (attempt % 5 === 0 && !(await rpc("/browser/check", "POST", identity(job))).active) {
         throw new BridgeFailure("The browser job was cancelled");
       }
@@ -703,7 +721,14 @@
     if (!enabled || !sameRoute(location.pathname, target)) throw new BridgeFailure("The tab changed before submission");
     if (!input) throw new BridgeFailure("The signed-in chat input is unavailable");
     await clearLeftoverDraft(input, job.prompt);
-    if (input.disabled || input.getAttribute("aria-disabled") === "true") throw new BridgeFailure("The chat input is busy");
+    for (let attempt = 0; input && (input.disabled || input.getAttribute("aria-disabled") === "true")
+        && attempt < editorWait; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+      input = editor() || input;
+    }
+    if (!input || input.disabled || input.getAttribute("aria-disabled") === "true") {
+      throw new BridgeFailure("The chat input is busy");
+    }
     if (job.submitted) throw new BridgeFailure("The prompt was already submitted");
     pending = { ...job, nonce: crypto.randomUUID(), deadline };
     // Use strings across Safari's isolated/page worlds. Do not send upstream

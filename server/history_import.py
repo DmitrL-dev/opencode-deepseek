@@ -83,7 +83,7 @@ def authorize(cache, req, scope, root, *, source_provider, ttl_seconds=600):
         raise ValueError('Explicit deepseek-official source and a 1..600 second lifetime are required')
     key = request_key(req, scope)
     tools_size = len(messages_to_prompt([], req.tools, req.tool_choice,
-                    tools_continuation=False, provider='deepseek').encode())
+                    conversation_continuation=False, provider='deepseek').encode())
     with cache.connection() as db:
         _table(db)
         if db.execute('SELECT 1 FROM history_imports WHERE key=?', (key,)).fetchone():
@@ -92,7 +92,7 @@ def authorize(cache, req, scope, root, *, source_provider, ttl_seconds=600):
                                      max_text_bytes=MAX_PROMPT - tools_size - 1024)
         migrated = req.model_copy(update={'messages': [ChatMessage(role='user', content=handoff)]})
         prompt = messages_to_prompt(migrated.messages, migrated.tools, migrated.tool_choice,
-                                    tools_continuation=False, provider='deepseek')
+                                    conversation_continuation=False, provider='deepseek')
         if len(prompt.encode()) > MAX_PROMPT:
             raise ConversationStateError('Import prompt exceeds the local limit; no request sent.')
         fd, filename = tempfile.mkstemp(prefix='import-', suffix='.txt', dir=Path(archive).parent)
@@ -136,7 +136,7 @@ def claim(cache, req, scope):
         text = _read_private(row[3], row[4], MAX_PROMPT).decode('utf-8')
         migrated = req.model_copy(update={'messages': [ChatMessage(role='user', content=text)]})
         prompt = messages_to_prompt(migrated.messages, migrated.tools, migrated.tool_choice,
-                                    tools_continuation=False, provider='deepseek')
+                                    conversation_continuation=False, provider='deepseek')
         if len(prompt.encode()) > MAX_PROMPT:
             raise ConversationStateError('Import prompt exceeds the local limit; no request sent.')
         if row[8] != _hash(prompt.encode()):

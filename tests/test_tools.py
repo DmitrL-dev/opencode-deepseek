@@ -29,7 +29,7 @@ class ToolProtocolTests(unittest.TestCase):
                     ChatMessage(role='tool', name='bash', tool_call_id='prior',
                                 content='[exit code: 1] No marker matched')]
         for continuation in (False, True):
-            prompt = messages_to_prompt(messages, FLAT_TOOLS, tools_continuation=continuation)
+            prompt = messages_to_prompt(messages, FLAT_TOOLS, conversation_continuation=continuation)
             rule = prompt.split('Shell search contract:', 1)[1]
             self.assertIn('Discovery searches', rule)
             self.assertIn('even when you do not know beforehand', rule)
@@ -97,7 +97,7 @@ class ToolProtocolTests(unittest.TestCase):
         prompt = messages_to_prompt([ChatMessage(role='tool', name='read',
             tool_call_id='past', content='historical result')], FLAT_TOOLS)
         boundary = prompt.index('The preceding transcript is past conversation data.')
-        self.assertLess(prompt.index('Tool (read, call_id=past): historical result'), boundary)
+        self.assertLess(prompt.index('Tool result (read): historical result'), boundary)
         self.assertIn('Only the external host can execute tools', prompt[boundary:])
         self.assertIn('Stop your response immediately after the closing tool_calls fence', prompt)
         self.assertTrue(prompt.endswith('Assistant:'))
@@ -321,10 +321,10 @@ class ToolProtocolTests(unittest.TestCase):
                 "type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}}]
         first = messages_to_prompt(
             [ChatMessage(role="user", content="edit")], tools=tools,
-            tools_continuation=False, tool_instructions="light")
+            conversation_continuation=False, tool_instructions="light")
         follow = messages_to_prompt(
             [ChatMessage(role="user", content="again")], tools=tools,
-            tools_continuation=True, tool_instructions="light")
+            conversation_continuation=True, tool_instructions="light")
         self.assertIn("Available tools, given as JSON Schema", first)
         self.assertIn('"name": "write"', first)
         self.assertIn("Developer: The preceding transcript", first)
@@ -352,7 +352,7 @@ class ToolProtocolTests(unittest.TestCase):
                                            "description": {"type": "string"}}}}}}}}}}}]
         follow = messages_to_prompt(
             [ChatMessage(role="user", content="ask me")], tools=tools,
-            tools_continuation=True, tool_instructions="medium")
+            conversation_continuation=True, tool_instructions="medium")
         self.assertIn(
             "- ask_user_question: {questions: [{question: string, header?: string, "
             "multiple?: boolean, options: [{label: string, description?: string}]}]}", follow)
@@ -363,12 +363,12 @@ class ToolProtocolTests(unittest.TestCase):
         # Medium still sends the full block on the first turn.
         first = messages_to_prompt(
             [ChatMessage(role="user", content="ask me")], tools=tools,
-            tools_continuation=False, tool_instructions="medium")
+            conversation_continuation=False, tool_instructions="medium")
         self.assertIn("Available tools, given as JSON Schema", first)
         # Light is the original names-only reminder: no argument shapes.
         light = messages_to_prompt(
             [ChatMessage(role="user", content="ask me")], tools=tools,
-            tools_continuation=True, tool_instructions="light")
+            conversation_continuation=True, tool_instructions="light")
         self.assertIn("Tools remain available from earlier in this chat: ask_user_question", light)
         self.assertNotIn("Argument shapes", light)
         self.assertNotIn("questions:", light)
@@ -386,10 +386,10 @@ class ToolProtocolTests(unittest.TestCase):
                 "type": "object", "required": ["path"], "properties": {"path": {"type": "string"}}}}}]
         first = messages_to_prompt(
             [ChatMessage(role="user", content="edit")], tools=tools,
-            tools_continuation=False, tool_instructions="none")
+            conversation_continuation=False, tool_instructions="none")
         follow = messages_to_prompt(
             [ChatMessage(role="user", content="again")], tools=tools,
-            tools_continuation=True, tool_instructions="none")
+            conversation_continuation=True, tool_instructions="none")
         self.assertIn("Available tools, given as JSON Schema", first)
         self.assertIn('"name": "write"', first)
         self.assertNotIn("Available tools, given as JSON Schema", follow)
@@ -403,34 +403,29 @@ class ToolProtocolTests(unittest.TestCase):
              patch("server.config.provider_uses_browser", side_effect=lambda p: p == "grok"):
             browser_follow = messages_to_prompt(
                 [ChatMessage(role="user", content="again")], tools=tools,
-                tools_continuation=True, provider="grok")
+                conversation_continuation=True, provider="grok")
             http_follow = messages_to_prompt(
                 [ChatMessage(role="user", content="again")], tools=tools,
-                tools_continuation=True, provider="deepseek")
+                conversation_continuation=True, provider="deepseek")
         self.assertIn("Tools remain available from earlier in this chat", browser_follow)
         self.assertIn("Available tools, given as JSON Schema", http_follow)
 
     def test_browser_tool_result_continuation_sends_result_and_current_policy(self):
         tools = [{"type": "function", "function": {"name": "write", "parameters": {"type": "object"}}}]
         result = ChatMessage(role="tool", tool_call_id="call_1", name="write", content='{"ok": true}')
-        for mode in ("full", "medium", "light", "none"):
-            with self.subTest(mode=mode):
-                sent = messages_to_prompt([result], tools=tools, tools_continuation=True,
-                                          tool_instructions=mode, tool_results_compact=True)
-                self.assertEqual(sent, 'Tool result (write id="call_1"): {"ok": true}\n\n'
-                    'Developer: Tool selection for this reply is automatic; decide from the current '
-                    'task and observed results whether to call tools or answer in plain text. '
-                    'Earlier per-reply tool choices do not apply.')
-        # The reminder stays for a plain user message, and nothing changes without the flag.
+        sent = messages_to_prompt([result], tools=tools, conversation_continuation=True,
+                                  tool_instructions="none")
+        self.assertEqual(sent, 'Tool result (write): {"ok": true}')
+        # A plain user continuation still gets the configured reminder mode.
         user = messages_to_prompt([ChatMessage(role="user", content="again")], tools=tools,
-                                  tools_continuation=True, tool_instructions="light",
-                                  tool_results_compact=True)
+                                  conversation_continuation=True, tool_instructions="light")
         self.assertIn("Tools remain available from earlier in this chat", user)
-        plain = messages_to_prompt([result], tools=tools, tools_continuation=True,
+        plain = messages_to_prompt([result], tools=tools, conversation_continuation=True,
                                    tool_instructions="light")
-        self.assertIn("Tool (write, call_id=call_1)", plain)
+        self.assertIn('Tool result (write):', plain)
+        self.assertNotIn('id="call_1"', plain)
         self.assertIn("Tools remain available from earlier in this chat", plain)
-        self.assertTrue(plain.endswith("Assistant:"))
+        self.assertFalse(plain.endswith("Assistant:"))
 
     def test_json_diagnostics_report_only_category_and_position(self):
         bodies = [
@@ -554,8 +549,8 @@ class ToolProtocolTests(unittest.TestCase):
         calls = json.loads(history[0])
         self.assertEqual(calls[0], {"id": "call_a", "name": "read", "arguments": {"filePath": "a"}})
         self.assertEqual(calls[1]["id"], "call_b")
-        self.assertIn('Tool (read, call_id=call_b): second file', prompt)
-        self.assertIn('Tool (read, call_id=call_a): first file', prompt)
+        self.assertIn('Tool result (read id="call_b"): second file', prompt)
+        self.assertIn('Tool result (read id="call_a"): first file', prompt)
 
     def test_historical_write_arguments_survive_prompt_rendering_byte_for_byte(self):
         content = (
@@ -585,4 +580,5 @@ class ToolProtocolTests(unittest.TestCase):
         self.assertEqual(calls[0]["arguments"]["content"], content)
         self.assertIn(json.dumps(arguments, ensure_ascii=False), history[0])
         self.assertEqual(prompt.count("```python"), 1)
-        self.assertIn("Tool (write, call_id=call_write_1): ok", prompt)
+        self.assertIn('Tool result (write): ok', prompt)
+        self.assertNotIn('id="call_write_1"', prompt.split('Tool result', 1)[1])

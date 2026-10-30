@@ -17,7 +17,7 @@ class ToolDialectTests(unittest.TestCase):
         with patch.object(config, 'DEEPSEEK_TOOL_PROTOCOL', protocol, create=True):
             return messages_to_prompt(messages or [ChatMessage(role='user', content='Inspect project')],
                 FLAT_TOOLS, choice, provider=provider, tool_instructions=mode,
-                tools_continuation=continuation)
+                conversation_continuation=continuation)
 
     def test_native_full_prompt_has_one_dialect_and_keeps_safety_contracts(self):
         prompt = self.prompt()
@@ -31,21 +31,30 @@ class ToolDialectTests(unittest.TestCase):
                            'all input fields inside `arguments`', '｜｜DSML｜｜'):
             self.assertNotIn(mixed_rule, prompt)
         self.assertIn('Never mix', prompt)
-        self.assertIn('Never append a `Tool (...):` line', prompt)
+        self.assertIn('Never append a `Tool result (...):` line', prompt)
 
     def test_native_followup_and_forced_choice_never_switch_back_to_json(self):
-        for mode in ('full', 'medium', 'light'):
-            for choice in (None, 'required', {'type': 'function', 'function': {'name': 'read'}}):
+        for choice in (None, 'required', {'type': 'function', 'function': {'name': 'read'}}):
+            with self.subTest(mode='full', choice=choice):
+                prompt = self.prompt(mode='full', choice=choice, continuation=True)
+                self.assertIn('DSML', prompt)
+                self.assertIn('<｜DSML｜ calls>', prompt)
+                self.assertNotIn('｜｜DSML｜｜', prompt)
+                self.assertNotIn('```tool_calls', prompt)
+                self.assertNotIn('ONLY the fenced', prompt)
+                if choice == 'required':
+                    self.assertIn('MUST call one of the tools', prompt)
+                elif isinstance(choice, dict):
+                    self.assertIn('MUST call the tool `read`', prompt)
+        for mode in ('medium', 'light'):
+            for choice in ('required', {'type': 'function', 'function': {'name': 'read'}}):
                 with self.subTest(mode=mode, choice=choice):
                     prompt = self.prompt(mode=mode, choice=choice, continuation=True)
-                    self.assertIn('DSML', prompt)
-                    self.assertIn('<｜DSML｜ calls>', prompt)
-                    self.assertNotIn('｜｜DSML｜｜', prompt)
+                    self.assertNotIn('<｜DSML｜ calls>', prompt)
                     self.assertNotIn('```tool_calls', prompt)
-                    self.assertNotIn('ONLY the fenced', prompt)
                     if choice == 'required':
                         self.assertIn('MUST call one of the tools', prompt)
-                    elif isinstance(choice, dict):
+                    else:
                         self.assertIn('MUST call the tool `read`', prompt)
         self.assertIn('Do NOT call any tools', self.prompt(choice='none'))
 
@@ -59,7 +68,7 @@ class ToolDialectTests(unittest.TestCase):
         self.assertIn('Historical tool calls (JSON data):', prompt)
         self.assertIn('"id": "call_fixture"', prompt)
         self.assertIn(json.dumps(arguments, ensure_ascii=False), prompt)
-        self.assertIn('Tool (bash, call_id=call_fixture): two\nlines', prompt)
+        self.assertIn('Tool result (bash): two\nlines', prompt)
 
     def test_other_providers_and_default_json_are_unchanged(self):
         self.assertIn('```tool_calls', self.prompt(protocol='json'))
